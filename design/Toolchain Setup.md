@@ -119,6 +119,21 @@ mode. **Do not merge these two calls back together.**
 This structure exists to satisfy [[Agent Prompt]]'s "no debug-only code paths left enabled by
 default" rule *structurally* rather than by remembering to turn a flag off before submission.
 
+## Trap: zero-initialised statics land in `.data`, not `.bss`
+
+On PE/COFF, `-fdata-sections` makes GCC emit zero-initialised statics as `.data$name` COMDAT
+sections rather than `.bss`. `.data` is stored in the executable file; `.bss` is not. Measured
+2026-08-02: four world-sized `static` arrays put **39,648 bytes of literal zeros** into
+`wayfarer.exe`.
+
+Moving them to stack locals recovered **39,424 bytes** at no runtime cost. Peak stack use is about
+36 KB against a 2 MB default, so this is free.
+
+**Rule for this project: never declare a world-sized buffer `static`.** Use a stack local, or heap
+memory if it outgrows the stack. Verify with `objdump -h` — if `.data` is large and `.bss` is
+small, this is happening again. It gets worse as the world grows, so check after any change to
+world dimensions.
+
 ## Verified toolchain facts
 
 - Zero shipped DLLs. Imports are OS-provided only: `KERNEL32 USER32 GDI32 ADVAPI32 SHELL32

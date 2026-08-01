@@ -10,13 +10,20 @@ Exploration-driven memory-restoration game for the 2P Game Arcade 1.44MB Floppy 
 - [[Agent Prompt]] — role, engineering loop, QA rules, language/toolchain rationale for whoever (human or agent) is writing code against this plan.
 
 ## Design
-- [[Pending Team Discussion]] — game plan is not finalized yet; will be filled in here, one linked note per system, once the team has decided
-- [[Toolchain Setup]] — build environment, why we compile our own minimal SDL2, and the ~250 KB size reserve we have not spent yet
+- [[Overview]] — core concept, confirmed pillars/naming, loop, judging-criteria alignment
+- [[World Generation]]
+- [[Fog and Reveal]]
+- [[Abilities]]
+- [[Fragments]]
+- [[Found Souls]]
+- [[Audio and Synth]]
+- [[Save and UI]]
+- [[Open Decisions]] — unresolved questions to settle before/during Week 1–2
+- [[Cut List]] — pre-committed descoping order if time runs short
+- [[QA Checklist]] — continuous verification rules
 
 ## Progress
-- [[INDEX]] — running log of every build session, current `.exe` size, current status. Every session note there links back to whichever system(s) it touched.
-
-**Current build:** 669,696 bytes — 770,304 under the ship target. See [[2026-08-01-session-01]].
+- devlog/INDEX.md — running log of every build session, current `.exe` size, current status. Every session note there links back to whichever system(s) it touched.
 
 ## Constraints (do not lose these)
 - Byte budget: target comfortably under 1,440,000 bytes (safety margin below the 1,474,560-byte floppy-standard limit — "1.44MB" has three different definitions, so build in margin)
