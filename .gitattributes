@@ -1,0 +1,9 @@
+# Normalise line endings so diffs stay clean across machines.
+* text=auto eol=lf
+
+# PowerShell is happiest with CRLF on Windows.
+*.ps1 text eol=crlf
+
+# Never touch binaries.
+*.exe binary
+*.f32 binary

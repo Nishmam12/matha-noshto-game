@@ -1,0 +1,23 @@
+# Build output. Binaries are rebuilt from source in under a second; keeping a
+# 670 KB executable that changes on every build out of git history matters when
+# the whole project is a size-discipline exercise.
+build/
+
+# Obsidian workspace state. The vault's *content* (notes and their links) is
+# tracked; the editor's UI layout and installed plugins are not.
+.obsidian/
+
+# Toolchain and dependencies live outside the repo entirely — see README.md.
+# Listed defensively in case anyone relocates them under the project root.
+tools/
+w64devkit/
+SDL2*/
+sdl2-src/
+sdl2-build/
+
+# Scratch
+*.map
+*.f32
+*.o
+*.obj
+*.exe
