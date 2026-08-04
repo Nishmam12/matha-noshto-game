@@ -89,6 +89,16 @@
 #define DIA_W     (2 * ISO_HW)                          /* 64 */
 #define DIA_H     (2 * ISO_HH)                          /* 32 */
 #define ELEV_MAX  48                                    /* tallest raised tile, px */
+#define ELEV_STEP 12    /* one terrace per ring of distance into a rock mass */
+#define ELEV_WATER (-6) /* water sits below the ground plane */
+#define ELEV_LEDGE 16   /* Climb terrain reads as a shelf before you can climb */
+
+/* Face shading — the whole lighting model. One notional light from the upper
+ * left, no normals and no dot products: the top face keeps its true colour and
+ * each side face is scaled by a fixed percentage. Two constants do the entire
+ * job of making flat colour read as volume. */
+#define FACE_L 58   /* down-left face, per cent of true colour */
+#define FACE_R 76   /* down-right face */
 #define ISO_OX    (WORLD_H * TILE)                      /* 1440 */
 #define ISO_OY    ELEV_MAX
 #define ISO_MAP_W ((WORLD_W + WORLD_H) * TILE)          /* 4000 */
@@ -448,6 +458,13 @@ typedef struct {
     Uint8  solid[WORLD_H][WORLD_W];
     float  reveal[WORLD_H][WORLD_W]; /* 0 = fogged and colourless, 1 = restored */
     Uint8  region[WORLD_H][WORLD_W]; /* REGION_NONE where solid or unreachable */
+    /* DERIVED, RENDER-ONLY. Draw height in screen px, computed once at the end
+     * of game_init and read only by render. Collision still consults `solid`
+     * and regions[].terrain and nothing else, so no movement, reachability,
+     * gating or playthrough result can observe this. Keep it that way: the
+     * moment collision reads it, the 50-seed completability proof has to be
+     * re-argued rather than merely re-run. */
+    Sint8  height[WORLD_H][WORLD_W];
     Region regions[REGION_COUNT];
     int    region_count;
     int    spawn_region;
@@ -1124,6 +1141,69 @@ static int flood_open(const World *w, Uint8 *seen, int *stack, int sx, int sy,
     return count;
 }
 
+/* Draw height per tile, derived from `solid` plus the region's terrain. Rock
+ * rises in terraces toward the interior of a mass, via a two-pass chamfer
+ * distance transform, so a cliff edge gets a rounded rim rather than a slab
+ * wall and an isolated pillar stays short. Water sinks; Climb terrain is
+ * raised, which makes that ability gate legible before you have the ability.
+ *
+ * Render-only, and deliberately the last thing game_init does: it needs
+ * regions[].terrain, and nothing downstream may depend on it.
+ *
+ * `dist` is a function local, never a static — see the .data trap in
+ * design/Toolchain Setup.md. */
+static void world_heights(World *w)
+{
+    Uint8 dist[WORLD_H][WORLD_W];
+    int x, y, d;
+
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            dist[y][x] = (Uint8)(w->solid[y][x] ? 200 : 0);
+
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            if (!dist[y][x]) continue;
+            d = dist[y][x];
+            if (y > 0 && dist[y - 1][x] + 1 < d) d = dist[y - 1][x] + 1;
+            if (x > 0 && dist[y][x - 1] + 1 < d) d = dist[y][x - 1] + 1;
+            dist[y][x] = (Uint8)d;
+        }
+    for (y = WORLD_H - 1; y >= 0; y--)
+        for (x = WORLD_W - 1; x >= 0; x--) {
+            if (!dist[y][x]) continue;
+            d = dist[y][x];
+            if (y < WORLD_H - 1 && dist[y + 1][x] + 1 < d) d = dist[y + 1][x] + 1;
+            if (x < WORLD_W - 1 && dist[y][x + 1] + 1 < d) d = dist[y][x + 1] + 1;
+            dist[y][x] = (Uint8)d;
+        }
+
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            int h;
+            if (w->solid[y][x]) {
+                h = dist[y][x] * ELEV_STEP;
+                if (h > ELEV_MAX) h = ELEV_MAX;
+            } else {
+                Uint8 rg = w->region[y][x];
+                int t = (rg == REGION_NONE) ? TERRAIN_NORMAL
+                                            : w->regions[rg].terrain;
+                h = (t == TERRAIN_WATER) ? ELEV_WATER
+                  : (t == TERRAIN_LEDGE) ? ELEV_LEDGE : 0;
+            }
+            w->height[y][x] = (Sint8)h;
+        }
+}
+
+/* Out-of-world reads as ground level, so border tiles draw their full front
+ * face and the void clear covers everything past the rim. */
+static int height_at(const World *w, int tx, int ty)
+{
+    if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H)
+        return 0;
+    return w->height[ty][tx];
+}
+
 /* Spawn in the LARGEST open region, not merely the nearest open tile.
  * Measured: nearest-tile spawning dropped the player into a sealed one-tile
  * pocket on 3 of 20 seeds, where movement and therefore the whole reveal
@@ -1209,6 +1289,11 @@ static int game_init(Game *g, Rngs *rngs)
         regions_depth(&g->w, depth);
         g->gen_attempts = world_place_and_verify(&g->w, rngs, depth, g->ents);
     }
+
+    /* Last, and after terrain assignment: purely derived, purely for drawing.
+     * The pathological-seed early return above leaves height all zeros courtesy
+     * of the SDL_zero at the top, which draws flat and is correct. */
+    world_heights(&g->w);
 
     g->cam_x = 0;
     g->cam_y = 0;
@@ -1483,15 +1568,33 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
         for (tx = lo; tx <= hi; tx++) {
             int ty = band - tx;
             int ax = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
-            int cr, cg, cb;
+            int cr, cg, cb, h, hl, hr;
+            float rev;
+            Uint32 top, c_l = 0, c_r = 0;
             if (ax + ISO_HW <= 0 || ax - ISO_HW >= fb->w)
                 continue;
+
+            /* (tx, ty+1) is down-left on screen and (tx+1, ty) is down-right,
+             * which is exactly the pair of faces this tile can show. A drop of
+             * zero or less means the neighbour hides that face entirely. */
+            h  = g->w.height[ty][tx];
+            hl = h - height_at(&g->w, tx, ty + 1);
+            hr = h - height_at(&g->w, tx + 1, ty);
+            if (hl < 0) hl = 0;
+            if (hr < 0) hr = 0;
+
             tile_colour(g, tx, ty, overlay, &cr, &cg, &cb);
-            /* Heights are all zero until the elevation slice; iso_tile is
-             * already the full version, so nothing here changes when they
-             * stop being zero. */
-            iso_tile(fb, ax, ay, 0, 0, 0,
-                     fog_lerp(fb, cr, cg, cb, tile_reveal(g, tx, ty, overlay)), 0, 0);
+            rev = tile_reveal(g, tx, ty, overlay);
+            top = fog_lerp(fb, cr, cg, cb, rev);
+            /* Most tiles are flat, so the side colours are only computed when
+             * there is actually a face to paint with them. */
+            if (hl)
+                c_l = fog_lerp(fb, cr * FACE_L / 100, cg * FACE_L / 100,
+                               cb * FACE_L / 100, rev);
+            if (hr)
+                c_r = fog_lerp(fb, cr * FACE_R / 100, cg * FACE_R / 100,
+                               cb * FACE_R / 100, rev);
+            iso_tile(fb, ax, ay, h, hl, hr, top, c_l, c_r);
         }
     }
 
@@ -1522,9 +1625,12 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
         } else {
             cr = 0xff; cg = 0xd7; cb = 0x6a; s = 12;
         }
-        /* Entities are tile-anchored, so project the tile centre. */
+        /* Entities are tile-anchored, so project the tile centre, then lift by
+         * the tile's height — without this a fragment on a ledge is drawn
+         * buried in the cliff it sits on. */
         world_to_iso((float)(ex * TILE + TILE / 2), (float)(ey * TILE + TILE / 2),
                      &sx, &sy);
+        sy -= height_at(&g->w, ex, ey);
         fill_rect(fb, sx - s / 2 - g->cam_x, sy - s / 2 - g->cam_y, s, s,
                   SDL_MapRGB(fb->format, (Uint8)cr, (Uint8)cg, (Uint8)cb));
     }
@@ -1536,6 +1642,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
         int px, py;
         Uint32 c = SDL_MapRGB(fb->format, 0xff, 0xf0, 0xc0);
         world_to_iso(g->p.x, g->p.y, &px, &py);
+        py -= height_at(&g->w, (int)(g->p.x / TILE), (int)(g->p.y / TILE));
         px -= g->cam_x;
         py -= g->cam_y;
         fill_rect(fb, px - 22, py - 26, 44, 4, c);
@@ -1545,8 +1652,13 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
     }
 
     {
+        /* Lifted onto the tile it stands on. The camera deliberately is NOT
+         * lifted: following the visual height would jerk the whole view by 16 px
+         * the instant you step onto a ledge, where letting the player ride up
+         * within the frame reads as climbing. */
         int px, py;
         world_to_iso(g->p.x, g->p.y, &px, &py);
+        py -= height_at(&g->w, (int)(g->p.x / TILE), (int)(g->p.y / TILE));
         fill_rect(fb, px - PLAYER_SIZE / 2 - g->cam_x,
                   py - PLAYER_SIZE / 2 - g->cam_y, PLAYER_SIZE, PLAYER_SIZE,
                   SDL_MapRGB(fb->format, 0xe0, 0x64, 0x28));
@@ -2917,6 +3029,9 @@ int main(int argc, char **argv)
 #endif
 #if WAYFARER_SELFTEST
     const char *shot = arg_val(argc, argv, "--shot");
+    /* Start with F1 already held down, so a scripted screenshot can show
+     * terrain and elevation without fog hiding most of it. */
+    overlay = arg_flag(argc, argv, "--overlay");
 #endif
 
 #if WAYFARER_SELFTEST
