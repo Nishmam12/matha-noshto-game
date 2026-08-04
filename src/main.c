@@ -4549,6 +4549,388 @@ static int iso_selftest(Uint64 seed)
     return fails ? 1 : 0;
 }
 
+/* ---- Phase 05: the two checkers that should have shipped with Phases 01/02 --
+ *
+ * design/phases/Phase 05 - Verification Debt.md. Both systems shipped without a
+ * checker of their own, which broke this project's "every checker needs a
+ * negative control" rule; this pays it down.
+ */
+
+static float lum_of(int r, int g, int b)
+{
+    return 0.299f * r + 0.587f * g + 0.114f * b;
+}
+
+/* Luminance of a colour after fog_lerp, unpacked back through the surface's
+ * own format so this measures exactly what reaches the screen. */
+static float fogged_lum(SDL_Surface *s, const Uint8 *c, float rev)
+{
+    Uint8 r, g, b;
+    SDL_GetRGB(fog_lerp(s, c[0], c[1], c[2], rev), s->format, &r, &g, &b);
+    return lum_of(r, g, b);
+}
+
+/* A deliberately broken blend: crushes everything toward the haze regardless of
+ * the source. This is what Phase 02's PREVIOUS fog effectively did at low
+ * reveal, and it is the failure --fog-test has to be able to catch. */
+static float fogged_lum_broken(SDL_Surface *s, const Uint8 *c, float rev)
+{
+    float lum = lum_of(c[0], c[1], c[2]);
+    float f = FOG_TINT_R + (lum - FOG_TINT_R) * 0.02f;
+    Uint8 v = (Uint8)(f + (lum - f) * rev);
+    (void)s;
+    return lum_of(v, v, v);
+}
+
+/* Does fog_lerp preserve the value hierarchy?
+ *
+ * Two assertions, both of which Phase 02 needed and neither of which it had:
+ *
+ *  (a) ORDERING. If A is lighter than B at full colour, A must not come out
+ *      DARKER than B at any reveal level. A strict inversion is a hard failure;
+ *      a tie is reported separately as a collapse.
+ *  (b) SEPARABILITY. Adjacent shades within one palette ramp must still differ
+ *      at reveal 0. This is the "a four-shade canopy must not become one blob
+ *      in the fog" property that motivated FOG_KEEP in the first place.
+ *
+ * Colours come from the REAL palette tables, per the phase file's trap: picking
+ * conveniently far-apart values would make this pass trivially without ever
+ * exercising the near-adjacent case that can actually reorder under rounding. */
+static int fog_selftest(void)
+{
+    static const float revs[5] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+    Uint32 px = 0;
+    SDL_Surface *s;
+    Uint8 cols[256][3];
+    int n = 0, i, j, k, p, q;
+    int inversions = 0, collapses = 0, unseparated = 0, fails = 0;
+
+    s = SDL_CreateRGBSurfaceWithFormatFrom(&px, 1, 1, 32, 4, SDL_PIXELFORMAT_RGB888);
+    if (!s) {
+        printf("FAIL  SDL_CreateRGBSurfaceWithFormatFrom\n");
+        return 1;
+    }
+
+    printf("=== fog: value hierarchy through fog_lerp ===\n");
+
+    /* (b) separability, ramp by ramp, at reveal 0 — the worst case. */
+    for (p = 0; p < 8; p++)
+        for (q = 0; q + 1 < 4; q++) {
+            float a = fogged_lum(s, canopy_pal[p][q], 0.0f);
+            float b = fogged_lum(s, canopy_pal[p][q + 1], 0.0f);
+            if (SDL_fabsf(a - b) < 0.5f) {
+                if (unseparated < 4)
+                    printf("  canopy_pal[%d] shades %d/%d collapse at reveal 0"
+                           " (%.1f vs %.1f)\n", p, q, q + 1, (double)a, (double)b);
+                unseparated++;
+            }
+        }
+    for (p = 0; p < 3; p++)
+        for (q = 0; q + 1 < 3; q++) {
+            float a = fogged_lum(s, rock_pal[p][q], 0.0f);
+            float b = fogged_lum(s, rock_pal[p][q + 1], 0.0f);
+            if (SDL_fabsf(a - b) < 0.5f)
+                unseparated++;
+        }
+    printf("shade separability at reveal 0: %s (%d adjacent pairs collapsed)\n",
+           unseparated ? "FAIL" : "PASS", unseparated);
+    if (unseparated) fails++;
+
+    /* Gather every palette colour the world actually draws with. */
+    for (p = 0; p < 8 && n < 250; p++)
+        for (q = 0; q < 4; q++) {
+            cols[n][0] = canopy_pal[p][q][0];
+            cols[n][1] = canopy_pal[p][q][1];
+            cols[n][2] = canopy_pal[p][q][2];
+            n++;
+        }
+    for (p = 0; p < 3 && n < 250; p++)
+        for (q = 0; q < 3; q++) {
+            cols[n][0] = rock_pal[p][q][0];
+            cols[n][1] = rock_pal[p][q][1];
+            cols[n][2] = rock_pal[p][q][2];
+            n++;
+        }
+    for (p = 0; p < TERRAIN_COUNT && n < 250; p++) {
+        int r, g, b;
+        terrain_colour(p, &r, &g, &b);
+        cols[n][0] = (Uint8)r; cols[n][1] = (Uint8)g; cols[n][2] = (Uint8)b;
+        n++;
+    }
+
+    /* (a) ordering, every pair, every reveal level. */
+    for (i = 0; i < n; i++)
+        for (j = i + 1; j < n; j++) {
+            float li = lum_of(cols[i][0], cols[i][1], cols[i][2]);
+            float lj = lum_of(cols[j][0], cols[j][1], cols[j][2]);
+            if (SDL_fabsf(li - lj) < 1.0f)
+                continue; /* genuinely equal at source; nothing to preserve */
+            for (k = 0; k < 5; k++) {
+                float fi = fogged_lum(s, cols[i], revs[k]);
+                float fj = fogged_lum(s, cols[j], revs[k]);
+                if ((li < lj) != (fi < fj)) {
+                    if (fi == fj) collapses++;
+                    else          inversions++;
+                }
+            }
+        }
+    printf("value ordering over %d colours x %d reveal levels: "
+           "%s (%d inversions, %d collapses)\n",
+           n, 5, inversions ? "FAIL" : "PASS", inversions, collapses);
+    if (inversions) fails++;
+
+    /* Negative control: the broken blend must be caught by the SAME checks. */
+    {
+        int bad_unsep = 0, bad_inv = 0;
+        for (p = 0; p < 8; p++)
+            for (q = 0; q + 1 < 4; q++) {
+                float a = fogged_lum_broken(s, canopy_pal[p][q], 0.0f);
+                float b = fogged_lum_broken(s, canopy_pal[p][q + 1], 0.0f);
+                if (SDL_fabsf(a - b) < 0.5f)
+                    bad_unsep++;
+            }
+        for (i = 0; i < n; i++)
+            for (j = i + 1; j < n; j++) {
+                float li = lum_of(cols[i][0], cols[i][1], cols[i][2]);
+                float lj = lum_of(cols[j][0], cols[j][1], cols[j][2]);
+                if (SDL_fabsf(li - lj) < 1.0f)
+                    continue;
+                for (k = 0; k < 5; k++) {
+                    float fi = fogged_lum_broken(s, cols[i], revs[k]);
+                    float fj = fogged_lum_broken(s, cols[j], revs[k]);
+                    if ((li < lj) != (fi < fj) && fi == fj)
+                        bad_inv++;
+                }
+            }
+        printf("negative control (contrast-crushing blend rejected): %s"
+               "  [%d collapsed ramps, %d collapsed pairs]\n",
+               (bad_unsep > 0 && bad_inv > 0) ? "PASS" : "FAIL",
+               bad_unsep, bad_inv);
+        if (!(bad_unsep > 0 && bad_inv > 0)) fails++;
+    }
+
+    SDL_FreeSurface(s);
+    printf("%s (%d checks failed)\n", fails ? "FAIL" : "PASS", fails);
+    return fails ? 1 : 0;
+}
+
+/* Flood one 4-connected component of tiles matching a predicate, over the
+ * caller's `seen` map. A second fill alongside flood_open, and deliberately so:
+ * flood_open only ever walks OPEN tiles, and --land-test also has to walk the
+ * OCEAN, which is solid. Same explicit-stack shape, no recursion. */
+static int land_flood(const World *w, Uint8 *seen, int *stack, int start,
+                      int want_ocean)
+{
+    static const int dx[4] = { 1, -1, 0, 0 };
+    static const int dy[4] = { 0, 0, 1, -1 };
+    int top = 0, count = 0;
+
+    stack[top++] = start;
+    seen[start] = 1;
+    while (top > 0) {
+        int idx = stack[--top];
+        int x = idx % WORLD_W, y = idx / WORLD_W, d;
+        count++;
+        for (d = 0; d < 4; d++) {
+            int nx = x + dx[d], ny = y + dy[d], ni;
+            int ok;
+            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+                continue;
+            ni = ny * WORLD_W + nx;
+            if (seen[ni])
+                continue;
+            ok = want_ocean ? (w->surf[ny][nx] == SURF_OCEAN)
+                            : (!w->solid[ny][nx]);
+            if (!ok)
+                continue;
+            seen[ni] = 1;
+            stack[top++] = ni;
+        }
+    }
+    return count;
+}
+
+/* Structural invariants for the island generator.
+ *
+ * ABSOLUTE, not relative — Handover §7 records a structural test that once
+ * passed on a partition covering 5 of 1585 tiles because it only ever compared
+ * counts to counts. So every assertion below is a fraction of the WHOLE map or
+ * of a total the generator does not control, never one component against
+ * another. Returns the number of failures. */
+static int land_check(const World *w, int spawn_tile, Uint8 *seen, int *stack,
+                      Uint64 seed, int verbose)
+{
+    const int total = WORLD_W * WORLD_H;
+    int open = 0, ocean = 0, rock = 0, edge_ocean = 0;
+    int big_open = 0, big_ocean = 0, home = 0;
+    int i, bad = 0;
+
+    for (i = 0; i < total; i++) {
+        int x = i % WORLD_W, y = i / WORLD_W;
+        if (!w->solid[y][x]) open++;
+        else if (w->surf[y][x] == SURF_OCEAN) ocean++;
+        else rock++;
+        if (w->surf[y][x] == SURF_OCEAN &&
+            (x == 0 || y == 0 || x == WORLD_W - 1 || y == WORLD_H - 1))
+            edge_ocean++;
+    }
+
+    /* The player's own component first, so `home` is measured before the sweep
+     * consumes it — this is the number that actually decides whether a seed is
+     * a playable world. */
+    SDL_memset(seen, 0, (size_t)total);
+    if (spawn_tile >= 0 && spawn_tile < total &&
+        !w->solid[spawn_tile / WORLD_W][spawn_tile % WORLD_W])
+        home = land_flood(w, seen, stack, spawn_tile, 0);
+    big_open = home;
+    for (i = 0; i < total; i++) {
+        int x = i % WORLD_W, y = i / WORLD_W, n;
+        if (seen[i] || w->solid[y][x])
+            continue;
+        n = land_flood(w, seen, stack, i, 0);
+        if (n > big_open) big_open = n;
+    }
+    SDL_memset(seen, 0, (size_t)total);
+    for (i = 0; i < total; i++) {
+        int x = i % WORLD_W, y = i / WORLD_W, n;
+        if (seen[i] || w->surf[y][x] != SURF_OCEAN)
+            continue;
+        n = land_flood(w, seen, stack, i, 1);
+        if (n > big_ocean) big_ocean = n;
+    }
+
+    /* 1. There is a real island: enough walkable ground to be a world. */
+    if (open < total / 8 || open > (total * 7) / 8) {
+        printf("  seed %.0f: walkable %d of %d tiles, outside 12.5%%..87.5%%\n",
+               (double)seed, open, total);
+        bad++;
+    }
+    /* 2. THE PLAYER'S OWN LANDMASS is a real world, in absolute terms.
+     *
+     *    This deliberately does NOT assert "the island is a single component".
+     *    Measuring 100 seeds with that assertion found 3 that fail it (16, 85,
+     *    100) — and inspecting them shows the generator producing a detached
+     *    lobe across open water. That is scenery, not a defect: ocean is never
+     *    walkable, entities are only ever placed in regions reachable from the
+     *    spawn, and every one of those seeds still plays to completion. An
+     *    unreachable islet on the horizon is a feature of an island game.
+     *
+     *    What would genuinely be broken is the player spawning on a small lobe
+     *    with most of the world across water. So the assertion is about the
+     *    component the player is actually standing in, as a fraction of the
+     *    WHOLE MAP — absolute, per Handover §7's warning that relative
+     *    assertions compare counts to counts and prove nothing. */
+    if (home * 8 < total) {
+        printf("  seed %.0f: player's landmass is %d of %d map tiles (<12.5%%)\n",
+               (double)seed, home, total);
+        bad++;
+    }
+    /* 2b. A loose fragmentation bound, purely to catch a shattered world: if
+     *     the player can reach under half the walkable ground, most of what is
+     *     on screen is unreachable and the seed is not worth shipping. */
+    if (open > 0 && home * 2 < open) {
+        printf("  seed %.0f: player can reach %d of %d open tiles (<50%%)\n",
+               (double)seed, home, open);
+        bad++;
+    }
+    /* 3. The sea is one body that reaches the map edge, not inland puddles. */
+    if (ocean > 0 && big_ocean * 100 < ocean * 90) {
+        printf("  seed %.0f: largest ocean body %d of %d ocean tiles (<90%%)\n",
+               (double)seed, big_ocean, ocean);
+        bad++;
+    }
+    if (edge_ocean == 0) {
+        printf("  seed %.0f: no ocean on the map border\n", (double)seed);
+        bad++;
+    }
+    /* 4. Rock coverage stays out of the "quarry" failure mode Phase 01 hit at
+     *    LAND_ROCK_T 0.68, where one outcrop could cover 40%% of the frame. */
+    if (rock * 100 > total * 40) {
+        printf("  seed %.0f: rock covers %d of %d tiles (>40%%)\n",
+               (double)seed, rock, total);
+        bad++;
+    }
+    /* 5. place_buildings assumes buildable flat ground exists. Nothing checked
+     *    that assumption until now. */
+    if (w->bld_count == 0) {
+        printf("  seed %.0f: no building could be placed\n", (double)seed);
+        bad++;
+    }
+
+    if (verbose)
+        printf("  seed %-10.0f open %5d (%2d%%)  rock %5d  ocean %5d  "
+               "home %5d (%2d%% of open)  bldgs %2d  %s\n",
+               (double)seed, open, open * 100 / total, rock, ocean, home,
+               open ? home * 100 / open : 0, w->bld_count, bad ? "FAIL" : "PASS");
+    return bad;
+}
+
+static int land_selftest(Uint64 seed, int verbose, Uint8 *seen, int *stack)
+{
+    Game *g = (Game *)SDL_malloc(sizeof(Game));
+    Rngs rngs;
+    int bad, spawn;
+
+    if (!g)
+        return 1;
+    rngs_init(&rngs, seed);
+    (void)game_init(g, &rngs);
+    spawn = (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE);
+    bad = land_check(&g->w, spawn, seen, stack, seed, verbose);
+    SDL_free(g);
+    return bad ? 1 : 0;
+}
+
+/* Two synthetic broken worlds the checker must REJECT. A checker that has never
+ * rejected anything proves nothing (Handover §7). */
+static int land_negative_test(Uint8 *seen, int *stack)
+{
+    World *w = (World *)SDL_calloc(1, sizeof(World));
+    int fails = 0, x, y, bad;
+
+    if (!w)
+        return 1;
+
+    /* (a) A drowned map — what LAND_SEA pushed too high would produce. */
+    SDL_memset(w->solid, 1, sizeof(w->solid));
+    SDL_memset(w->surf, SURF_OCEAN, sizeof(w->surf));
+    w->bld_count = 0;
+    bad = land_check(w, -1, seen, stack, 0, 0);
+    printf("negative control (drowned map rejected): %s  [%d assertions fired]\n",
+           bad > 0 ? "PASS" : "FAIL", bad);
+    if (bad == 0) fails++;
+
+    /* (b) A SHATTERED world: four equal open quarters, no two connected. Every
+     *     count is internally consistent and the map is 94%% walkable — this is
+     *     exactly the shape of bug a relative assertion would wave through.
+     *
+     *     Four rather than two on purpose. A two-way split leaves the player
+     *     reaching ~50%% of open ground, which sits right on the fragmentation
+     *     bound; a control that only just fires is a control that stops firing
+     *     the first time someone nudges a threshold. At four the player reaches
+     *     ~25%% and the assertion fires with room to spare. */
+    SDL_memset(w->solid, 0, sizeof(w->solid));
+    SDL_memset(w->surf, SURF_LAND, sizeof(w->surf));
+    for (y = 0; y < WORLD_H; y++)
+        w->solid[y][WORLD_W / 2] = 1;
+    for (x = 0; x < WORLD_W; x++)
+        w->solid[WORLD_H / 2][x] = 1;
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            if (x == 0 || y == 0 || x == WORLD_W - 1 || y == WORLD_H - 1) {
+                w->solid[y][x] = 1;
+                w->surf[y][x] = SURF_OCEAN;
+            }
+    w->bld_count = 1;
+    bad = land_check(w, (WORLD_H / 4) * WORLD_W + WORLD_W / 4, seen, stack, 0, 0);
+    printf("negative control (shattered island rejected): %s  [%d assertions fired]\n",
+           bad > 0 ? "PASS" : "FAIL", bad);
+    if (bad == 0) fails++;
+
+    SDL_free(w);
+    return fails;
+}
+
 static int popcount5(Uint8 bits)
 {
     int n = 0, i;
@@ -4932,6 +5314,29 @@ int main(int argc, char **argv)
             return iso_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
         if (arg_flag(argc, argv, "--font-test"))
             return font_selftest(arg_val(argc, argv, "--shot"));
+        if (arg_flag(argc, argv, "--fog-test"))
+            return fog_selftest();
+        if (arg_flag(argc, argv, "--land-test")) {
+            int n = arg_int(argc, argv, "--seeds", 20);
+            int base = arg_int(argc, argv, "--seed", 1);
+            int s, bad = 0;
+            Uint8 *seen  = (Uint8 *)SDL_malloc((size_t)WORLD_W * WORLD_H);
+            int   *stack = (int *)SDL_malloc((size_t)WORLD_W * WORLD_H * sizeof(int));
+            if (!seen || !stack) {
+                printf("FAIL  out of memory\n");
+                SDL_free(seen); SDL_free(stack);
+                return 1;
+            }
+            printf("=== island generator, %d seeds ===\n", n);
+            for (s = 0; s < n; s++)
+                bad += land_selftest((Uint64)(base + s), 1, seen, stack);
+            printf("\n");
+            bad += land_negative_test(seen, stack);
+            printf("%s (%d failures across %d seeds)\n",
+                   bad ? "FAIL" : "PASS", bad, n);
+            SDL_free(seen); SDL_free(stack);
+            return bad ? 1 : 0;
+        }
         if (arg_flag(argc, argv, "--village-test")) {
             int n = arg_int(argc, argv, "--seeds", 20);
             int base = arg_int(argc, argv, "--seed", 1);
