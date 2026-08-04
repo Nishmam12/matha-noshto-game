@@ -47,6 +47,27 @@ Used for the minimap/debug overlay in [[World Generation]] and [[Fog and Reveal]
 ## On the mockup's art style — important scope note
 The pitch mockup (painted vistas, atmospheric lighting, detailed character portraits) is **pitch/branding art, not an in-engine target.** Our architecture has zero external image assets — no PNGs, no sprite sheets, no SDL_image (see [[Agent Prompt]]). What renders in-engine is flat-shaded procedural geometry: simple shapes, a fog-to-color blend, generated silhouettes for Found Souls. This is a deliberate, load-bearing constraint, not a shortfall — make sure the whole team knows the shipped game will look markedly simpler than the mockup, on purpose.
 
+> **Superseded in part, 2026-08-04.** The team asked for an isometric 2.5D pixel-art look closer
+> to the mockup, and it was built — see [[Isometric Rendering]] and [[2026-08-04-session-01]].
+>
+> **What changed:** the renderer is no longer flat top-down squares. It is a 2:1 isometric
+> projection at 32 px tiles with elevation and cliff faces, per-tile surface detail, layered
+> procedural trees, and mix-and-match procedural houses.
+>
+> **What did NOT change, and is still load-bearing:** zero external asset files. Every one of
+> those visuals is hand-written C that draws rectangles. There are still no PNGs, no sprite
+> sheets, and no SDL_image. The trees are 8 palettes × shape jitter, not 8,192 drawings; the
+> houses are 9 mix-and-match parts, not 640,000 drawings.
+>
+> **What is still true about the mockup:** its *density of unique painted detail* is not
+> reachable and was never the target. No per-leaf shading, no character portrait, no gilded UI
+> frames. The shipped game is a stylised member of the same family, not a reproduction. Say so
+> to the team rather than letting the screenshots imply otherwise.
+>
+> The size argument that justified the original constraint turned out to be the weakest part of
+> it: the entire isometric renderer cost about 10 KB against 750 KB of headroom. The real
+> constraint was always that every visual has to be *written*, not that it has to be *small*.
+
 ## HUD / legend (confirmed, with one deliberate change)
 - **You** (player marker), **Restored Region**, **Unrestored Region**, **Found Soul**, **Fragment** — kept from the mockup, maps directly onto [[Save and UI]]
 - **Hearts/health icons — dropped.** The mockup shows hearts, but we have no combat and nothing that damages the player. Kept in only as a leftover from the pitch template; excluding them removes a whole (fake) system before it gets built.

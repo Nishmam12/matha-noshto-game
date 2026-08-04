@@ -33,3 +33,18 @@ No SDL_image. No PNGs, no sprite sheets — see [[Agent Prompt]] for the exclude
 
 ## Note on the mockup's visual style
 The mockup's painted, atmospheric before/after art is pitch art, not the in-engine target — see [[Overview]]'s art-style note. What ships is flat-shaded procedural geometry with this same fog-to-color logic, not a painted scene.
+
+> **Updated 2026-08-04 — the geometry changed, this system did not.** The renderer is now
+> isometric 2.5D (see [[Isometric Rendering]]), so "flat-shaded procedural geometry" above is out
+> of date as a description of the *look*. It remains exactly right about the *method*: still
+> procedural, still no sprites, still no asset files.
+>
+> **`fog_lerp` survived the rewrite unchanged and is still the single path from true colour to
+> screen colour.** Every new surface routes through it — tile top faces, both cliff side faces,
+> every tree lobe, every roof ring, every window. That was a deliberate constraint on the
+> isometric work, because [[Cut List]] lists the fog-reveal core feel as never-cut.
+>
+> One thing to watch that did not exist before: a tree canopy is four shades and a cliff has two
+> face shades, so the blend now has to preserve *relative* luminance or detail collapses to a
+> grey blob in fog. It does — `fog_lerp` scales luminance rather than replacing it — but this has
+> only been checked by eye at a few reveal levels, not measured.

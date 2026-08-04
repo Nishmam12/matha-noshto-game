@@ -14,6 +14,7 @@ Exploration-driven memory-restoration game for the 2P Game Arcade 1.44MB Floppy 
 - [[Overview]] — core concept, confirmed pillars/naming, loop, judging-criteria alignment
 - [[World Generation]]
 - [[Fog and Reveal]]
+- [[Isometric Rendering]]
 - [[Abilities]]
 - [[Fragments]]
 - [[Found Souls]]
