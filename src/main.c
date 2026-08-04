@@ -191,6 +191,14 @@ static FogTune fog_tune = { FOG_TINT_R, FOG_TINT_G, FOG_TINT_B, FOG_KEEP };
 /* Render cap, separate from the simulation rate on purpose. */
 #define FRAME_HZ 60.0
 
+/* Follow camera. The deadzone is asymmetric because the projection is: screen y
+ * is compressed 2:1 against screen x, so an equal-pixel deadzone would feel
+ * twice as loose vertically as horizontally. Halving it keeps the box square in
+ * WORLD terms, which is what the player's motion actually is. */
+#define CAM_DEADZONE   PX(30)      /* px off-centre before the camera moves */
+#define CAM_DEADZONE_Y (PX(30) / 2)
+#define CAM_EASE       0.16f       /* fraction of the excess closed per frame */
+
 #define AUDIO_RATE     48000
 #define AUDIO_CHANNELS 2
 #define AUDIO_SAMPLES  1024 /* frames per callback; ~21 ms at 48 kHz */
@@ -613,6 +621,14 @@ typedef struct {
     int    frags_restored;  /* tracked separately from souls, per Fragments.md */
     int    souls_restored;
     int    cam_x, cam_y;
+    /* Eased camera position, kept in floats because the ease is sub-pixel: at
+     * integer precision a remaining distance under 1 px truncates to no motion
+     * and the camera stalls just short of its target forever. cam_x/cam_y stay
+     * the integers everything else reads. cam_ready is 0 after game_init's
+     * wipe, which is what makes the first frame of a new world SNAP rather than
+     * slide in from the top-left corner. */
+    float  cam_fx, cam_fy;
+    int    cam_ready;
 } Game;
 
 typedef struct {
@@ -1373,14 +1389,40 @@ static int world_stage(const Game *g)
 
 static void sim_step(Game *g, const Input *in, float dt)
 {
-    float mx = (float)(in->right - in->left);
-    float my = (float)(in->down - in->up);
+    /* Input is SCREEN-aligned: W is up on screen, D is right on screen.
+     *
+     * It used to be world-aligned, which meant W travelled up-RIGHT — world +x
+     * projects to screen down-right (see world_to_iso), so feeding the keys
+     * straight into world axes rotated every intention by 45 degrees. That was
+     * a named open decision from before the isometric pivot, deferred because
+     * it rewrites every trajectory in the simulation.
+     *
+     * The rotation is the inverse of the projection's basis. Screen-right is
+     * world (+1,-1) and screen-down is world (+1,+1), so:
+     *
+     *     wx = sx + sy
+     *     wy = sy - sx
+     *
+     * That vector is NOT unit length, and its length depends on the direction:
+     * sqrt(2) for a screen axis, 2 for a screen diagonal. Normalising by the
+     * actual length — rather than the old special-case 0.7071 on diagonals
+     * only — is what keeps speed direction-independent, and it now holds for
+     * all eight directions rather than the two the old code happened to cover.
+     *
+     * move_axis is deliberately untouched: it resolves a world-space velocity
+     * into collision-respecting motion and has no opinion about where that
+     * velocity came from, which is exactly why collision behaviour (swept AABB,
+     * wall sliding by independent-axis resolution) is unchanged by any of this. */
+    float sx = (float)(in->right - in->left);
+    float sy = (float)(in->down - in->up);
+    float mx = sx + sy;
+    float my = sy - sx;
+    float len = SDL_sqrtf(mx * mx + my * my);
     int i;
 
-    /* Normalise diagonals, or moving corner-wise is 1.41x faster than straight. */
-    if (mx != 0.0f && my != 0.0f) {
-        mx *= 0.70710678f;
-        my *= 0.70710678f;
+    if (len > 0.0f) {
+        mx /= len;
+        my /= len;
     }
 
     move_axis(g, mx * PLAYER_SPEED * dt, 0.0f);
@@ -2967,14 +3009,48 @@ static void camera_follow(Game *g, int view_w, int view_h)
 {
     int max_x = ISO_MAP_W - view_w;
     int max_y = ISO_MAP_H + 2 * ELEV_MAX - view_h;
+    int tx, ty;
+    float ftx, fty;
 
-    world_to_iso(g->p.x, g->p.y, &g->cam_x, &g->cam_y);
-    g->cam_x -= view_w / 2;
-    g->cam_y -= view_h / 2;
-    if (g->cam_x < 0) g->cam_x = 0;
-    if (g->cam_y < 0) g->cam_y = 0;
-    if (max_x > 0 && g->cam_x > max_x) g->cam_x = max_x;
-    if (max_y > 0 && g->cam_y > max_y) g->cam_y = max_y;
+    world_to_iso(g->p.x, g->p.y, &tx, &ty);
+    ftx = (float)(tx - view_w / 2);
+    fty = (float)(ty - view_h / 2);
+
+    if (!g->cam_ready) {
+        /* First frame of a world: snap. Easing in from wherever the previous
+         * world left the camera would read as the map sliding into place. */
+        g->cam_fx = ftx;
+        g->cam_fy = fty;
+        g->cam_ready = 1;
+    } else {
+        /* Deadzone, then an exponential ease on the excess. Small steps leave
+         * the camera completely still, which is the point: the old code
+         * re-centred every frame, so at pixel scale every footstep was a visible
+         * one-pixel jump of the entire world. Only motion big enough to matter
+         * moves the frame, and then it arrives smoothly.
+         *
+         * Per FRAME, not per simulation tick — this is render-only state and
+         * camera_follow is called once per frame. The frame rate is capped at
+         * FRAME_HZ, so the effective time constant is stable in practice; it
+         * would drift on a machine that cannot hold the cap, which is a known
+         * and accepted simplification for a follow camera. */
+        float dx = ftx - g->cam_fx;
+        float dy = fty - g->cam_fy;
+        if (dx >  CAM_DEADZONE) g->cam_fx += (dx - CAM_DEADZONE) * CAM_EASE;
+        else if (dx < -CAM_DEADZONE) g->cam_fx += (dx + CAM_DEADZONE) * CAM_EASE;
+        if (dy >  CAM_DEADZONE_Y) g->cam_fy += (dy - CAM_DEADZONE_Y) * CAM_EASE;
+        else if (dy < -CAM_DEADZONE_Y) g->cam_fy += (dy + CAM_DEADZONE_Y) * CAM_EASE;
+    }
+
+    /* Clamp in float so the eased position cannot accumulate outside the world
+     * and then take several frames to crawl back in once the player turns. */
+    if (g->cam_fx < 0.0f) g->cam_fx = 0.0f;
+    if (g->cam_fy < 0.0f) g->cam_fy = 0.0f;
+    if (max_x > 0 && g->cam_fx > (float)max_x) g->cam_fx = (float)max_x;
+    if (max_y > 0 && g->cam_fy > (float)max_y) g->cam_fy = (float)max_y;
+
+    g->cam_x = (int)(g->cam_fx + 0.5f);
+    g->cam_y = (int)(g->cam_fy + 0.5f);
 }
 
 /* --- window and presentation ---------------------------------------------
@@ -3528,7 +3604,8 @@ static int autopilot_tick(Game *g, Scratch *sc)
     SDL_zero(in);
     {
         /* Aim at the next tile centre, or the entity itself on the last leg. */
-        float wx, wy, ddx, ddy;
+        float wx, wy, ddx, ddy, sdx, sdy;
+        int wantx, wanty;
         if (next >= 0) {
             wx = (float)(next % WORLD_W) * TILE + TILE * 0.5f;
             wy = (float)(next / WORLD_W) * TILE + TILE * 0.5f;
@@ -3538,10 +3615,36 @@ static int autopilot_tick(Game *g, Scratch *sc)
         }
         ddx = wx - g->p.x;
         ddy = wy - g->p.y;
-        if (ddx > 0.6f) in.right = 1;
-        else if (ddx < -0.6f) in.left = 1;
-        if (ddy > 0.6f) in.down = 1;
-        else if (ddy < -0.6f) in.up = 1;
+        /* The autopilot picks its target in WORLD space, but Input is now
+         * screen-aligned (see sim_step), so the desired direction has to be
+         * rotated into screen intent before it becomes keypresses. Inverse of
+         * sim_step's basis:
+         *
+         *     sx = wx - wy      sy = wx + wy
+         *
+         * Without this the autopilot would still reach its targets — it is
+         * descending a BFS field, so it self-corrects — while pressing the
+         * wrong keys the whole way. --play-test would stay 50/50 and hide a
+         * genuinely broken input mapping, which is exactly the failure the
+         * phase file warned about.
+         *
+         * The DEADBAND IS APPLIED FIRST, IN WORLD SPACE, and only the resulting
+         * discrete -1/0/+1 intent is rotated. Rotating the raw deltas and
+         * thresholding afterwards livelocks: ddx=+0.5, ddy=-0.5 is inside the
+         * rest zone on both world axes, but rotates to sdx=1.0, which clears
+         * the threshold. The autopilot then twitches where it used to sit
+         * still, overshoots by a full 2.75 px step, and oscillates between two
+         * tiles forever — 3 of 3 seeds hit the 200,000-step cap having restored
+         * almost nothing. Judging "close enough" in the space the target lives
+         * in is what keeps the rest condition identical to before. */
+        wantx = (ddx > 0.6f) - (ddx < -0.6f);
+        wanty = (ddy > 0.6f) - (ddy < -0.6f);
+        sdx = (float)(wantx - wanty);
+        sdy = (float)(wantx + wanty);
+        in.right = sdx > 0.0f;
+        in.left  = sdx < 0.0f;
+        in.down  = sdy > 0.0f;
+        in.up    = sdy < 0.0f;
     }
     sim_step(g, &in, TICK_DT);
     return 0;
@@ -3816,44 +3919,122 @@ static int reach_selftest(Uint64 seed, int verbose, int *relaxed)
  * number of ticks must cover the same distance. Without the 0.707 factor,
  * diagonal travel comes out 1.41x too fast — a bug that is easy to ship and
  * annoying to notice. */
-static int speed_selftest(void)
+/* Did the player move in the screen direction the key asked for? Screen y is
+ * halved by the projection, so this compares by sign agreement per axis rather
+ * than by exact vector equality. Shared by speed_selftest and its negative
+ * control, so both judge alignment by identical rules. */
+static int dir_aligned(int sx0, int sy0, int sx1, int sy1, int kx, int ky)
 {
+    float ssx = (float)(sx1 - sx0), ssy = (float)(sy1 - sy0);
+    float wx = (float)kx, wy = (float)ky;
+    float sl = SDL_sqrtf(ssx * ssx + ssy * ssy);
+    float wl = SDL_sqrtf(wx * wx + wy * wy);
+
+    if (sl > 0.0f) { ssx /= sl; ssy /= sl; }
+    if (wl > 0.0f) { wx /= wl; wy /= wl; }
+    return (ssx > 0.05f) == (wx > 0.05f) && (ssx < -0.05f) == (wx < -0.05f)
+        && (ssy > 0.05f) == (wy > 0.05f) && (ssy < -0.05f) == (wy < -0.05f);
+}
+
+/* Negative control for the screen-direction half of speed_selftest.
+ *
+ * Replays the OLD world-aligned mapping — input straight into world axes, with
+ * the old special-case 0.7071 on diagonals — and requires the alignment check
+ * to REJECT it. Without this, "screen dir correct" on all 8 directions proves
+ * only that the checker agrees with the code, not that it can tell right from
+ * wrong. The specific bug it must catch is the one this phase existed to fix:
+ * W travelling up-right instead of up. */
+static int input_negative_test(void)
+{
+    static const int kx[4] = { 1, -1, 0,  0 };
+    static const int ky[4] = { 0,  0, 1, -1 };
+    const float ox = (float)(WORLD_W / 2) * TILE;
+    const float oy = (float)(WORLD_H / 2) * TILE;
     Game g;
-    Input in;
-    int i, fails = 0;
-    float straight, diagonal, expect = PLAYER_SPEED; /* 60 ticks = 1 second */
+    int d, i, caught = 0;
 
-    SDL_zero(g);
-    g.p.x = (float)(WORLD_W / 2) * TILE;
-    g.p.y = (float)(WORLD_H / 2) * TILE;
-
-    SDL_zero(in);
-    in.right = 1;
-    for (i = 0; i < 60; i++)
-        sim_step(&g, &in, TICK_DT);
-    straight = g.p.x - (float)(WORLD_W / 2) * TILE;
-
-    g.p.x = (float)(WORLD_W / 2) * TILE;
-    g.p.y = (float)(WORLD_H / 2) * TILE;
-    SDL_zero(in);
-    in.right = 1;
-    in.down = 1;
-    for (i = 0; i < 60; i++)
-        sim_step(&g, &in, TICK_DT);
-    {
-        float dx = g.p.x - (float)(WORLD_W / 2) * TILE;
-        float dy = g.p.y - (float)(WORLD_H / 2) * TILE;
-        diagonal = SDL_sqrtf(dx * dx + dy * dy);
+    for (d = 0; d < 4; d++) {
+        int sx0, sy0, sx1, sy1;
+        SDL_zero(g);
+        g.p.x = ox;
+        g.p.y = oy;
+        world_to_iso(g.p.x, g.p.y, &sx0, &sy0);
+        /* The old sim_step body, verbatim in behaviour. */
+        for (i = 0; i < 60; i++) {
+            move_axis(&g, (float)kx[d] * PLAYER_SPEED * TICK_DT, 0.0f);
+            move_axis(&g, 0.0f, (float)ky[d] * PLAYER_SPEED * TICK_DT);
+        }
+        world_to_iso(g.p.x, g.p.y, &sx1, &sy1);
+        if (!dir_aligned(sx0, sy0, sx1, sy1, kx[d], ky[d]))
+            caught++;
     }
 
-    printf("straight travel, 60 ticks : %.2f px (expected %.2f)\n",
-           (double)straight, (double)expect);
-    printf("diagonal travel, 60 ticks : %.2f px (must match straight)\n",
-           (double)diagonal);
+    printf("negative control (world-aligned input rejected): %s  [%d of 4 caught]\n",
+           caught == 4 ? "PASS" : "FAIL", caught);
+    return caught == 4 ? 0 : 1;
+}
 
-    if (SDL_fabsf(straight - expect) > 1.0f) fails++;
-    if (SDL_fabsf(diagonal - straight) > 1.0f) fails++;
-    printf("direction-independent speed: %s\n", fails ? "NO" : "yes");
+/* Direction-independent speed, over all eight directions rather than the two
+ * the previous version happened to cover.
+ *
+ * The old test measured `straight` as the change in world x under in.right,
+ * which only worked while input was world-aligned. Now that input is
+ * screen-aligned a single key produces a world diagonal, so measuring one axis
+ * would report 0.707 of the speed and "fail" a correct simulation. The
+ * invariant that actually matters was never about axes: it is that travel
+ * DISTANCE per unit time does not depend on which way you walk. That is what
+ * this asserts, and it is basis-independent — it would survive another change
+ * of input orientation without being rewritten again.
+ *
+ * Also checks each direction ends up where the screen says it should, which is
+ * the part that would have caught the old up-right bug. */
+static int speed_selftest(void)
+{
+    /* right, left, down, up, and the four screen diagonals */
+    static const int kx[8] = {  1, -1,  0,  0,  1,  1, -1, -1 };
+    static const int ky[8] = {  0,  0,  1, -1,  1, -1,  1, -1 };
+    static const char *const name[8] = {
+        "right", "left", "down", "up", "down-right", "up-right",
+        "down-left", "up-left"
+    };
+    const float ox = (float)(WORLD_W / 2) * TILE;
+    const float oy = (float)(WORLD_H / 2) * TILE;
+    const float expect = PLAYER_SPEED; /* 60 ticks = 1 second */
+    Game g;
+    Input in;
+    int d, i, fails = 0;
+
+    for (d = 0; d < 8; d++) {
+        float dx, dy, dist;
+        int sx0, sy0, sx1, sy1, aligned;
+
+        SDL_zero(g);
+        g.p.x = ox;
+        g.p.y = oy;
+        SDL_zero(in);
+        in.right = kx[d] > 0; in.left = kx[d] < 0;
+        in.down  = ky[d] > 0; in.up   = ky[d] < 0;
+
+        world_to_iso(g.p.x, g.p.y, &sx0, &sy0);
+        for (i = 0; i < 60; i++)
+            sim_step(&g, &in, TICK_DT);
+        world_to_iso(g.p.x, g.p.y, &sx1, &sy1);
+
+        dx = g.p.x - ox;
+        dy = g.p.y - oy;
+        dist = SDL_sqrtf(dx * dx + dy * dy);
+        aligned = dir_aligned(sx0, sy0, sx1, sy1, kx[d], ky[d]);
+
+        printf("%-11s: travelled %6.2f px (expect %6.2f), screen dir %s\n",
+               name[d], (double)dist, (double)expect,
+               aligned ? "correct" : "WRONG");
+        if (!aligned) fails++;
+        if (SDL_fabsf(dist - expect) > 1.0f) fails++;
+    }
+
+    printf("direction-independent speed, all 8 directions: %s\n",
+           fails ? "NO" : "yes");
+    fails += input_negative_test();
     return fails;
 }
 
