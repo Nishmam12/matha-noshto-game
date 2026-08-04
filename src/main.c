@@ -32,14 +32,21 @@
 #define WIN_W 640
 #define WIN_H 360
 
-/* Week 1 placeholder world. Larger than the view so exploration means moving
- * the camera, which is what makes the reveal read as discovery. */
-#define TILE     16
+/* Larger than the view so exploration means moving the camera, which is what
+ * makes the reveal read as discovery.
+ *
+ * TILE went 16 -> 32 for the isometric pass: a 64x32 diamond gives procedural
+ * props and buildings room to show their layering, where a 32x16 one did not.
+ * Everything below that is expressed as a fraction of TILE was scaled with it,
+ * so collision is unchanged in tile terms — player_blocked divides by TILE, so
+ * doubling both the player box and the tile cancels exactly. Only absolute
+ * pixel numbers move (speed_selftest's 110.00 becomes 220.00). */
+#define TILE     32
 #define WORLD_W  80
 #define WORLD_H  45
 
-#define PLAYER_SIZE  12
-#define PLAYER_SPEED 110.0f /* world px/sec */
+#define PLAYER_SIZE  24
+#define PLAYER_SPEED 220.0f /* world px/sec; 6.9 tiles/sec, as before */
 
 #define REVEAL_TILES 5     /* sight radius, in tiles */
 #define REVEAL_RATE  2.5f  /* sight units/sec */
@@ -56,11 +63,45 @@
 #define SIGHT_MAX    0.42f
 #define RESTORE_RATE 0.9f  /* region restoration units/sec once triggered */
 
-#define INTERACT_RADIUS 22.0f /* world px */
+#define INTERACT_RADIUS 44.0f /* world px; same fraction of a tile as before */
 
 #define FOG_TINT_R 44.0f
 #define FOG_TINT_G 52.0f
 #define FOG_TINT_B 68.0f
+
+/* --- Isometric projection ------------------------------------------------
+ *
+ * A 2:1 diamond. Picking ISO_HW == TILE and ISO_HH == TILE/2 is the whole
+ * trick: the world-to-screen transform then collapses to
+ *
+ *     sx = wx - wy + ISO_OX
+ *     sy = (wx + wy) / 2 + ISO_OY
+ *
+ * — one subtract and one halve, no multiplies and no matrix, exact for integer
+ * inputs. It also holds at any tile size, which is why the 16 -> 32 change cost
+ * nothing here.
+ *
+ * sx = wx - wy is negative over half the world, so ISO_OX pushes the map right
+ * by the world's height in pixels; ISO_OY leaves headroom above the north rim
+ * for tiles raised by up to ELEV_MAX. See design/systems/Isometric Rendering.md. */
+#define ISO_HW    TILE                                  /* 32, diamond half-width  */
+#define ISO_HH    (TILE / 2)                            /* 16, diamond half-height */
+#define DIA_W     (2 * ISO_HW)                          /* 64 */
+#define DIA_H     (2 * ISO_HH)                          /* 32 */
+#define ELEV_MAX  48                                    /* tallest raised tile, px */
+#define ISO_OX    (WORLD_H * TILE)                      /* 1440 */
+#define ISO_OY    ELEV_MAX
+#define ISO_MAP_W ((WORLD_W + WORLD_H) * TILE)          /* 4000 */
+#define ISO_MAP_H (((WORLD_W + WORLD_H) * TILE) / 2)    /* 2000 */
+#define BAND_MAX  (WORLD_W + WORLD_H - 2)               /* largest tx+ty */
+
+/* The void outside the landmass. The flat renderer never needed a screen clear
+ * because its tile loop covered every pixel; diamonds only tile the plane where
+ * the world exists, so beyond the rim there is nothing to draw and the clear
+ * stops being optional. */
+#define VOID_R 0x0a
+#define VOID_G 0x0c
+#define VOID_B 0x14
 
 /* Fixed simulation step. Decoupling simulation from render rate keeps movement
  * frame-rate independent and, more importantly for QA, makes a given input
@@ -1266,6 +1307,82 @@ static void fill_rect(SDL_Surface *s, int x, int y, int w, int h, Uint32 colour)
     }
 }
 
+/* World pixels -> isometric map pixels. The camera is NOT applied here; callers
+ * subtract cam_x/cam_y, exactly as the flat renderer did. */
+static void world_to_iso(float wx, float wy, int *sx, int *sy)
+{
+    *sx = (int)(wx - wy) + ISO_OX;
+    *sy = (int)((wx + wy) * 0.5f) + ISO_OY;
+}
+
+/* Vertical run. x is clipped by the caller (once per tile, not once per column),
+ * so only y is tested here. Striding by pitch sounds cache-hostile, but a whole
+ * diamond is 64 adjacent columns of at most ~80 px — a working set small enough
+ * to stay resident while consecutive columns re-touch the same lines. */
+static void vspan(SDL_Surface *s, int x, int y, int n, Uint32 c)
+{
+    Uint8 *p;
+
+    if (n <= 0)
+        return;
+    if (y < 0) { n += y; y = 0; }
+    if (y + n > s->h) n = s->h - y;
+    if (n <= 0)
+        return;
+
+    PERF_COUNT(n);
+    p = (Uint8 *)s->pixels + y * s->pitch + x * 4;
+    while (n--) {
+        *(Uint32 *)p = c;
+        p += s->pitch;
+    }
+}
+
+/* One ground tile: the raised diamond top face plus its two visible side faces,
+ * drawn as a single contiguous vertical run per screen column, split into
+ * (top colour, side colour).
+ *
+ * For column i of DIA_W, with a = |i - ISO_HW|, the top face starts at a>>1 and
+ * runs DIA_H - a pixels. That is the exact preimage of the tile under the
+ * inverse projection rather than a slope walk, which is what makes the tiling
+ * provably gap-free: for the east neighbour a_A + a_B = DIA_W/2 exactly, and
+ * requiring A's bottom to equal B's top reduces to an identity that holds for
+ * both parities of a. Same for the south neighbour. Total per diamond works out
+ * at DIA_W * DIA_H / 2 px, which is what a diamond must be.
+ *
+ * Elevation then costs nothing extra: raising the tile by h leaves a hole
+ * exactly h tall starting exactly where the top face ended, so the side face is
+ * the same column immediately below. There is no second edge computation that
+ * could disagree with the first, which is the usual source of iso seams.
+ *
+ * hl/hr are the drops to the front-left and front-right neighbours, already
+ * clamped at 0 by the caller so hidden faces are never drawn. */
+static void iso_tile(SDL_Surface *fb, int ax, int ay, int h, int hl, int hr,
+                     Uint32 top, Uint32 cl, Uint32 cr)
+{
+    int i, i0 = 0, i1 = DIA_W;
+    int x0 = ax - ISO_HW;
+
+    if (x0 < 0)
+        i0 = -x0;
+    if (x0 + i1 > fb->w)
+        i1 = fb->w - x0;
+    if (i0 >= i1)
+        return;
+
+    for (i = i0; i < i1; i++) {
+        int a = i - ISO_HW;
+        int y, n, left;
+        if (a < 0)
+            a = -a;
+        y = ay - h + (a >> 1);
+        n = DIA_H - a;
+        left = (i < ISO_HW);
+        vspan(fb, x0 + i, y, n, top);
+        vspan(fb, x0 + i, y + n, left ? hl : hr, left ? cl : cr);
+    }
+}
+
 /* The core visual hook, and the one piece of this slice that is not a
  * placeholder: colour = lerp(drained grey, true colour, restoration%).
  * See design/systems/Fog and Reveal.md. */
@@ -1300,50 +1417,81 @@ static void terrain_colour(int terrain, int *r, int *g, int *b)
     }
 }
 
+/* How much of a tile's colour reaches the screen: sight shows shape,
+ * restoration brings colour, and whichever is stronger wins — so a restored
+ * region stays lit after you leave it, because restoration is permanent and
+ * sight is not a memory of colour. */
+static float tile_reveal(const Game *g, int tx, int ty, int overlay)
+{
+    Uint8 rg;
+    float rev, restored;
+
+    if (overlay)
+        return 1.0f;
+    rg = g->w.region[ty][tx];
+    restored = (rg == REGION_NONE) ? 0.0f : g->w.regions[rg].restoration;
+    rev = g->w.reveal[ty][tx];
+    return restored > rev ? restored : rev;
+}
+
+/* Ground colour before fog, as flat r/g/b. */
+static void tile_colour(const Game *g, int tx, int ty, int overlay,
+                        int *cr, int *cg, int *cb)
+{
+    if (g->w.solid[ty][tx]) {
+        *cr = 0x5a; *cg = 0x4a; *cb = 0x3c;
+    } else {
+        Uint8 reg = g->w.region[ty][tx];
+        terrain_colour(reg == REGION_NONE ? TERRAIN_NORMAL
+                                          : g->w.regions[reg].terrain, cr, cg, cb);
+        /* Alternate brightness by region id so boundaries are visible without
+         * needing a font or an outline pass. */
+        if (overlay && reg != REGION_NONE && (reg & 1)) {
+            *cr = *cr * 3 / 4; *cg = *cg * 3 / 4; *cb = *cb * 3 / 4;
+        }
+    }
+}
+
 static void render(SDL_Surface *fb, Game *g, int overlay)
 {
-    int tx, ty, i;
-    int tx0 = g->cam_x / TILE;
-    int ty0 = g->cam_y / TILE;
-    int tx1 = (g->cam_x + fb->w) / TILE + 1;
-    int ty1 = (g->cam_y + fb->h) / TILE + 1;
+    int band, b0, b1, i, y;
+    Uint32 voidc = SDL_MapRGB(fb->format, VOID_R, VOID_G, VOID_B);
 
-    for (ty = ty0; ty <= ty1; ty++) {
-        for (tx = tx0; tx <= tx1; tx++) {
-            Uint32 c;
+    /* Mandatory now, unlike in the flat renderer: outside the landmass and in
+     * the ELEV_MAX strip above the north rim there is simply nothing to draw.
+     * SDL_memset4 is SDL_FORCE_INLINE, so this costs no link bytes. */
+    for (y = 0; y < fb->h; y++)
+        SDL_memset4((Uint8 *)fb->pixels + y * fb->pitch, voidc, (size_t)fb->w);
+    PERF_COUNT(fb->w * fb->h);
+
+    /* Back to front by diagonal band. ay is constant across a band, so the
+     * vertical cull rejects whole bands with one test and the inner loop only
+     * ever runs over rows that can be on screen. */
+    b0 = (g->cam_y - ISO_OY - DIA_H) / ISO_HH;
+    b1 = (g->cam_y - ISO_OY + fb->h + ELEV_MAX) / ISO_HH;
+    if (b0 < 0) b0 = 0;
+    if (b1 > BAND_MAX) b1 = BAND_MAX;
+
+    for (band = b0; band <= b1; band++) {
+        int lo = band - (WORLD_H - 1);
+        int hi = band;
+        int ay = band * ISO_HH + ISO_OY - g->cam_y;
+        int tx;
+        if (lo < 0) lo = 0;
+        if (hi > WORLD_W - 1) hi = WORLD_W - 1;
+
+        for (tx = lo; tx <= hi; tx++) {
+            int ty = band - tx;
+            int ax = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
             int cr, cg, cb;
-            float rev;
-            if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H)
+            if (ax + ISO_HW <= 0 || ax - ISO_HW >= fb->w)
                 continue;
-            {
-                /* Sight shows shape; restoration brings colour. Whichever is
-                 * stronger wins, so a restored region stays lit after you
-                 * leave it — restoration is permanent, sight is not a memory
-                 * of colour. */
-                Uint8 rg = g->w.region[ty][tx];
-                float restored = (rg == REGION_NONE) ? 0.0f
-                                                     : g->w.regions[rg].restoration;
-                rev = g->w.reveal[ty][tx];
-                if (restored > rev)
-                    rev = restored;
-                if (overlay)
-                    rev = 1.0f;
-            }
-            if (g->w.solid[ty][tx]) {
-                cr = 0x5a; cg = 0x4a; cb = 0x3c;
-            } else {
-                Uint8 reg = g->w.region[ty][tx];
-                terrain_colour(reg == REGION_NONE ? TERRAIN_NORMAL
-                                                  : g->w.regions[reg].terrain,
-                               &cr, &cg, &cb);
-                /* Alternate brightness by region id so boundaries are visible
-                 * without needing a font or an outline pass. */
-                if (overlay && reg != REGION_NONE && (reg & 1)) {
-                    cr = cr * 3 / 4; cg = cg * 3 / 4; cb = cb * 3 / 4;
-                }
-            }
-            c = fog_lerp(fb, cr, cg, cb, rev);
-            fill_rect(fb, tx * TILE - g->cam_x, ty * TILE - g->cam_y, TILE, TILE, c);
+            tile_colour(g, tx, ty, overlay, &cr, &cg, &cb);
+            /* Heights are all zero until the elevation slice; iso_tile is
+             * already the full version, so nothing here changes when they
+             * stop being zero. */
+            iso_tile(fb, ax, ay, 0, 0, 0,
+                     fog_lerp(fb, cr, cg, cb, tile_reveal(g, tx, ty, overlay)), 0, 0);
         }
     }
 
@@ -1353,7 +1501,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
      * marker once restored so a cleared region does not still look full of
      * things to do. */
     for (i = 0; i < ENTITY_COUNT; i++) {
-        int t = g->ents[i].tile, ex, ey, s;
+        int t = g->ents[i].tile, ex, ey, s, sx, sy;
         int cr, cg, cb;
         if (t < 0)
             continue;
@@ -1363,36 +1511,46 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             continue; /* Lost: not yet discovered */
         if (g->ents[i].is_soul) {
             if (g->ents[i].restored) {
-                cr = 0xf0; cg = 0xd0; cb = 0x90; s = 9; /* Remembered */
+                cr = 0xf0; cg = 0xd0; cb = 0x90; s = 18; /* Remembered */
             } else {
-                cr = 0x9a; cg = 0xa8; cb = 0xb8; s = 9; /* Found */
+                cr = 0x9a; cg = 0xa8; cb = 0xb8; s = 18; /* Found */
             }
         } else if (g->ents[i].restored) {
-            cr = 0x6a; cg = 0x6a; cb = 0x62; s = 4;
+            cr = 0x6a; cg = 0x6a; cb = 0x62; s = 8;
         } else if (g->ents[i].grants) {
-            cr = 0xff; cg = 0x9a; cb = 0x3c; s = 8;
+            cr = 0xff; cg = 0x9a; cb = 0x3c; s = 16;
         } else {
-            cr = 0xff; cg = 0xd7; cb = 0x6a; s = 6;
+            cr = 0xff; cg = 0xd7; cb = 0x6a; s = 12;
         }
-        fill_rect(fb, ex * TILE + (TILE - s) / 2 - g->cam_x,
-                  ey * TILE + (TILE - s) / 2 - g->cam_y, s, s,
+        /* Entities are tile-anchored, so project the tile centre. */
+        world_to_iso((float)(ex * TILE + TILE / 2), (float)(ey * TILE + TILE / 2),
+                     &sx, &sy);
+        fill_rect(fb, sx - s / 2 - g->cam_x, sy - s / 2 - g->cam_y, s, s,
                   SDL_MapRGB(fb->format, (Uint8)cr, (Uint8)cg, (Uint8)cb));
     }
 
     /* A ring under the player when something is close enough to restore —
-     * the only affordance telling you the interact key will do anything. */
+     * the only affordance telling you the interact key will do anything.
+     * Still an axis-aligned box; making it a diamond is a polish-pass job. */
     if (entity_in_reach(g) >= 0) {
-        int px = (int)g->p.x - g->cam_x, py = (int)g->p.y - g->cam_y;
+        int px, py;
         Uint32 c = SDL_MapRGB(fb->format, 0xff, 0xf0, 0xc0);
-        fill_rect(fb, px - 11, py - 13, 22, 2, c);
-        fill_rect(fb, px - 11, py + 11, 22, 2, c);
-        fill_rect(fb, px - 13, py - 11, 2, 22, c);
-        fill_rect(fb, px + 11, py - 11, 2, 22, c);
+        world_to_iso(g->p.x, g->p.y, &px, &py);
+        px -= g->cam_x;
+        py -= g->cam_y;
+        fill_rect(fb, px - 22, py - 26, 44, 4, c);
+        fill_rect(fb, px - 22, py + 22, 44, 4, c);
+        fill_rect(fb, px - 26, py - 22, 4, 44, c);
+        fill_rect(fb, px + 22, py - 22, 4, 44, c);
     }
 
-    fill_rect(fb, (int)g->p.x - PLAYER_SIZE / 2 - g->cam_x,
-              (int)g->p.y - PLAYER_SIZE / 2 - g->cam_y, PLAYER_SIZE, PLAYER_SIZE,
-              SDL_MapRGB(fb->format, 0xe0, 0x64, 0x28));
+    {
+        int px, py;
+        world_to_iso(g->p.x, g->p.y, &px, &py);
+        fill_rect(fb, px - PLAYER_SIZE / 2 - g->cam_x,
+                  py - PLAYER_SIZE / 2 - g->cam_y, PLAYER_SIZE, PLAYER_SIZE,
+                  SDL_MapRGB(fb->format, 0xe0, 0x64, 0x28));
+    }
 }
 
 /* Grid view: several seeds at once, which is how you spot a generator that is
@@ -1469,13 +1627,20 @@ static void render_grid(SDL_Surface *fb, Uint64 base_seed)
     }
 }
 
+/* Same shape as the flat version; only the coordinate space and the two limits
+ * change. The world's screen footprint is a diamond inside a 4000x2000 box, so
+ * at the east and west corners the visible content is a thin wedge and the rest
+ * is void. That is not a bug to fix — a landmass floating in a dark abyss is the
+ * expected isometric read, and world_gen's forced-solid border ring gives it a
+ * rock rim for free. */
 static void camera_follow(Game *g, int view_w, int view_h)
 {
-    int max_x = WORLD_W * TILE - view_w;
-    int max_y = WORLD_H * TILE - view_h;
+    int max_x = ISO_MAP_W - view_w;
+    int max_y = ISO_MAP_H + 2 * ELEV_MAX - view_h;
 
-    g->cam_x = (int)g->p.x - view_w / 2;
-    g->cam_y = (int)g->p.y - view_h / 2;
+    world_to_iso(g->p.x, g->p.y, &g->cam_x, &g->cam_y);
+    g->cam_x -= view_w / 2;
+    g->cam_y -= view_h / 2;
     if (g->cam_x < 0) g->cam_x = 0;
     if (g->cam_y < 0) g->cam_y = 0;
     if (max_x > 0 && g->cam_x > max_x) g->cam_x = max_x;
@@ -2397,6 +2562,204 @@ static int rng_selftest(Uint64 seed)
     return fails ? 1 : 0;
 }
 
+/* --- isometric rasteriser ------------------------------------------------
+ *
+ * The single highest-risk claim in the isometric change is that diamonds tile
+ * the plane exactly — no gaps from rounding, no overdraw — and that raising a
+ * tile leaves a hole its side face fills precisely. Both are argued from an
+ * identity in iso_tile's comment; an argument is not a check, so this measures
+ * it instead. Headless, no window, milliseconds.
+ *
+ * Note what makes case 1 strong: it asserts written == covered == N*1024, so a
+ * renderer that filled gaps by overdrawing would fail it just as loudly as one
+ * that left them. */
+#define ISO_T_N  8                       /* patch is N x N tiles */
+#define ISO_T_W  768
+#define ISO_T_H  640
+#define ISO_T_OX 384
+#define ISO_T_OY 160
+
+/* Our drawing code reads only w/h/pitch/pixels, so a headless framebuffer needs
+ * no SDL surface API and no pixel format — colours are passed in already
+ * packed. This is also the fallback documented for the backbuffer if
+ * SDL_CreateRGBSurfaceWithFormatFrom is ever culled from our SDL build. */
+static void fake_surface(SDL_Surface *s, Uint32 *px, int w, int h)
+{
+    SDL_zerop(s);
+    s->w = w;
+    s->h = h;
+    s->pitch = w * 4;
+    s->pixels = px;
+}
+
+/* Draw one patch tile. Heights come from the caller's array, with out-of-patch
+ * treated as ground level — exactly how the renderer treats out-of-world. */
+static void iso_t_draw(SDL_Surface *s, const int *hgt, int tx, int ty, Uint32 c,
+                       int dy)
+{
+    int h  = hgt[ty * ISO_T_N + tx];
+    int hl = h - ((ty + 1 < ISO_T_N) ? hgt[(ty + 1) * ISO_T_N + tx] : 0);
+    int hr = h - ((tx + 1 < ISO_T_N) ? hgt[ty * ISO_T_N + tx + 1] : 0);
+    int ax = (tx - ty) * ISO_HW + ISO_T_OX;
+    int ay = (tx + ty) * ISO_HH + ISO_T_OY + dy;
+
+    if (hl < 0) hl = 0;
+    if (hr < 0) hr = 0;
+    iso_tile(s, ax, ay, h, hl, hr, c, c, c);
+}
+
+static int iso_selftest(Uint64 seed)
+{
+    const int npx = ISO_T_W * ISO_T_H;
+    Uint32 *comp = (Uint32 *)SDL_calloc((size_t)npx, sizeof(Uint32));
+    Uint32 *solo = (Uint32 *)SDL_calloc((size_t)npx, sizeof(Uint32));
+    Uint8  *band = (Uint8 *)SDL_calloc((size_t)npx, 1); /* deepest band covering px */
+    int hgt[ISO_T_N * ISO_T_N];
+    SDL_Surface sc, ss;
+    Rng rng;
+    int tx, ty, i, fails = 0;
+    int solo_sum = 0, comp_nz = 0, edge = 0;
+
+    if (!comp || !solo || !band) {
+        printf("FAIL  out of memory\n");
+        SDL_free(comp); SDL_free(solo); SDL_free(band);
+        return 1;
+    }
+    fake_surface(&sc, comp, ISO_T_W, ISO_T_H);
+    fake_surface(&ss, solo, ISO_T_W, ISO_T_H);
+
+    printf("=== isometric rasteriser, %dx%d tile patch ===\n", ISO_T_N, ISO_T_N);
+
+    /* ---- case 1: flat ground tiles the plane exactly ---------------------- */
+    for (i = 0; i < ISO_T_N * ISO_T_N; i++)
+        hgt[i] = 0;
+    for (ty = 0; ty < ISO_T_N; ty++) {
+        for (tx = 0; tx < ISO_T_N; tx++) {
+            int n = 0;
+            SDL_memset(solo, 0, (size_t)npx * sizeof(Uint32));
+            iso_t_draw(&ss, hgt, tx, ty, 0xFFFFFFFFu, 0);
+            for (i = 0; i < npx; i++)
+                if (solo[i])
+                    n++;
+            if (n != DIA_W * DIA_H / 2) {
+                printf("FAIL  tile (%d,%d) covers %d px, expected %d\n",
+                       tx, ty, n, DIA_W * DIA_H / 2);
+                fails++;
+            }
+            solo_sum += n;
+            iso_t_draw(&sc, hgt, tx, ty, 0xFFFFFFFFu, 0);
+        }
+    }
+    for (i = 0; i < npx; i++)
+        if (comp[i])
+            comp_nz++;
+    printf("flat: covered %d px, composite %d px, expected %d\n",
+           solo_sum, comp_nz, ISO_T_N * ISO_T_N * DIA_W * DIA_H / 2);
+    if (solo_sum != ISO_T_N * ISO_T_N * DIA_W * DIA_H / 2) fails++;
+    if (comp_nz != solo_sum) {
+        printf("FAIL  composite != sum of tiles: %d px drawn twice or lost\n",
+               solo_sum - comp_nz);
+        fails++;
+    }
+    /* Anything touching the border means the patch was clipped, which would
+     * have deflated every count above and hidden a real failure. */
+    for (i = 0; i < ISO_T_W; i++)
+        if (comp[i] || comp[(ISO_T_H - 1) * ISO_T_W + i]) edge++;
+    for (i = 0; i < ISO_T_H; i++)
+        if (comp[i * ISO_T_W] || comp[i * ISO_T_W + ISO_T_W - 1]) edge++;
+    if (edge) {
+        printf("FAIL  %d border px written - patch clipped, counts unreliable\n", edge);
+        fails++;
+    }
+
+    /* ---- negative control -------------------------------------------------
+     * Every check above passed on the first attempt, which is exactly when a
+     * checker deserves suspicion — a function hardwired to print PASS would
+     * have produced identical output. Re-rasterise the same flat patch with a
+     * one-pixel vertical error injected into half the tiles. That is the
+     * smallest error the exactness claim forbids, so the coverage check must
+     * reject it. */
+    {
+        int nz = 0;
+        SDL_memset(comp, 0, (size_t)npx * sizeof(Uint32));
+        for (ty = 0; ty < ISO_T_N; ty++)
+            for (tx = 0; tx < ISO_T_N; tx++)
+                iso_t_draw(&sc, hgt, tx, ty, 0xFFFFFFFFu, (tx + ty) & 1);
+        for (i = 0; i < npx; i++)
+            if (comp[i])
+                nz++;
+        if (nz == solo_sum) {
+            printf("FAIL  negative control: a 1px tile offset went undetected\n");
+            fails++;
+        } else {
+            printf("negative control (1px tile offset is rejected): PASS  "
+                   "[%d px vs %d]\n", nz, solo_sum);
+        }
+    }
+
+    /* ---- cases 2 and 3: random elevation ---------------------------------- */
+    rng_seed(&rng, seed, STREAM_TERRAIN);
+    for (i = 0; i < ISO_T_N * ISO_T_N; i++)
+        hgt[i] = (int)rng_below(&rng, ELEV_MAX + 1);
+    SDL_memset(comp, 0, (size_t)npx * sizeof(Uint32));
+
+    for (ty = 0; ty < ISO_T_N; ty++)
+        for (tx = 0; tx < ISO_T_N; tx++) {
+            SDL_memset(solo, 0, (size_t)npx * sizeof(Uint32));
+            iso_t_draw(&ss, hgt, tx, ty, 0xFFFFFFFFu, 0);
+            for (i = 0; i < npx; i++)
+                if (solo[i] && (Uint8)(tx + ty + 1) > band[i])
+                    band[i] = (Uint8)(tx + ty + 1); /* nearest tile covering px */
+        }
+    SDL_memset(comp, 0, (size_t)npx * sizeof(Uint32));
+    /* Draw in the renderer's order: back to front by band. */
+    for (i = 0; i <= 2 * (ISO_T_N - 1); i++)
+        for (tx = 0; tx < ISO_T_N; tx++) {
+            ty = i - tx;
+            if (ty < 0 || ty >= ISO_T_N)
+                continue;
+            iso_t_draw(&sc, hgt, tx, ty, (Uint32)(tx + ty + 1), 0);
+        }
+
+    /* case 2: no seams. Along any interior column the covered pixels must form
+     * one unbroken run — a gap between a raised tile's side face and the top
+     * face of the tile in front of it would show up as a hole here. */
+    {
+        int holes = 0, x, y;
+        for (x = ISO_T_OX - ISO_HW; x < ISO_T_OX + ISO_HW; x++) {
+            int first = -1, last = -1;
+            for (y = 0; y < ISO_T_H; y++)
+                if (comp[y * ISO_T_W + x]) {
+                    if (first < 0) first = y;
+                    last = y;
+                }
+            for (y = first; y >= 0 && y <= last; y++)
+                if (!comp[y * ISO_T_W + x])
+                    holes++;
+        }
+        printf("elevated: %d interior-column gap px (expect 0)\n", holes);
+        if (holes) fails++;
+    }
+
+    /* case 3: depth order. Every pixel must end up owned by the nearest tile
+     * that covers it — a farther tile painting over a nearer one is the classic
+     * painter's-algorithm bug and is invisible until something tall exists. */
+    {
+        int wrong = 0;
+        for (i = 0; i < npx; i++)
+            if (band[i] && comp[i] != (Uint32)band[i])
+                wrong++;
+        printf("elevated: %d px owned by the wrong tile (expect 0)\n", wrong);
+        if (wrong) fails++;
+    }
+
+    SDL_free(comp);
+    SDL_free(solo);
+    SDL_free(band);
+    printf("\n%s (%d checks failed)\n", fails ? "FAIL" : "PASS", fails);
+    return fails ? 1 : 0;
+}
+
 /* Runs audio with no window for `ms`, then reports whether the callback met
  * its deadline and dumps raw samples for independent offline analysis. */
 static int audio_selftest(int argc, char **argv, int ms)
@@ -2552,6 +2915,9 @@ int main(int argc, char **argv)
     Perf pf;
     int show_perf = arg_flag(argc, argv, "--perf");
 #endif
+#if WAYFARER_SELFTEST
+    const char *shot = arg_val(argc, argv, "--shot");
+#endif
 
 #if WAYFARER_SELFTEST
     {
@@ -2560,6 +2926,8 @@ int main(int argc, char **argv)
             return audio_selftest(argc, argv, ms);
         if (arg_flag(argc, argv, "--rng-test"))
             return rng_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
+        if (arg_flag(argc, argv, "--iso-test"))
+            return iso_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
         {
             int ims = arg_int(argc, argv, "--input-test", 0);
             if (ims > 0)
@@ -2766,6 +3134,15 @@ int main(int argc, char **argv)
         t_c = SDL_GetPerformanceCounter();
         ms_render  = (double)(t_b - t_a) / perf * 1000.0;
         ms_present = (double)(t_c - t_b) / perf * 1000.0;
+#endif
+
+#if WAYFARER_SELFTEST
+        /* Scriptable screenshot on the final frame. Grabbing the window from
+         * outside is unreliable here (see the SetForegroundWindow trap in
+         * Handover.md); saving the surface we just drew is exact, and every
+         * remaining slice of the isometric work needs to be looked at. */
+        if (shot && limit && frame + 1 >= limit)
+            SDL_SaveBMP(fb, shot);
 #endif
 
         /* No bitmap font until Week 5 (design/systems/Save and UI.md), so debug
