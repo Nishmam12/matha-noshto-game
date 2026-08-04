@@ -7,13 +7,22 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 690,176 bytes
-**Current status:** verified — island landform, clustered villages, rounded foliage and a first
-palette pass; no animation, no character, no audio, no font. Fog and input orientation are both
-known defects and both untouched
-**Headroom:** 749,824 bytes under the 1,440,000 ship target
+**Current `.exe` size:** 690,688 bytes
+**Current status:** verified — island landform, clustered villages, rounded foliage, roof face
+shading and the fog rewrite. **The game has now been played by a human once** and read as "slightly
+enjoyable". No animation, no character, no audio, no font; input is still world-aligned
+**Headroom:** 749,312 bytes under the 1,440,000 ship target
 
 ## Sessions
+
+- [[2026-08-04-session-01]] *(Session 03)* — **Roof volume, and the fog rewrite.** `iso_diamond_lr`
+  gives roofs the same left/right face split terrain gets from `FACE_L`/`FACE_R`, fixing the flat-plate
+  read diagnosed last session. `fog_lerp` rewritten: unrevealed land now resolves toward a light cool
+  haze keeping `FOG_KEEP` of its own luminance contrast, instead of a dark grey that crushed 95% of
+  the screen to one dead colour — the actual cause of "traversal feels suffocating". Took three
+  passes; the first two overcorrected, and stone had to be pulled back down after it became the
+  brightest surface in the world. **First human playtest ever.** Render 0.844 ms, suite PASS,
+  play 50/50. Still owed: `--fog-test`, `--land-test`, screen-aligned input, camera easing.
 
 - [[2026-08-04-session-01]] *(Session 02)* — **The landform, and a first honest look at it.**
   Replaced the cave generator with an island height field: coastline, ocean, inland rock outcrops,

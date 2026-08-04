@@ -71,14 +71,26 @@
  * the first fragment is restored — including the fragment you must find first.
  * Sight keeps exploration possible; restoration is still the only thing that
  * brings colour back. */
-#define SIGHT_MAX    0.42f
+#define SIGHT_MAX    0.50f
 #define RESTORE_RATE 0.9f  /* region restoration units/sec once triggered */
 
 #define INTERACT_RADIUS 44.0f /* world px; same fraction of a tile as before */
 
-#define FOG_TINT_R 44.0f
-#define FOG_TINT_G 52.0f
-#define FOG_TINT_B 68.0f
+/* Where unrevealed land resolves to. This used to be (44,52,68) applied on top
+ * of a luminance already scaled to 0.55 — a DARK blue-grey, and since walking
+ * only ever reveals to SIGHT_MAX, roughly 95% of any given screen was that one
+ * dead colour. The world read as a cave, or as night, and that is what made
+ * traversal feel closed-in.
+ *
+ * Distance in the real world goes lighter, bluer and lower-contrast, never
+ * darker — see design/Art Bible.md §2 and §4. So the tint is now a LIGHT cool
+ * haze and the blend keeps a fixed fraction of the source's luminance contrast
+ * rather than crushing it, which is also what keeps a four-shade canopy from
+ * collapsing into one blob at low reveal. */
+#define FOG_TINT_R 60.0f
+#define FOG_TINT_G 70.0f
+#define FOG_TINT_B 86.0f
+#define FOG_KEEP   0.50f /* fraction of luminance contrast surviving at reveal 0 */
 
 /* --- Isometric projection ------------------------------------------------
  *
@@ -110,6 +122,11 @@
  * job of making flat colour read as volume. */
 #define FACE_L 58   /* down-left face, per cent of true colour */
 #define FACE_R 76   /* down-right face */
+/* The same idea for roof slopes. Both visible roof faces are slopes rather than
+ * a flat top, so neither takes the full 100% a tile's top face does — but the
+ * split has to be wider than the terrain one to read across a surface this
+ * large, and the lit side stays near full so roofs do not go muddy. */
+#define ROOF_L 64   /* down-left roof slope, per cent */
 #define ISO_OX    (WORLD_H * TILE)                      /* 1440 */
 #define ISO_OY    ELEV_MAX
 #define ISO_MAP_W ((WORLD_W + WORLD_H) * TILE)          /* 4000 */
@@ -1850,12 +1867,15 @@ static void iso_tile(SDL_Surface *fb, int ax, int ay, int h, int hl, int hr,
  * See design/systems/Fog and Reveal.md. */
 static Uint32 fog_lerp(SDL_Surface *s, int r, int gr, int b, float reveal)
 {
-    /* Luminance, then pulled toward the fog tint and darkened: unrestored land
-     * keeps its shape but loses its colour, which is the "drained" read. */
-    float lum = (0.299f * r + 0.587f * gr + 0.114f * b) * 0.55f;
-    float fr = lum + (FOG_TINT_R - lum) * 0.45f;
-    float fg = lum + (FOG_TINT_G - lum) * 0.45f;
-    float fb = lum + (FOG_TINT_B - lum) * 0.45f;
+    /* Luminance, then pulled toward the haze while keeping FOG_KEEP of its own
+     * contrast: unrestored land keeps its shape and its relative light-to-dark
+     * ordering, but loses its colour. That ordering is the load-bearing part —
+     * a canopy is four shades and a cliff has two faces, so a blend that
+     * flattened luminance would turn every prop into a silhouette. */
+    float lum = 0.299f * r + 0.587f * gr + 0.114f * b;
+    float fr = FOG_TINT_R + (lum - FOG_TINT_R) * FOG_KEEP;
+    float fg = FOG_TINT_G + (lum - FOG_TINT_G) * FOG_KEEP;
+    float fb = FOG_TINT_B + (lum - FOG_TINT_B) * FOG_KEEP;
 
     if (reveal < 0.0f) reveal = 0.0f;
     if (reveal > 1.0f) reveal = 1.0f;
@@ -1951,6 +1971,32 @@ static void iso_diamond(SDL_Surface *fb, int cx, int cy, int rw, Uint32 c)
         int a = i < 0 ? -i : i;
         int half = (rw - a) / 2;
         vspan(fb, cx + i, cy - half, half * 2 + 1, c);
+    }
+}
+
+/* The same diamond split down its vertical centre line into a left and a right
+ * colour.
+ *
+ * This exists for roofs. A hip roof drawn as a stack of concentric diamonds has
+ * no volume: every slice is one flat colour, so however the steps are shaded up
+ * the slope the result reads as a plate, which is exactly how every house in the
+ * build looked. Terrain does not have this problem because it gets its volume
+ * from FACE_L/FACE_R — one notional light, two constants, no normals. Roofs now
+ * use the identical trick: the left half of every slice is the down-left slope,
+ * the right half is the down-right slope, and they take different shades.
+ *
+ * Same column geometry as iso_diamond, so the two still line up exactly. */
+static void iso_diamond_lr(SDL_Surface *fb, int cx, int cy, int rw,
+                           Uint32 cl, Uint32 cr)
+{
+    int i, i0 = -rw, i1 = rw;
+
+    if (cx + i0 < 0)      i0 = -cx;
+    if (cx + i1 > fb->w)  i1 = fb->w - cx;
+    for (i = i0; i <= i1; i++) {
+        int a = i < 0 ? -i : i;
+        int half = (rw - a) / 2;
+        vspan(fb, cx + i, cy - half, half * 2 + 1, i < 0 ? cl : cr);
     }
 }
 
@@ -2292,27 +2338,31 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
             pitch = 3;
     }
 
-    /* NOTE: an eave-shadow diamond was tried here and removed. Drawn at full rw
-     * under the roof line it read as a light rim around a flat plate, because
-     * the roof above it is ALSO a stack of concentric diamonds — the two
-     * together gave concentric rings, which is the one thing that reads less
-     * like a roof than a plain slope.
+    /* Each slice split left/right, so the roof has two lit faces the way every
+     * other solid in the world does. Before this the whole stack was concentric
+     * rings of one colour per step and every house read as a plate; an
+     * eave-shadow diamond was tried first and made it worse, because a ring
+     * under a ring is still rings.
      *
-     * The real defect is that this roof has no left/right face split. Terrain
-     * gets its volume from FACE_L/FACE_R, and the roof gets none, so it reads
-     * flat no matter how the steps are shaded. Fixing it needs a half-diamond
-     * fill and is its own slice. */
+     * Slight lightening up the slope is kept on top of the split — a roof does
+     * catch more light near the ridge — but it is no longer doing the work. */
     for (k = 0; k < steps; k++) {
         int krw = rw - (rw * k) / (steps + 1);
         int s   = (k * 3) / steps;
-        iso_diamond(fb, cx, cy - wall - k * pitch, krw,
-                    fog_lerp(fb, rp[s][0], rp[s][1], rp[s][2], rev));
+        iso_diamond_lr(fb, cx, cy - wall - k * pitch, krw,
+                       fog_lerp(fb, rp[s][0] * ROOF_L / 100,
+                                    rp[s][1] * ROOF_L / 100,
+                                    rp[s][2] * ROOF_L / 100, rev),
+                       fog_lerp(fb, rp[s][0], rp[s][1], rp[s][2], rev));
     }
     /* Ridge cap. Small on purpose: at rw/(steps+1)+3 the top diamond was wide
      * enough to read as a flat plateau, which is what made the roof look like a
      * tarp stretched over a box instead of coming to a peak. */
-    iso_diamond(fb, cx, cy - wall - steps * pitch, rw / (steps + 2),
-                fog_lerp(fb, rp[2][0], rp[2][1], rp[2][2], rev));
+    iso_diamond_lr(fb, cx, cy - wall - steps * pitch, rw / (steps + 2),
+                   fog_lerp(fb, rp[2][0] * ROOF_L / 100,
+                                rp[2][1] * ROOF_L / 100,
+                                rp[2][2] * ROOF_L / 100, rev),
+                   fog_lerp(fb, rp[2][0], rp[2][1], rp[2][2], rev));
 
     /* Chimney, on the roof rather than beside it. */
     if (BV_CHIM(v)) {
@@ -2420,12 +2470,14 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
         /* Stone ramp, varied per tile. One flat grey over a whole outcrop was
          * the other half of the "concrete slab" read — real rock has tonal
          * variation across its face, and three shades is enough to get it. */
-        /* Lighter than the ramp's nominal base. Rock reads against grass, and
-         * grass here is a mid-value sage — stone darker than it inverted the
-         * usual landscape reading, where stone catches light and vegetation
-         * holds the shadows. */
+        /* Just above grass in value, and no further. Stone should catch more
+         * light than vegetation, but at the previous 0x5c5a68 it became the
+         * BRIGHTEST large surface in the world — under fog the outcrops read as
+         * white shapes floating in a dark field and pulled the eye away from
+         * the player and the lit ground. Walls are meant to be the lightest
+         * mass on screen; see the value hierarchy in design/Art Bible.md §4. */
         static const Uint8 stone_ramp[3][3] = {
-            {0x50,0x4e,0x5c}, {0x5c,0x5a,0x68}, {0x69,0x67,0x75}
+            {0x44,0x42,0x4e}, {0x4e,0x4c,0x59}, {0x59,0x57,0x64}
         };
         const Uint8 *p = stone_ramp[tile_hash(g->seed, tx, ty) % 3u];
         *cr = p[0]; *cg = p[1]; *cb = p[2];
