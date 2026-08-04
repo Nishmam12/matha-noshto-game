@@ -20,6 +20,15 @@
 #include <stdio.h>
 #endif
 
+/* Render instrumentation rides with the self-test scaffolding, for the same
+ * reason everything else does: the shipping binary must carry no measurement
+ * code at all, and it has no stdout to report into (-mwindows, no console).
+ * Both builds run the identical render path, so numbers measured in one apply
+ * to the other. */
+#ifndef WAYFARER_PERF
+#define WAYFARER_PERF WAYFARER_SELFTEST
+#endif
+
 #define WIN_W 640
 #define WIN_H 360
 
@@ -1165,6 +1174,71 @@ static int game_init(Game *g, Rngs *rngs)
     return biggest; /* open tiles reachable from spawn */
 }
 
+/* ----------------------------------------------------------------- perf -- */
+/* Render instrumentation.
+ *
+ * This exists because "~56 fps" was never evidence of anything. The loop sleeps
+ * on purpose, and SDL_Delay's millisecond granularity sets the frame period by
+ * itself — Sleep(14) routinely returns at 15-16 ms on Windows. So the one
+ * number we had measured sleep, not drawing, and the render cost of the tile
+ * loop has never been measured at all (design/Toolchain Setup.md lists it as
+ * unprofiled). Separate the two before changing the renderer, so the isometric
+ * work has a real baseline to be compared against rather than a guess. */
+#if WAYFARER_PERF
+
+/* Bumped by every fill_rect call, sampled and cleared once per frame. Scalars,
+ * not buffers: the never-declare-it-static rule in design/Toolchain Setup.md is
+ * about world-sized arrays landing in .data, and these are eight bytes. */
+static Uint32 perf_px;
+static Uint32 perf_calls;
+
+#define PERF_COUNT(n) do { perf_px += (Uint32)(n); perf_calls++; } while (0)
+
+typedef struct {
+    double render_sum, render_max; /* rasterising, alone */
+    double present_sum;            /* SDL_UpdateWindowSurface: the blit to the OS */
+    double sleep_sum;              /* what the frame cap actually costs */
+    double frame_sum;              /* whole loop period */
+    double px_sum, calls_sum;
+    int    frames;
+} Perf;
+
+static void perf_frame(Perf *p, double render_ms, double present_ms,
+                       double sleep_ms, double frame_ms)
+{
+    if (render_ms > p->render_max)
+        p->render_max = render_ms;
+    p->render_sum  += render_ms;
+    p->present_sum += present_ms;
+    p->sleep_sum   += sleep_ms;
+    p->frame_sum   += frame_ms;
+    p->px_sum      += (double)perf_px;
+    p->calls_sum   += (double)perf_calls;
+    p->frames++;
+    perf_px = 0;
+    perf_calls = 0;
+}
+
+static void perf_report(const Perf *p, int w, int h)
+{
+    double n     = (double)(p->frames > 0 ? p->frames : 1);
+    double frame = p->frame_sum / n;
+    double px    = p->px_sum / n;
+
+    printf("=== render perf: %d frames at %dx%d ===\n", p->frames, w, h);
+    printf("render   mean %7.3f ms    max %7.3f ms\n", p->render_sum / n, p->render_max);
+    printf("present  mean %7.3f ms\n", p->present_sum / n);
+    printf("sleep    mean %7.3f ms    <- frame cap; SDL_Delay granularity lands here\n",
+           p->sleep_sum / n);
+    printf("frame    mean %7.3f ms    = %.1f fps\n", frame, frame > 0.0 ? 1000.0 / frame : 0.0);
+    printf("pixels   mean %9.0f /frame  = %.2fx the %d-px screen\n",
+           px, (w * h) > 0 ? px / (double)(w * h) : 0.0, w * h);
+    printf("calls    mean %9.0f /frame\n", p->calls_sum / n);
+}
+#else
+#define PERF_COUNT(n) ((void)0)
+#endif /* WAYFARER_PERF */
+
 /* ------------------------------------------------------------- graphics -- */
 
 /* Window surfaces are plain memory — never RLE-encoded — so SDL_MUSTLOCK is
@@ -1180,6 +1254,10 @@ static void fill_rect(SDL_Surface *s, int x, int y, int w, int h, Uint32 colour)
     if (y + h > s->h) h = s->h - y;
     if (w <= 0 || h <= 0)
         return;
+
+    /* Counted after clipping, so this is real writes rather than requested
+     * ones — an off-screen tile must not inflate the number. */
+    PERF_COUNT(w * h);
 
     for (iy = 0; iy < h; iy++) {
         Uint32 *row = (Uint32 *)((Uint8 *)s->pixels + (y + iy) * s->pitch);
@@ -2470,6 +2548,10 @@ int main(int argc, char **argv)
     int running = 1;
     int overlay = 0, grid = 0, dirty = 1, title_dirty = 1;
     int seed = arg_int(argc, argv, "--seed", 1);
+#if WAYFARER_PERF
+    Perf pf;
+    int show_perf = arg_flag(argc, argv, "--perf");
+#endif
 
 #if WAYFARER_SELFTEST
     {
@@ -2562,6 +2644,10 @@ int main(int argc, char **argv)
         return 2;
     }
 
+#if WAYFARER_PERF
+    SDL_zero(pf);
+#endif
+
     SDL_zero(audio);
     audio.noise = arg_flag(argc, argv, "--noise");
     audio.req_rate = AUDIO_RATE;
@@ -2585,6 +2671,12 @@ int main(int argc, char **argv)
         Uint64 now;
         double elapsed;
         Input in;
+#if WAYFARER_PERF
+        /* Four separate stopwatches, because the one number we had ("~56 fps")
+         * conflated all of them and told us nothing about any. */
+        Uint64 t_a, t_b, t_c;
+        double ms_render = 0.0, ms_present = 0.0, ms_sleep = 0.0, ms_frame;
+#endif
 
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) {
@@ -2625,6 +2717,11 @@ int main(int argc, char **argv)
         now = SDL_GetPerformanceCounter();
         elapsed = (double)(now - prev) / perf;
         prev = now;
+#if WAYFARER_PERF
+        /* Sampled before the clamp below: the frame period is what it is, and a
+         * stall we hid from the simulation is exactly the thing worth seeing. */
+        ms_frame = elapsed * 1000.0;
+#endif
         /* Clamp: after a breakpoint or a window drag, a huge elapsed would
          * otherwise spin the catch-up loop for thousands of steps. */
         if (elapsed > 0.25)
@@ -2646,6 +2743,9 @@ int main(int argc, char **argv)
             return fb ? 4 : 3;
         }
 
+#if WAYFARER_PERF
+        t_a = SDL_GetPerformanceCounter();
+#endif
         if (grid) {
             /* Regenerate only when dirty — 12 worlds per frame would crawl —
              * but always re-present, so a repaint after the surface is
@@ -2658,7 +2758,15 @@ int main(int argc, char **argv)
             camera_follow(&game, fb->w, fb->h);
             render(fb, &game, overlay);
         }
+#if WAYFARER_PERF
+        t_b = SDL_GetPerformanceCounter();
+#endif
         SDL_UpdateWindowSurface(win);
+#if WAYFARER_PERF
+        t_c = SDL_GetPerformanceCounter();
+        ms_render  = (double)(t_b - t_a) / perf * 1000.0;
+        ms_present = (double)(t_c - t_b) / perf * 1000.0;
+#endif
 
         /* No bitmap font until Week 5 (design/systems/Save and UI.md), so debug
          * stats go in the title bar. Costs nothing and needs no glyph data. */
@@ -2667,13 +2775,23 @@ int main(int argc, char **argv)
             static const char *const stage_name[4] = {
                 "Unexplored", "Partly Revealed", "Many Memories Restored", "Fully Restored"
             };
-            char t[160];
-            SDL_snprintf(t, sizeof(t),
+            char t[224];
+            int n = SDL_snprintf(t, sizeof(t),
                          "Wayfarer  seed %d  fragments %d/%d  souls %d/%d  %s%s%s",
                          (int)seed, game.frags_restored, FRAGMENT_COUNT,
                          game.souls_restored, SOUL_COUNT, stage_name[world_stage(&game)],
                          overlay ? "  [F1 overlay]" : "",
                          grid ? "  [F2 grid]" : "");
+#if WAYFARER_PERF
+            /* Live readout while developing. The title bar is the only text
+             * channel that exists before the Week 5 bitmap font. */
+            if (show_perf && n > 0 && n < (int)sizeof(t))
+                SDL_snprintf(t + n, sizeof(t) - (size_t)n,
+                             "  |  rnd %.2fms  pre %.2fms  %.0fkpx",
+                             ms_render, ms_present, (double)perf_px / 1000.0);
+#else
+            (void)n;
+#endif
             SDL_SetWindowTitle(win, t);
             title_dirty = 0;
         }
@@ -2689,10 +2807,21 @@ int main(int argc, char **argv)
             double budget = 1.0 / FRAME_HZ;
             if (spent < budget) {
                 Uint32 nap = (Uint32)((budget - spent) * 1000.0);
-                if (nap > 0)
+                if (nap > 0) {
+#if WAYFARER_PERF
+                    Uint64 t_d = SDL_GetPerformanceCounter();
                     SDL_Delay(nap);
+                    ms_sleep = (double)(SDL_GetPerformanceCounter() - t_d) / perf * 1000.0;
+#else
+                    SDL_Delay(nap);
+#endif
+                }
             }
         }
+
+#if WAYFARER_PERF
+        perf_frame(&pf, ms_render, ms_present, ms_sleep, ms_frame);
+#endif
 
         frame++;
         /* Restoration eases in over time, so the stage can change with no input
@@ -2702,6 +2831,13 @@ int main(int argc, char **argv)
         if (limit && frame >= limit)
             running = 0;
     }
+
+#if WAYFARER_PERF
+    /* Report before tearing the window down, so fb->w/h are still the real
+     * surface dimensions rather than remembered constants. */
+    if (show_perf)
+        perf_report(&pf, fb ? fb->w : WIN_W, fb ? fb->h : WIN_H);
+#endif
 
     if (dev)
         SDL_CloseAudioDevice(dev);
