@@ -32,8 +32,22 @@
 #define PLAYER_SIZE  12
 #define PLAYER_SPEED 110.0f /* world px/sec */
 
-#define REVEAL_TILES 5     /* reveal radius, in tiles */
-#define REVEAL_RATE  2.5f  /* reveal units/sec; ~0.4s to fully clear a tile */
+#define REVEAL_TILES 5     /* sight radius, in tiles */
+#define REVEAL_RATE  2.5f  /* sight units/sec */
+
+/* Walking somewhere reveals its SHAPE but not its colour — sight tops out well
+ * below 1. Only restoring a memory takes a region to full colour.
+ *
+ * This splits Fog and Reveal's single "restoration%" into two contributions,
+ * and that is an interpretation worth flagging: the note specifies restoration
+ * drives the blend, but with nothing else the world would be pitch black until
+ * the first fragment is restored — including the fragment you must find first.
+ * Sight keeps exploration possible; restoration is still the only thing that
+ * brings colour back. */
+#define SIGHT_MAX    0.42f
+#define RESTORE_RATE 0.9f  /* region restoration units/sec once triggered */
+
+#define INTERACT_RADIUS 22.0f /* world px */
 
 #define FOG_TINT_R 44.0f
 #define FOG_TINT_G 52.0f
@@ -53,6 +67,12 @@
 #define AUDIO_SAMPLES  1024 /* frames per callback; ~21 ms at 48 kHz */
 #define TONE_HZ        440.0
 #define TONE_AMP       0.20f
+
+/* Restore confirm beat. A plain decaying sine for now; the real layered synth
+ * is Week 4 (design/systems/Audio and Synth.md). */
+#define SFX_HZ    660.0
+#define SFX_AMP   0.28f
+#define SFX_DECAY 3.2f /* envelope units/sec; ~0.3 s tail */
 
 #define TWO_PI 6.283185307179586
 
@@ -118,10 +138,7 @@ static float rng_bipolar(Rng *r)
 /* Uniform in [0, n). Rejection-sampled: the naive % introduces modulo bias
  * that would skew fragment placement toward low indices.
  *
- * Scoped to the self-test until a real caller exists — fragment placement
- * (Week 3) will be the first. Move it out of the guard then; leaving it in the
- * shipping build now would be dead code and an unused-function warning. */
-#if WAYFARER_SELFTEST
+ * Now used by entity placement, so no longer self-test-only. */
 static Uint32 rng_below(Rng *r, Uint32 n)
 {
     Uint32 threshold, v;
@@ -134,7 +151,6 @@ static Uint32 rng_below(Rng *r, Uint32 n)
             return v % n;
     }
 }
-#endif
 
 /* The project's three independent generation streams, all derived from one
  * master seed so a single --seed N reproduces an entire world. */
@@ -161,7 +177,18 @@ typedef struct {
     int    channels;
     double phase; /* cycles, in [0,1) — double so long runs don't drift */
     int    noise; /* 0 = sine tone, 1 = seeded white noise */
+    int    tone;  /* ambient test tone; off in the game, on in audio selftests */
     Rng    rng;
+
+    /* Restore confirm beat. The main thread only ever bumps an atomic counter;
+     * the callback owns everything else. No lock, no allocation, no shared
+     * mutable state on the audio thread's critical path — the audio callback
+     * has a hard deadline and Agent Prompt.md treats faults there as release
+     * blockers. */
+    SDL_atomic_t sfx_fire;
+    int          sfx_seen;
+    double       sfx_phase;
+    float        sfx_env;
 #if WAYFARER_SELFTEST
     Uint64 calls;
     Uint64 frames;
@@ -189,16 +216,37 @@ static void SDLCALL audio_cb(void *userdata, Uint8 *stream, int len)
         a->partial_len++;
 #endif
 
+    /* Latch the trigger once per callback, not per sample. */
+    {
+        int fired = SDL_AtomicGet(&a->sfx_fire);
+        if (fired != a->sfx_seen) {
+            a->sfx_seen = fired;
+            a->sfx_env = 1.0f;
+            a->sfx_phase = 0.0;
+        }
+    }
+
     for (i = 0; i < frames; i++) {
-        float v;
+        float v = 0.0f;
         if (a->noise) {
             v = rng_bipolar(&a->rng) * TONE_AMP;
-        } else {
+        } else if (a->tone) {
             v = SDL_sinf((float)(a->phase * TWO_PI)) * TONE_AMP;
             a->phase += inc;
             if (a->phase >= 1.0)
                 a->phase -= 1.0;
         }
+        if (a->sfx_env > 0.0f) {
+            v += SDL_sinf((float)(a->sfx_phase * TWO_PI)) * a->sfx_env * SFX_AMP;
+            a->sfx_phase += SFX_HZ / (double)a->rate;
+            if (a->sfx_phase >= 1.0)
+                a->sfx_phase -= 1.0;
+            a->sfx_env -= SFX_DECAY / (float)a->rate;
+            if (a->sfx_env < 0.0f)
+                a->sfx_env = 0.0f;
+        }
+        if (v > 1.0f) v = 1.0f;
+        if (v < -1.0f) v = -1.0f;
         for (c = 0; c < a->channels; c++)
             out[i * a->channels + c] = v;
     }
@@ -284,18 +332,100 @@ static int arg_flag(int argc, char **argv, const char *key)
  * (design/systems/World Generation.md) and lands in Week 2 — at which point
  * per-tile `reveal` becomes per-region restoration% that tiles inherit. */
 
-typedef struct {
-    Uint8 solid[WORLD_H][WORLD_W];
-    float reveal[WORLD_H][WORLD_W]; /* 0 = fogged and colourless, 1 = restored */
-} World;
+/* --------------------------------------------------------------- regions -- */
+/* The world is a region graph (design/systems/World Generation.md): each region
+ * has a terrain type, an ability required to enter, a restoration state, and
+ * (Week 3) the fragments it contains.
+ *
+ * REGION_COUNT is deliberately small. Open Decisions leaves landmass size
+ * unresolved with the instruction to "start small, expand only if generation +
+ * pacing tests support it", so this is the small end and is meant to be raised
+ * against measurements, not guessed upward. */
+#define REGION_COUNT 16
+#define REGION_NONE  0xFF
+
+enum {
+    TERRAIN_NORMAL = 0,
+    TERRAIN_WATER, /* Wade */
+    TERRAIN_LEDGE, /* Climb */
+    TERRAIN_DARK,  /* Kindle */
+    TERRAIN_COUNT
+};
+
+/* Ability flags. Bitmask because "which abilities do you have" is the whole of
+ * the ability system — see design/systems/Abilities.md: no trees, no levels. */
+enum {
+    ABIL_NONE   = 0,
+    ABIL_WADE   = 1 << 0,
+    ABIL_CLIMB  = 1 << 1,
+    ABIL_KINDLE = 1 << 2
+};
+
+static const Uint8 terrain_requires[TERRAIN_COUNT] = {
+    ABIL_NONE, ABIL_WADE, ABIL_CLIMB, ABIL_KINDLE
+};
 
 typedef struct {
-    float x, y; /* centre, in world pixels */
+    Uint8  terrain;
+    Uint16 tiles;
+    int    seed_tile;   /* representative tile, for debug draw and spawn */
+    Uint32 adj;         /* bitmask of adjacent regions; caps REGION_COUNT at 32 */
+    float  restoration; /* 0..1, drives Fog and Reveal */
+    float  restore_to;  /* target; restoration eases toward it so the colour
+                         * returning is a visible beat, not an instant swap */
+} Region;
+
+/* Fragments and Found Souls. Counts are the scope-safe defaults from
+ * design/Overview.md (~12-16 fragments, 4-6 Found Souls), tracked separately
+ * rather than as the mockup's combined 23/40 counter. Still awaiting formal
+ * sign-off in design/Open Decisions.md — these are defaults, not a decision.
+ *
+ * Found Souls reuse the fragment restoration path entirely; is_soul only
+ * changes how they draw and what they add to the mix. */
+#define FRAGMENT_COUNT 14
+#define SOUL_COUNT     5
+#define ENTITY_COUNT   (FRAGMENT_COUNT + SOUL_COUNT) /* must stay <= 32 */
+
+typedef struct {
+    int   tile;
+    Uint8 region;
+    Uint8 grants;   /* ABIL_* this fragment restores, or 0 */
+    Uint8 is_soul;  /* Found Soul rather than a plain fragment */
+    Uint8 restored;
+} Entity;
+
+typedef struct {
+    Uint8  solid[WORLD_H][WORLD_W];
+    float  reveal[WORLD_H][WORLD_W]; /* 0 = fogged and colourless, 1 = restored */
+    Uint8  region[WORLD_H][WORLD_W]; /* REGION_NONE where solid or unreachable */
+    Region regions[REGION_COUNT];
+    int    region_count;
+    int    spawn_region;
+} World;
+
+/* Scratch buffers for generation. One struct so callers allocate it once as a
+ * stack local — these must never be `static`, see the .data trap in
+ * design/Toolchain Setup.md. */
+typedef struct {
+    Uint8 seen[WORLD_W * WORLD_H];
+    int   stack[WORLD_W * WORLD_H];
+    int   queue[WORLD_W * WORLD_H];
+    int   dist[WORLD_W * WORLD_H];
+    Uint8 owner[WORLD_W * WORLD_H];
+} Scratch;
+
+typedef struct {
+    float x, y;      /* centre, in world pixels */
+    Uint8 abilities; /* ABIL_* bitmask; the entire ability system, per Abilities.md */
 } Player;
 
 typedef struct {
     World  w;
     Player p;
+    Entity ents[ENTITY_COUNT];
+    int    gen_attempts;    /* >0 attempts used; <0 means gating was relaxed */
+    int    frags_restored;  /* tracked separately from souls, per Fragments.md */
+    int    souls_restored;
     int    cam_x, cam_y;
 } Game;
 
@@ -348,8 +478,368 @@ static void world_gen(World *w, Rng *rng)
             w->reveal[y][x] = 0.0f;
 }
 
-/* Does the player's AABB, centred here, overlap any solid tile? */
-static int player_blocked(const World *w, float cx, float cy)
+/* Multi-source BFS across open tiles. Fills dist (hop count, -1 unreachable)
+ * and, when owner is non-NULL, which source claimed each tile. Because regions
+ * grow outward from their seeds in lockstep, every region it produces is
+ * connected by construction — there is no way to end up with an island of tiles
+ * assigned to a region they cannot walk to. */
+static void bfs_open(const World *w, const int *sources, int nsrc,
+                     int *dist, Uint8 *owner, int *queue)
+{
+    int head = 0, tail = 0, i;
+
+    for (i = 0; i < WORLD_W * WORLD_H; i++) {
+        dist[i] = -1;
+        if (owner)
+            owner[i] = REGION_NONE;
+    }
+    for (i = 0; i < nsrc; i++) {
+        dist[sources[i]] = 0;
+        if (owner)
+            owner[sources[i]] = (Uint8)i;
+        queue[tail++] = sources[i];
+    }
+
+    while (head < tail) {
+        int idx = queue[head++];
+        int x = idx % WORLD_W, y = idx / WORLD_W, d;
+        static const int dx[4] = { 1, -1, 0, 0 };
+        static const int dy[4] = { 0, 0, 1, -1 };
+
+        for (d = 0; d < 4; d++) {
+            int nx = x + dx[d], ny = y + dy[d], nidx;
+            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+                continue;
+            if (w->solid[ny][nx])
+                continue;
+            nidx = ny * WORLD_W + nx;
+            if (dist[nidx] >= 0)
+                continue;
+            dist[nidx] = dist[idx] + 1;
+            if (owner)
+                owner[nidx] = owner[idx];
+            queue[tail++] = nidx;
+        }
+    }
+}
+
+/* Partition the walkable area into REGION_COUNT connected regions.
+ *
+ * Seeds are chosen by farthest-point sampling — repeatedly take the walkable
+ * tile furthest (in path distance, not straight line) from every seed chosen so
+ * far. Path distance matters: two tiles either side of a wall are close in
+ * space but far apart to walk, and sampling on straight-line distance produces
+ * regions that straddle walls. */
+static int regions_build(World *w, Scratch *sc, int spawn_tile)
+{
+    int sources[REGION_COUNT];
+    int nsrc = 1, i, x, y, count;
+
+    sources[0] = spawn_tile;
+
+    while (nsrc < REGION_COUNT) {
+        int best = -1, best_d = 0;
+        bfs_open(w, sources, nsrc, sc->dist, NULL, sc->queue);
+        for (i = 0; i < WORLD_W * WORLD_H; i++) {
+            if (sc->dist[i] > best_d) {
+                best_d = sc->dist[i];
+                best = i;
+            }
+        }
+        if (best < 0) /* component too small to hold another region */
+            break;
+        sources[nsrc++] = best;
+    }
+
+    bfs_open(w, sources, nsrc, sc->dist, sc->owner, sc->queue);
+
+    count = nsrc;
+    w->region_count = count;
+    for (i = 0; i < count; i++) {
+        w->regions[i].terrain = TERRAIN_NORMAL;
+        w->regions[i].tiles = 0;
+        w->regions[i].seed_tile = sources[i];
+        w->regions[i].adj = 0;
+        w->regions[i].restoration = 0.0f;
+    }
+
+    for (y = 0; y < WORLD_H; y++) {
+        for (x = 0; x < WORLD_W; x++) {
+            Uint8 r = sc->owner[y * WORLD_W + x];
+            w->region[y][x] = r;
+            if (r != REGION_NONE)
+                w->regions[r].tiles++;
+        }
+    }
+
+    /* Adjacency. Recorded both ways so the graph is symmetric by construction
+     * rather than by hoping both passes agree. */
+    for (y = 0; y < WORLD_H; y++) {
+        for (x = 0; x < WORLD_W; x++) {
+            Uint8 a = w->region[y][x];
+            if (a == REGION_NONE)
+                continue;
+            if (x + 1 < WORLD_W) {
+                Uint8 b = w->region[y][x + 1];
+                if (b != REGION_NONE && b != a) {
+                    w->regions[a].adj |= 1u << b;
+                    w->regions[b].adj |= 1u << a;
+                }
+            }
+            if (y + 1 < WORLD_H) {
+                Uint8 b = w->region[y + 1][x];
+                if (b != REGION_NONE && b != a) {
+                    w->regions[a].adj |= 1u << b;
+                    w->regions[b].adj |= 1u << a;
+                }
+            }
+        }
+    }
+
+    w->spawn_region = (int)w->region[spawn_tile / WORLD_W][spawn_tile % WORLD_W];
+    return count;
+}
+
+/* Hop distance from the spawn region through the region graph, ignoring ability
+ * gates. Used to bias where gated terrain goes: gates far from spawn produce a
+ * sensible difficulty ramp, gates adjacent to spawn produce a wall in the
+ * player's face on turn one. */
+static void regions_depth(const World *w, int *depth)
+{
+    int queue[REGION_COUNT], head = 0, tail = 0, i;
+
+    for (i = 0; i < w->region_count; i++)
+        depth[i] = -1;
+    if (w->spawn_region < 0 || w->spawn_region >= w->region_count)
+        return;
+
+    depth[w->spawn_region] = 0;
+    queue[tail++] = w->spawn_region;
+    while (head < tail) {
+        int r = queue[head++];
+        for (i = 0; i < w->region_count; i++) {
+            if ((w->regions[r].adj & (1u << i)) && depth[i] < 0) {
+                depth[i] = depth[r] + 1;
+                queue[tail++] = i;
+            }
+        }
+    }
+}
+
+/* Assign terrain, biased by depth so gating ramps outward from spawn. This only
+ * has to be *plausible* — the reachability invariant is what makes it correct,
+ * and it regenerates this if the layout turns out unsolvable. */
+static void regions_assign_terrain(World *w, Rng *rng, const int *depth)
+{
+    int i;
+    int max_depth = 0;
+
+    for (i = 0; i < w->region_count; i++)
+        if (depth[i] > max_depth)
+            max_depth = depth[i];
+
+    for (i = 0; i < w->region_count; i++) {
+        w->regions[i].terrain = TERRAIN_NORMAL;
+        if (i == w->spawn_region || depth[i] <= 1 || max_depth == 0)
+            continue; /* spawn and its immediate neighbours stay open */
+        {
+            float t = (float)depth[i] / (float)max_depth;
+            if (rng_float(rng) < t * 0.75f)
+                w->regions[i].terrain =
+                    (Uint8)(TERRAIN_WATER + (int)(rng_float(rng) * 3.0f) % 3);
+        }
+    }
+}
+
+/* ------------------------------------------------- reachability invariant -- */
+
+/* Which regions can be entered with this ability set, walking out from spawn.
+ * Bitmask over regions — REGION_COUNT is capped at 32 for exactly this. */
+static Uint32 regions_reachable(const World *w, Uint8 abilities)
+{
+    Uint32 visited = 0;
+    int queue[REGION_COUNT], head = 0, tail = 0, i;
+    int start = w->spawn_region;
+
+    if (start < 0 || start >= w->region_count)
+        return 0;
+    if (terrain_requires[w->regions[start].terrain] & ~abilities)
+        return 0;
+
+    visited = 1u << start;
+    queue[tail++] = start;
+    while (head < tail) {
+        int r = queue[head++];
+        for (i = 0; i < w->region_count; i++) {
+            if (!(w->regions[r].adj & (1u << i)))
+                continue;
+            if (visited & (1u << i))
+                continue;
+            if (terrain_requires[w->regions[i].terrain] & ~abilities)
+                continue;
+            visited |= 1u << i;
+            queue[tail++] = i;
+        }
+    }
+    return visited;
+}
+
+/* THE invariant (design/systems/World Generation.md): at every ability tier the
+ * player holds, at least one un-restored fragment must be reachable. Simulated
+ * as an actual playthrough — repeatedly restore everything currently reachable,
+ * bank any abilities that grants, and see if the frontier ever opens further.
+ * If the loop stalls with entities left, the world has a dead end.
+ *
+ * Cheaper and stricter than eyeballing a map, and it is the only thing standing
+ * between us and an unwinnable seed reaching a judge. */
+static int world_solvable(const World *w, const Entity *ents, int *out_restored)
+{
+    Uint8 abilities = 0;
+    Uint32 restored = 0;
+    int count = 0, progressed = 1;
+
+    while (progressed) {
+        Uint32 reach = regions_reachable(w, abilities);
+        int i;
+        progressed = 0;
+        for (i = 0; i < ENTITY_COUNT; i++) {
+            if (restored & (1u << i))
+                continue;
+            if (ents[i].region >= w->region_count)
+                continue;
+            if (!(reach & (1u << ents[i].region)))
+                continue;
+            restored |= 1u << i;
+            abilities |= ents[i].grants;
+            count++;
+            progressed = 1;
+        }
+    }
+    if (out_restored)
+        *out_restored = count;
+    return count == ENTITY_COUNT;
+}
+
+static int pick_region(Uint32 mask, int region_count, Rng *rng)
+{
+    int list[REGION_COUNT], n = 0, i;
+
+    for (i = 0; i < region_count; i++)
+        if (mask & (1u << i))
+            list[n++] = i;
+    if (n == 0)
+        return -1;
+    return list[rng_below(rng, (Uint32)n)];
+}
+
+/* Reservoir sampling: one pass, uniform, no temporary tile list. */
+static int pick_tile_in_region(const World *w, int r, Rng *rng)
+{
+    int chosen = -1, seen = 0, x, y;
+
+    for (y = 0; y < WORLD_H; y++) {
+        for (x = 0; x < WORLD_W; x++) {
+            if (w->region[y][x] != r)
+                continue;
+            seen++;
+            if (rng_below(rng, (Uint32)seen) == 0)
+                chosen = y * WORLD_W + x;
+        }
+    }
+    return chosen;
+}
+
+/* Place the three ability grants on the advancing frontier — each one inside
+ * what is reachable *before* it is granted — then scatter the rest anywhere
+ * reachable once everything is held. Placing by frontier rather than at random
+ * makes solvable layouts the common case; world_solvable is still what proves
+ * it, since this alone guarantees nothing. */
+static void place_entities(World *w, Rng *rng, Entity *ents)
+{
+    static const Uint8 grant_order[3] = { ABIL_WADE, ABIL_CLIMB, ABIL_KINDLE };
+    Uint8 held = 0;
+    int i;
+
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        ents[i].tile = -1;
+        ents[i].region = REGION_NONE;
+        ents[i].grants = 0;
+        ents[i].is_soul = (Uint8)(i >= FRAGMENT_COUNT);
+        ents[i].restored = 0;
+    }
+
+    for (i = 0; i < 3; i++) {
+        Uint32 reach = regions_reachable(w, held);
+        int r = pick_region(reach, w->region_count, rng);
+        if (r < 0)
+            break;
+        ents[i].region = (Uint8)r;
+        ents[i].tile = pick_tile_in_region(w, r, rng);
+        ents[i].grants = grant_order[i];
+        held |= grant_order[i];
+    }
+
+    {
+        Uint32 reach = regions_reachable(w, held);
+        for (i = 3; i < ENTITY_COUNT; i++) {
+            int r = pick_region(reach, w->region_count, rng);
+            if (r < 0)
+                r = w->spawn_region;
+            ents[i].region = (Uint8)r;
+            ents[i].tile = pick_tile_in_region(w, r, rng);
+        }
+    }
+}
+
+/* Generate-then-verify, with a fallback that cannot fail. Returns attempts used
+ * (positive), or a negative depth if it had to ungate regions to guarantee
+ * solvability. design/Cut List.md lists the reachability guarantee as never
+ * cuttable, so losing some gating is the correct trade against shipping a seed
+ * that cannot be completed. */
+static int world_place_and_verify(World *w, Rngs *rngs, const int *depth, Entity *ents)
+{
+    int attempt, d, i;
+
+    for (attempt = 0; attempt < 64; attempt++) {
+        regions_assign_terrain(w, &rngs->terrain, depth);
+        place_entities(w, &rngs->entities, ents);
+        if (world_solvable(w, ents, NULL))
+            return attempt + 1;
+    }
+
+    /* Ungate outward, shallowest first, keeping as much gating as possible. */
+    for (d = 1; d <= REGION_COUNT; d++) {
+        for (i = 0; i < w->region_count; i++)
+            if (depth[i] == d)
+                w->regions[i].terrain = TERRAIN_NORMAL;
+        place_entities(w, &rngs->entities, ents);
+        if (world_solvable(w, ents, NULL))
+            return -d;
+    }
+
+    for (i = 0; i < w->region_count; i++)
+        w->regions[i].terrain = TERRAIN_NORMAL;
+    place_entities(w, &rngs->entities, ents);
+    return -100;
+}
+
+/* Can a tile be stood on with this ability set? Rock always blocks; open ground
+ * blocks when its region demands an ability the player has not recovered.
+ * This is the whole of terrain gating, per design/systems/Abilities.md. */
+static int tile_blocked(const World *w, Uint8 abilities, int tx, int ty)
+{
+    Uint8 reg;
+
+    if (solid_at(w, tx, ty))
+        return 1;
+    reg = w->region[ty][tx];
+    if (reg == REGION_NONE)
+        return 0;
+    return (terrain_requires[w->regions[reg].terrain] & ~abilities) != 0;
+}
+
+/* Does the player's AABB, centred here, overlap any blocked tile? */
+static int player_blocked(const World *w, Uint8 abilities, float cx, float cy)
 {
     float h = PLAYER_SIZE * 0.5f;
     int x0 = (int)SDL_floorf((cx - h) / TILE);
@@ -360,7 +850,7 @@ static int player_blocked(const World *w, float cx, float cy)
 
     for (ty = y0; ty <= y1; ty++)
         for (tx = x0; tx <= x1; tx++)
-            if (solid_at(w, tx, ty))
+            if (tile_blocked(w, abilities, tx, ty))
                 return 1;
     return 0;
 }
@@ -382,7 +872,7 @@ static void move_axis(Game *g, float dx, float dy)
 
         nx = g->p.x + (dx != 0.0f ? step : 0.0f);
         ny = g->p.y + (dy != 0.0f ? step : 0.0f);
-        if (player_blocked(&g->w, nx, ny))
+        if (player_blocked(&g->w, g->p.abilities, nx, ny))
             return;
         g->p.x = nx;
         g->p.y = ny;
@@ -411,9 +901,10 @@ static void reveal_around(Game *g, float dt)
             d2 = ddx * ddx + ddy * ddy;
             if (d2 > r * r)
                 continue;
-            /* Full strength at the centre, tapering to nothing at the edge, so
-             * the boundary is a soft gradient rather than a visible disc. */
-            target = 1.0f - (float)d2 / (float)(r * r);
+            /* Tapers to nothing at the edge, so the boundary is a soft gradient
+             * rather than a visible disc. Capped at SIGHT_MAX: walking past
+             * something never fully restores it. */
+            target = SIGHT_MAX * (1.0f - (float)d2 / (float)(r * r));
             cell = &g->w.reveal[ty][tx];
             if (*cell < target) {
                 *cell += REVEAL_RATE * dt;
@@ -436,10 +927,82 @@ static void input_poll(Input *in)
     in->right = keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT];
 }
 
+/* Nearest un-restored entity within reach, or -1. Proximity + a keypress is the
+ * whole interaction — design/systems/Fragments.md is explicit that restoration
+ * is "a short confirm beat, not a puzzle-minigame". */
+static int entity_in_reach(const Game *g)
+{
+    int best = -1, i;
+    float best_d2 = INTERACT_RADIUS * INTERACT_RADIUS;
+
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        float ex, ey, dx, dy, d2;
+        if (g->ents[i].restored || g->ents[i].tile < 0)
+            continue;
+        ex = (float)(g->ents[i].tile % WORLD_W) * TILE + TILE * 0.5f;
+        ey = (float)(g->ents[i].tile / WORLD_W) * TILE + TILE * 0.5f;
+        dx = ex - g->p.x;
+        dy = ey - g->p.y;
+        d2 = dx * dx + dy * dy;
+        if (d2 <= best_d2) {
+            best_d2 = d2;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* The loop the whole game is built around: restore a memory, the region's
+ * colour returns, and sometimes an ability comes back with it and opens terrain
+ * that was closed a moment ago. Returns the entity restored, or -1. */
+static int try_restore(Game *g)
+{
+    int i = entity_in_reach(g);
+
+    if (i < 0)
+        return -1;
+    g->ents[i].restored = 1;
+    g->p.abilities |= g->ents[i].grants;
+    if (g->ents[i].region < g->w.region_count)
+        g->w.regions[g->ents[i].region].restore_to = 1.0f;
+    if (g->ents[i].is_soul)
+        g->souls_restored++;
+    else
+        g->frags_restored++;
+    return i;
+}
+
+static int game_complete(const Game *g)
+{
+    return g->frags_restored + g->souls_restored >= ENTITY_COUNT;
+}
+
+/* The 4-stage world-growth read from design/Overview.md. Purely a display
+ * bucketing of the same underlying per-region float. */
+static int world_stage(const Game *g)
+{
+    float sum = 0.0f;
+    int i;
+
+    if (game_complete(g))
+        return 3; /* Fully Restored */
+    if (g->w.region_count <= 0)
+        return 0;
+    for (i = 0; i < g->w.region_count; i++)
+        sum += g->w.regions[i].restoration;
+    sum /= (float)g->w.region_count;
+    if (sum <= 0.001f)
+        return 0; /* Unexplored */
+    if (sum < 0.5f)
+        return 1; /* Partly Revealed */
+    return 2;     /* Many Memories Restored */
+}
+
 static void sim_step(Game *g, const Input *in, float dt)
 {
     float mx = (float)(in->right - in->left);
     float my = (float)(in->down - in->up);
+    int i;
 
     /* Normalise diagonals, or moving corner-wise is 1.41x faster than straight. */
     if (mx != 0.0f && my != 0.0f) {
@@ -450,6 +1013,16 @@ static void sim_step(Game *g, const Input *in, float dt)
     move_axis(g, mx * PLAYER_SPEED * dt, 0.0f);
     move_axis(g, 0.0f, my * PLAYER_SPEED * dt);
     reveal_around(g, dt);
+
+    /* Ease each region's colour back rather than snapping it. */
+    for (i = 0; i < g->w.region_count; i++) {
+        Region *r = &g->w.regions[i];
+        if (r->restoration < r->restore_to) {
+            r->restoration += RESTORE_RATE * dt;
+            if (r->restoration > r->restore_to)
+                r->restoration = r->restore_to;
+        }
+    }
 }
 
 /* Flood-fill the open region containing (sx,sy). Returns its tile count and,
@@ -507,14 +1080,22 @@ static int flood_open(const World *w, Uint8 *seen, int *stack, int sx, int sy,
  * effect were untestable. */
 static int game_init(Game *g, Rngs *rngs)
 {
-    /* Locals, not statics — see the note in world_gen. ~18 KB of frame, which
-     * is nothing against the default 2 MB stack, and zero bytes in the file. */
-    Uint8 seen[WORLD_W * WORLD_H];
-    int stack[WORLD_W * WORLD_H];
+    /* Scratch is a local, not a static — see the .data trap in
+     * design/Toolchain Setup.md. ~47 KB of frame against a 2 MB stack. */
+    Scratch sc;
+    Uint8 *seen = sc.seen;
+    int *stack = sc.stack;
+    int depth[REGION_COUNT];
     int x, y, biggest = 0, biggest_first = -1;
 
+    /* Wipe everything first. Leaving progress counters alone made restoration
+     * totals accumulate across regenerations — pressing R would have carried
+     * the previous world's fragment count into the new one, and
+     * game_complete() would fire on a world nobody had touched. */
+    SDL_zero(*g);
+
     world_gen(&g->w, &rngs->terrain);
-    SDL_memset(seen, 0, sizeof(seen));
+    SDL_memset(seen, 0, sizeof(sc.seen));
 
     /* Pass 1: find the largest open region. */
     for (y = 1; y < WORLD_H - 1; y++) {
@@ -534,6 +1115,8 @@ static int game_init(Game *g, Rngs *rngs)
         g->p.y = (float)(WORLD_H / 2) * TILE + TILE * 0.5f;
         g->cam_x = 0;
         g->cam_y = 0;
+        g->w.region_count = 0;
+        g->w.spawn_region = -1;
         return 1;
     }
 
@@ -546,7 +1129,12 @@ static int game_init(Game *g, Rngs *rngs)
         int sum_x = 0, sum_y = 0, first = -1;
         int cx, cy, best_d = WORLD_W * WORLD_W + WORLD_H * WORLD_H, best_idx = biggest_first;
 
-        SDL_memset(seen, 0, sizeof(seen));
+        /* sizeof(sc.seen), NOT sizeof(seen): `seen` is a pointer, so sizeof
+         * would be 8 and this memset would clear almost nothing — leaving pass
+         * 1's marks in place, making this flood return immediately and letting
+         * the centroid search below range over every component instead of this
+         * one. That put spawns in tiny side pockets. */
+        SDL_memset(seen, 0, sizeof(sc.seen));
         (void)flood_open(&g->w, seen, stack, biggest_first % WORLD_W,
                          biggest_first / WORLD_W, &first, &sum_x, &sum_y);
         cx = sum_x / biggest;
@@ -566,6 +1154,10 @@ static int game_init(Game *g, Rngs *rngs)
         }
         g->p.x = (float)(best_idx % WORLD_W) * TILE + TILE * 0.5f;
         g->p.y = (float)(best_idx / WORLD_W) * TILE + TILE * 0.5f;
+
+        regions_build(&g->w, &sc, best_idx);
+        regions_depth(&g->w, depth);
+        g->gen_attempts = world_place_and_verify(&g->w, rngs, depth, g->ents);
     }
 
     g->cam_x = 0;
@@ -617,9 +1209,22 @@ static Uint32 fog_lerp(SDL_Surface *s, int r, int gr, int b, float reveal)
                       (Uint8)(fb + ((float)b - fb) * reveal));
 }
 
-static void render(SDL_Surface *fb, Game *g)
+/* True colour per terrain, before the fog blend. Flat-shaded and readable —
+ * design/Overview.md is explicit that the painted mockup is pitch art and the
+ * in-engine target is simple procedural geometry. */
+static void terrain_colour(int terrain, int *r, int *g, int *b)
 {
-    int tx, ty;
+    switch (terrain) {
+    case TERRAIN_WATER: *r = 0x3a; *g = 0x72; *b = 0xa8; break; /* Wade */
+    case TERRAIN_LEDGE: *r = 0x8a; *g = 0x7a; *b = 0x5a; break; /* Climb */
+    case TERRAIN_DARK:  *r = 0x4a; *g = 0x3a; *b = 0x6a; break; /* Kindle */
+    default:            *r = 0x4e; *g = 0x9e; *b = 0x54; break;
+    }
+}
+
+static void render(SDL_Surface *fb, Game *g, int overlay)
+{
+    int tx, ty, i;
     int tx0 = g->cam_x / TILE;
     int ty0 = g->cam_y / TILE;
     int tx1 = (g->cam_x + fb->w) / TILE + 1;
@@ -628,19 +1233,162 @@ static void render(SDL_Surface *fb, Game *g)
     for (ty = ty0; ty <= ty1; ty++) {
         for (tx = tx0; tx <= tx1; tx++) {
             Uint32 c;
-            int solid;
+            int cr, cg, cb;
+            float rev;
             if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H)
                 continue;
-            solid = g->w.solid[ty][tx];
-            c = solid ? fog_lerp(fb, 0x5a, 0x4a, 0x3c, g->w.reveal[ty][tx])
-                      : fog_lerp(fb, 0x4e, 0x9e, 0x54, g->w.reveal[ty][tx]);
+            {
+                /* Sight shows shape; restoration brings colour. Whichever is
+                 * stronger wins, so a restored region stays lit after you
+                 * leave it — restoration is permanent, sight is not a memory
+                 * of colour. */
+                Uint8 rg = g->w.region[ty][tx];
+                float restored = (rg == REGION_NONE) ? 0.0f
+                                                     : g->w.regions[rg].restoration;
+                rev = g->w.reveal[ty][tx];
+                if (restored > rev)
+                    rev = restored;
+                if (overlay)
+                    rev = 1.0f;
+            }
+            if (g->w.solid[ty][tx]) {
+                cr = 0x5a; cg = 0x4a; cb = 0x3c;
+            } else {
+                Uint8 reg = g->w.region[ty][tx];
+                terrain_colour(reg == REGION_NONE ? TERRAIN_NORMAL
+                                                  : g->w.regions[reg].terrain,
+                               &cr, &cg, &cb);
+                /* Alternate brightness by region id so boundaries are visible
+                 * without needing a font or an outline pass. */
+                if (overlay && reg != REGION_NONE && (reg & 1)) {
+                    cr = cr * 3 / 4; cg = cg * 3 / 4; cb = cb * 3 / 4;
+                }
+            }
+            c = fog_lerp(fb, cr, cg, cb, rev);
             fill_rect(fb, tx * TILE - g->cam_x, ty * TILE - g->cam_y, TILE, TILE, c);
         }
+    }
+
+    /* Entities. Found Souls follow Lost -> Found -> Remembered from their design
+     * note: unseen, then a pale grey silhouette, then coloured once restored.
+     * Fragments glow warm, ability-granting ones brighter, and fade to a dim
+     * marker once restored so a cleared region does not still look full of
+     * things to do. */
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        int t = g->ents[i].tile, ex, ey, s;
+        int cr, cg, cb;
+        if (t < 0)
+            continue;
+        ex = t % WORLD_W;
+        ey = t / WORLD_W;
+        if (!overlay && g->w.reveal[ey][ex] < 0.15f)
+            continue; /* Lost: not yet discovered */
+        if (g->ents[i].is_soul) {
+            if (g->ents[i].restored) {
+                cr = 0xf0; cg = 0xd0; cb = 0x90; s = 9; /* Remembered */
+            } else {
+                cr = 0x9a; cg = 0xa8; cb = 0xb8; s = 9; /* Found */
+            }
+        } else if (g->ents[i].restored) {
+            cr = 0x6a; cg = 0x6a; cb = 0x62; s = 4;
+        } else if (g->ents[i].grants) {
+            cr = 0xff; cg = 0x9a; cb = 0x3c; s = 8;
+        } else {
+            cr = 0xff; cg = 0xd7; cb = 0x6a; s = 6;
+        }
+        fill_rect(fb, ex * TILE + (TILE - s) / 2 - g->cam_x,
+                  ey * TILE + (TILE - s) / 2 - g->cam_y, s, s,
+                  SDL_MapRGB(fb->format, (Uint8)cr, (Uint8)cg, (Uint8)cb));
+    }
+
+    /* A ring under the player when something is close enough to restore —
+     * the only affordance telling you the interact key will do anything. */
+    if (entity_in_reach(g) >= 0) {
+        int px = (int)g->p.x - g->cam_x, py = (int)g->p.y - g->cam_y;
+        Uint32 c = SDL_MapRGB(fb->format, 0xff, 0xf0, 0xc0);
+        fill_rect(fb, px - 11, py - 13, 22, 2, c);
+        fill_rect(fb, px - 11, py + 11, 22, 2, c);
+        fill_rect(fb, px - 13, py - 11, 2, 22, c);
+        fill_rect(fb, px + 11, py - 11, 2, 22, c);
     }
 
     fill_rect(fb, (int)g->p.x - PLAYER_SIZE / 2 - g->cam_x,
               (int)g->p.y - PLAYER_SIZE / 2 - g->cam_y, PLAYER_SIZE, PLAYER_SIZE,
               SDL_MapRGB(fb->format, 0xe0, 0x64, 0x28));
+}
+
+/* Grid view: several seeds at once, which is how you spot a generator that is
+ * subtly biased far faster than by walking one world at a time. Rendered once
+ * into a heap buffer rather than regenerating every frame — generation is far
+ * too slow to run 12 worlds per frame. */
+#define GRID_COLS 4
+#define GRID_ROWS 3
+#define GRID_CELLS (GRID_COLS * GRID_ROWS)
+
+static void render_grid(SDL_Surface *fb, Uint64 base_seed)
+{
+    int cell_w = fb->w / GRID_COLS;
+    int cell_h = fb->h / GRID_ROWS;
+    int c;
+
+    fill_rect(fb, 0, 0, fb->w, fb->h, SDL_MapRGB(fb->format, 0x08, 0x0a, 0x0e));
+
+    for (c = 0; c < GRID_CELLS; c++) {
+        Game *g = (Game *)SDL_malloc(sizeof(Game));
+        Rngs rngs;
+        int px = (cell_w - 4) / WORLD_W;
+        int py = (cell_h - 4) / WORLD_H;
+        int ps = px < py ? px : py;
+        int ox, oy, x, y, i;
+
+        if (!g)
+            return;
+        if (ps < 1)
+            ps = 1;
+
+        /* Centre each thumbnail in its cell so the grid reads as a deliberate
+         * layout rather than art stranded in the top-left of each box. */
+        ox = (c % GRID_COLS) * cell_w + (cell_w - WORLD_W * ps) / 2;
+        oy = (c / GRID_COLS) * cell_h + (cell_h - WORLD_H * ps) / 2;
+
+        rngs_init(&rngs, base_seed + (Uint64)c);
+        (void)game_init(g, &rngs);
+
+        for (y = 0; y < WORLD_H; y++) {
+            for (x = 0; x < WORLD_W; x++) {
+                int cr, cg, cb;
+                Uint8 reg = g->w.region[y][x];
+                if (g->w.solid[y][x]) {
+                    cr = 0x30; cg = 0x2a; cb = 0x24;
+                } else {
+                    terrain_colour(reg == REGION_NONE ? TERRAIN_NORMAL
+                                                      : g->w.regions[reg].terrain,
+                                   &cr, &cg, &cb);
+                    if (reg != REGION_NONE && (reg & 1)) {
+                        cr = cr * 3 / 4; cg = cg * 3 / 4; cb = cb * 3 / 4;
+                    }
+                }
+                fill_rect(fb, ox + x * ps, oy + y * ps, ps, ps,
+                          SDL_MapRGB(fb->format, (Uint8)cr, (Uint8)cg, (Uint8)cb));
+            }
+        }
+        for (i = 0; i < ENTITY_COUNT; i++) {
+            int t = g->ents[i].tile;
+            if (t < 0)
+                continue;
+            fill_rect(fb, ox + (t % WORLD_W) * ps, oy + (t / WORLD_W) * ps,
+                      ps + 1, ps + 1,
+                      SDL_MapRGB(fb->format,
+                                 g->ents[i].is_soul ? 0xb0 : 0xff,
+                                 g->ents[i].is_soul ? 0xc4 : 0xd7,
+                                 g->ents[i].is_soul ? 0xd8 : 0x6a));
+        }
+        /* Spawn marker. */
+        fill_rect(fb, ox + (int)(g->p.x / TILE) * ps,
+                  oy + (int)(g->p.y / TILE) * ps, ps + 2, ps + 2,
+                  SDL_MapRGB(fb->format, 0xe0, 0x64, 0x28));
+        SDL_free(g);
+    }
 }
 
 static void camera_follow(Game *g, int view_w, int view_h)
@@ -682,7 +1430,7 @@ static int move_selftest(Uint64 seed, int verbose)
         fails++;
     }
 
-    if (player_blocked(&g.w, g.p.x, g.p.y)) {
+    if (player_blocked(&g.w, g.p.abilities, g.p.x, g.p.y)) {
         printf("  seed %.0f: SPAWNED INSIDE A WALL\n", (double)seed);
         fails++;
     }
@@ -712,7 +1460,7 @@ static int move_selftest(Uint64 seed, int verbose)
         for (i = 0; i < 240; i++) { /* 4 seconds per direction */
             sim_step(&g, &in, TICK_DT);
             steps++;
-            if (player_blocked(&g.w, g.p.x, g.p.y))
+            if (player_blocked(&g.w, g.p.abilities, g.p.x, g.p.y))
                 overlaps++;
         }
     }
@@ -741,6 +1489,592 @@ static int move_selftest(Uint64 seed, int verbose)
                100 * open_tiles / (WORLD_W * WORLD_H), (double)moved, overlaps,
                fails ? "FAIL" : "PASS");
 
+    return fails;
+}
+
+/* Structural checks on the region graph. These are the properties everything in
+ * Week 2 and 3 leans on; if any fails, fragment placement and the reachability
+ * invariant are built on sand. */
+static int region_selftest(Uint64 seed, int verbose)
+{
+    Game g;
+    Rngs rngs;
+    Scratch sc;
+    int depth[REGION_COUNT];
+    int i, x, y, fails = 0, open_tiles, assigned = 0;
+    int counted[REGION_COUNT];
+    int terrain_hist[TERRAIN_COUNT];
+
+    rngs_init(&rngs, seed);
+    open_tiles = game_init(&g, &rngs);
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            if (g.w.region[y][x] != REGION_NONE)
+                assigned++;
+
+    if (g.w.region_count < 2) {
+        printf("  seed %.0f: only %d regions\n", (double)seed, g.w.region_count);
+        return 1;
+    }
+
+    /* 1. Every region owns at least one tile, and tile counts agree. */
+    for (i = 0; i < REGION_COUNT; i++)
+        counted[i] = 0;
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            if (g.w.region[y][x] != REGION_NONE)
+                counted[g.w.region[y][x]]++;
+    for (i = 0; i < g.w.region_count; i++) {
+        if (counted[i] == 0) {
+            printf("  seed %.0f: region %d is empty\n", (double)seed, i);
+            fails++;
+        }
+        if (counted[i] != g.w.regions[i].tiles) {
+            printf("  seed %.0f: region %d tile count %d != recorded %d\n",
+                   (double)seed, i, counted[i], g.w.regions[i].tiles);
+            fails++;
+        }
+    }
+
+    /* 2. Adjacency is symmetric and never self-referential. */
+    for (i = 0; i < g.w.region_count; i++) {
+        int j;
+        if (g.w.regions[i].adj & (1u << i)) {
+            printf("  seed %.0f: region %d adjacent to itself\n", (double)seed, i);
+            fails++;
+        }
+        for (j = 0; j < g.w.region_count; j++) {
+            int ij = (g.w.regions[i].adj >> j) & 1u;
+            int ji = (g.w.regions[j].adj >> i) & 1u;
+            if (ij != ji) {
+                printf("  seed %.0f: adjacency asymmetric %d<->%d\n", (double)seed, i, j);
+                fails++;
+            }
+        }
+    }
+
+    /* 3. Each region is CONTIGUOUS: flood one of its tiles staying inside the
+     *    region and you must recover every tile it claims. A disconnected
+     *    region would let a fragment sit somewhere the region's gate implies
+     *    is reachable when it is not. */
+    for (i = 0; i < g.w.region_count; i++) {
+        int first = -1, n, sx = 0, sy = 0;
+        SDL_memset(sc.seen, 0, sizeof(sc.seen));
+        /* Mark every tile NOT in region i as already seen, so the fill cannot
+         * leave the region. */
+        for (y = 0; y < WORLD_H; y++)
+            for (x = 0; x < WORLD_W; x++)
+                if (g.w.region[y][x] != i)
+                    sc.seen[y * WORLD_W + x] = 1;
+        n = flood_open(&g.w, sc.seen, sc.stack,
+                       g.w.regions[i].seed_tile % WORLD_W,
+                       g.w.regions[i].seed_tile / WORLD_W, &first, &sx, &sy);
+        if (n != counted[i]) {
+            printf("  seed %.0f: region %d NOT CONTIGUOUS (%d of %d tiles)\n",
+                   (double)seed, i, n, counted[i]);
+            fails++;
+        }
+    }
+
+    /* 4. Graph is connected ignoring ability gates — otherwise some regions
+     *    could never be entered no matter what the player collects. */
+    regions_depth(&g.w, depth);
+    for (i = 0; i < g.w.region_count; i++) {
+        if (depth[i] < 0) {
+            printf("  seed %.0f: region %d unreachable in the graph\n", (double)seed, i);
+            fails++;
+        }
+    }
+
+    /* 5. COVERAGE: every tile the player can walk to must belong to a region.
+     *    This is the check that matters, and the one whose absence let a badly
+     *    broken partition pass everything else — the other tests are all
+     *    relative (counts agreeing with counts), so a partition covering 5 of
+     *    1585 walkable tiles satisfied them trivially. Assert the absolute
+     *    property, not just internal consistency. */
+    if (assigned != open_tiles) {
+        printf("  seed %.0f: COVERAGE %d of %d walkable tiles assigned to regions\n",
+               (double)seed, assigned, open_tiles);
+        fails++;
+    }
+
+    /* 6. Spawn must be enterable with no abilities at all. */
+    if (terrain_requires[g.w.regions[g.w.spawn_region].terrain] != ABIL_NONE) {
+        printf("  seed %.0f: SPAWN REGION IS GATED\n", (double)seed);
+        fails++;
+    }
+
+    for (i = 0; i < TERRAIN_COUNT; i++)
+        terrain_hist[i] = 0;
+    for (i = 0; i < g.w.region_count; i++)
+        terrain_hist[g.w.regions[i].terrain]++;
+
+    if (verbose) {
+        int maxd = 0;
+        for (i = 0; i < g.w.region_count; i++)
+            if (depth[i] > maxd) maxd = depth[i];
+        printf("  seed %-10.0f spawn-comp %4d  assigned %4d  regions %2d  depth %d  "
+               "open/water/ledge/dark %d/%d/%d/%d  %s\n",
+               (double)seed, open_tiles, assigned, g.w.region_count, maxd,
+               terrain_hist[TERRAIN_NORMAL], terrain_hist[TERRAIN_WATER],
+               terrain_hist[TERRAIN_LEDGE], terrain_hist[TERRAIN_DARK],
+               fails ? "FAIL" : "PASS");
+    }
+    return fails;
+}
+
+/* Walk the world at tile granularity under a given ability set, using the SAME
+ * blocking rule the movement code uses, and report which regions were actually
+ * entered.
+ *
+ * 4-connected on purpose: move_axis resolves each axis separately, so a
+ * diagonal squeeze between two blocked orthogonal neighbours is not passable in
+ * the real game either. */
+static Uint32 walk_regions(const World *w, Uint8 abilities, int spawn_tile,
+                           Uint8 *seen, int *queue)
+{
+    Uint32 touched = 0;
+    int head = 0, tail = 0, i;
+
+    for (i = 0; i < WORLD_W * WORLD_H; i++)
+        seen[i] = 0;
+    if (tile_blocked(w, abilities, spawn_tile % WORLD_W, spawn_tile / WORLD_W))
+        return 0;
+
+    seen[spawn_tile] = 1;
+    queue[tail++] = spawn_tile;
+    while (head < tail) {
+        int idx = queue[head++];
+        int x = idx % WORLD_W, y = idx / WORLD_W, d;
+        static const int dx[4] = { 1, -1, 0, 0 };
+        static const int dy[4] = { 0, 0, 1, -1 };
+        Uint8 reg = w->region[y][x];
+
+        if (reg != REGION_NONE)
+            touched |= 1u << reg;
+
+        for (d = 0; d < 4; d++) {
+            int nx = x + dx[d], ny = y + dy[d], nidx;
+            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+                continue;
+            if (tile_blocked(w, abilities, nx, ny))
+                continue;
+            nidx = ny * WORLD_W + nx;
+            if (seen[nidx])
+                continue;
+            seen[nidx] = 1;
+            queue[tail++] = nidx;
+        }
+    }
+    return touched;
+}
+
+/* The model and the game must agree.
+ *
+ * Week 2's reachability guarantee is computed on the region graph, but what a
+ * player can actually reach is decided by tile-level collision. If those two
+ * ever disagree, the guarantee is worthless — the generator would certify a
+ * world as completable that the movement code makes impossible. So compare them
+ * directly at every ability tier. */
+static int gating_selftest(Uint64 seed, int verbose)
+{
+    Game g;
+    Rngs rngs;
+    Scratch sc;
+    static const Uint8 tiers[4] = {
+        ABIL_NONE,
+        ABIL_WADE,
+        ABIL_WADE | ABIL_CLIMB,
+        ABIL_WADE | ABIL_CLIMB | ABIL_KINDLE
+    };
+    int t, fails = 0, spawn_tile;
+    int gated_seen = 0;
+
+    rngs_init(&rngs, seed);
+    (void)game_init(&g, &rngs);
+    if (g.w.region_count < 2)
+        return 0;
+
+    spawn_tile = (int)(g.p.y / TILE) * WORLD_W + (int)(g.p.x / TILE);
+
+    for (t = 0; t < 4; t++) {
+        Uint32 walked = walk_regions(&g.w, tiers[t], spawn_tile, sc.seen, sc.queue);
+        Uint32 modelled = regions_reachable(&g.w, tiers[t]);
+        if (walked != modelled) {
+            printf("  seed %.0f tier %d: walk 0x%X != graph 0x%X\n",
+                   (double)seed, t, (unsigned)walked, (unsigned)modelled);
+            fails++;
+        }
+        /* With no abilities, at least one region must be out of reach on some
+         * seed, or gating is decorative and the test proves nothing. */
+        if (t == 0 && walked != regions_reachable(&g.w, 0xFF))
+            gated_seen = 1;
+    }
+
+    if (verbose)
+        printf("  seed %-10.0f tiers agree  gating actually blocks: %-3s  %s\n",
+               (double)seed, gated_seen ? "yes" : "no", fails ? "FAIL" : "PASS");
+    return fails;
+}
+
+/* BFS over tiles standable under `abilities` — the same rule the movement code
+ * enforces, so paths it produces are paths a player could actually walk. */
+static void bfs_gated(const World *w, Uint8 abilities, int start, int *dist, int *queue)
+{
+    int head = 0, tail = 0, i;
+
+    for (i = 0; i < WORLD_W * WORLD_H; i++)
+        dist[i] = -1;
+    if (tile_blocked(w, abilities, start % WORLD_W, start / WORLD_W))
+        return;
+
+    dist[start] = 0;
+    queue[tail++] = start;
+    while (head < tail) {
+        int idx = queue[head++];
+        int x = idx % WORLD_W, y = idx / WORLD_W, d;
+        static const int dx[4] = { 1, -1, 0, 0 };
+        static const int dy[4] = { 0, 0, 1, -1 };
+
+        for (d = 0; d < 4; d++) {
+            int nx = x + dx[d], ny = y + dy[d], nidx;
+            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+                continue;
+            if (tile_blocked(w, abilities, nx, ny))
+                continue;
+            nidx = ny * WORLD_W + nx;
+            if (dist[nidx] >= 0)
+                continue;
+            dist[nidx] = dist[idx] + 1;
+            queue[tail++] = nidx;
+        }
+    }
+}
+
+/* One tick of an autopilot that plays the real game: restores anything in
+ * reach, otherwise walks one step along a genuine shortest path to the nearest
+ * reachable un-restored entity. Uses the real collision, the real ability
+ * flags and the real restore call — nothing is teleported or shortcut, because
+ * the point is to catch a divergence between the model and the game.
+ *
+ * Returns 1 if it restored something, 0 if it moved, -1 if nothing is
+ * reachable (a dead end). */
+static int autopilot_tick(Game *g, Scratch *sc)
+{
+    static const int dx[4] = { 1, -1, 0, 0 };
+    static const int dy[4] = { 0, 0, 1, -1 };
+    int here, target = -1, best = 1 << 30, i, d, next = -1;
+    Input in;
+
+    if (try_restore(g) >= 0)
+        return 1;
+
+    here = (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE);
+
+    /* Nearest un-restored entity we can actually walk to right now. */
+    bfs_gated(&g->w, g->p.abilities, here, sc->dist, sc->queue);
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        int t = g->ents[i].tile;
+        if (g->ents[i].restored || t < 0 || sc->dist[t] < 0)
+            continue;
+        if (sc->dist[t] < best) {
+            best = sc->dist[t];
+            target = i;
+        }
+    }
+    if (target < 0)
+        return -1;
+
+    /* Re-root the field at the target so we can descend it from where we
+     * stand — that gives the next step directly, with no path buffer and no
+     * greedy steering to wedge in a concave corner. */
+    bfs_gated(&g->w, g->p.abilities, g->ents[target].tile, sc->dist, sc->queue);
+    if (sc->dist[here] < 0)
+        return -1;
+
+    for (d = 0; d < 4; d++) {
+        int nx = (here % WORLD_W) + dx[d], ny = (here / WORLD_W) + dy[d], nidx;
+        if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+            continue;
+        nidx = ny * WORLD_W + nx;
+        if (sc->dist[nidx] >= 0 && sc->dist[nidx] == sc->dist[here] - 1) {
+            next = nidx;
+            break;
+        }
+    }
+
+    SDL_zero(in);
+    {
+        /* Aim at the next tile centre, or the entity itself on the last leg. */
+        float wx, wy, ddx, ddy;
+        if (next >= 0) {
+            wx = (float)(next % WORLD_W) * TILE + TILE * 0.5f;
+            wy = (float)(next / WORLD_W) * TILE + TILE * 0.5f;
+        } else {
+            wx = (float)(g->ents[target].tile % WORLD_W) * TILE + TILE * 0.5f;
+            wy = (float)(g->ents[target].tile / WORLD_W) * TILE + TILE * 0.5f;
+        }
+        ddx = wx - g->p.x;
+        ddy = wy - g->p.y;
+        if (ddx > 0.6f) in.right = 1;
+        else if (ddx < -0.6f) in.left = 1;
+        if (ddy > 0.6f) in.down = 1;
+        else if (ddy < -0.6f) in.up = 1;
+    }
+    sim_step(g, &in, TICK_DT);
+    return 0;
+}
+
+/* Play the game to completion, headlessly.
+ *
+ * Week 2 proved worlds are solvable *in the model*. This proves it through the
+ * real code: real collision, real ability flags, real proximity radius, real
+ * restore. It walks to each reachable entity by BFS over walkable tiles, steps
+ * the actual simulation along that path, and presses the actual interact
+ * function. If the model and the game ever diverge, this stalls where a player
+ * would. */
+static int playthrough_selftest(Uint64 seed, int verbose)
+{
+    Game g;
+    Rngs rngs;
+    Scratch sc;
+    int steps = 0, restores = 0;
+    const char *reason = "complete";
+
+    rngs_init(&rngs, seed);
+    (void)game_init(&g, &rngs);
+    if (g.w.region_count < 2)
+        return 0;
+
+    while (!game_complete(&g) && steps < 200000) {
+        int r = autopilot_tick(&g, &sc);
+        if (r < 0) {
+            reason = "dead end: nothing reachable";
+            break;
+        }
+        if (r == 1)
+            restores++;
+        else
+            steps++;
+    }
+    if (!game_complete(&g) && steps >= 200000)
+        reason = "autopilot made no progress (step cap)";
+
+
+    if (verbose)
+        printf("  seed %-10.0f restored %2d/%2d  frags %2d  souls %d  abilities %d/3  "
+               "steps %6d  %s\n",
+               (double)seed, restores, ENTITY_COUNT, g.frags_restored,
+               g.souls_restored,
+               ((g.p.abilities & ABIL_WADE) ? 1 : 0) +
+                   ((g.p.abilities & ABIL_CLIMB) ? 1 : 0) +
+                   ((g.p.abilities & ABIL_KINDLE) ? 1 : 0),
+               steps, game_complete(&g) ? "COMPLETE" : reason);
+
+    return game_complete(&g) ? 0 : 1;
+}
+
+/* The same autopilot, but in a real window with real rendering. Exists so the
+ * restoration visual can be seen and captured deterministically — hunting for a
+ * fragment by hand with synthetic keystrokes is luck, and the core hook of this
+ * game is what the screen does when a memory comes back. */
+static int autoplay_selftest(Uint64 seed, int ms)
+{
+    Game g;
+    Rngs rngs;
+    Scratch sc;
+    SDL_Window *win;
+    SDL_Surface *fb;
+    Uint32 end;
+    int restores = 0;
+
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        printf("FAIL  SDL_Init(VIDEO): %s\n", SDL_GetError());
+        return 1;
+    }
+    win = SDL_CreateWindow("Wayfarer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                           WIN_W, WIN_H, SDL_WINDOW_SHOWN);
+    if (!win) {
+        SDL_Quit();
+        return 1;
+    }
+
+    rngs_init(&rngs, seed);
+    (void)game_init(&g, &rngs);
+    printf("autoplay seed %.0f for %d ms\n", (double)seed, ms);
+
+    end = SDL_GetTicks() + (Uint32)ms;
+    while (SDL_GetTicks() < end && !game_complete(&g)) {
+        SDL_Event ev;
+        int r;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT)
+                end = 0;
+        }
+        r = autopilot_tick(&g, &sc);
+        if (r == 1)
+            restores++;
+        else if (r < 0)
+            break;
+
+        fb = SDL_GetWindowSurface(win);
+        if (!fb || fb->format->BytesPerPixel != 4)
+            break;
+        camera_follow(&g, fb->w, fb->h);
+        render(fb, &g, 0);
+        SDL_UpdateWindowSurface(win);
+        SDL_Delay(4); /* faster than real time; this is a capture aid */
+    }
+
+    printf("restored %d  fragments %d/%d  souls %d/%d  stage %d\n",
+           restores, g.frags_restored, FRAGMENT_COUNT, g.souls_restored,
+           SOUL_COUNT, world_stage(&g));
+    SDL_DestroyWindow(win);
+    SDL_Quit();
+    return 0;
+}
+
+/* Negative control for the invariant checker.
+ *
+ * Every seed passing on the first attempt is good news about the generator but
+ * says nothing about the verifier: a checker hardwired to return "solvable"
+ * would produce identical output. So build worlds that are unwinnable on
+ * purpose and confirm it rejects them. A guarantee you have never seen fail is
+ * not a guarantee. */
+static int solvable_negative_test(Uint64 seed)
+{
+    Game g;
+    Rngs rngs;
+    int i, fails = 0, restored = 0;
+
+    rngs_init(&rngs, seed);
+    (void)game_init(&g, &rngs);
+    if (g.w.region_count < 3) {
+        printf("negative control: seed too degenerate, skipped\n");
+        return 0;
+    }
+
+    /* Positive control: everything ungated must be solvable. */
+    for (i = 0; i < g.w.region_count; i++)
+        g.w.regions[i].terrain = TERRAIN_NORMAL;
+    if (!world_solvable(&g.w, g.ents, &restored)) {
+        printf("negative control: FAILED positive case - ungated world called unsolvable\n");
+        fails++;
+    }
+
+    /* Case 1: seal every region behind Kindle and put the Kindle grant behind
+     * the seal. Nothing outside spawn can ever be entered. */
+    for (i = 0; i < g.w.region_count; i++)
+        if (i != g.w.spawn_region)
+            g.w.regions[i].terrain = TERRAIN_DARK;
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        int r = (g.w.spawn_region + 1) % g.w.region_count;
+        g.ents[i].region = (Uint8)r;
+    }
+    if (world_solvable(&g.w, g.ents, &restored)) {
+        printf("negative control: FAILED - sealed world reported solvable\n");
+        fails++;
+    } else if (restored != 0) {
+        printf("negative control: sealed world let %d entities through\n", restored);
+        fails++;
+    }
+
+    /* Case 2: a solvable chain with exactly one entity stranded behind a gate
+     * whose granting fragment is itself stranded. Catches a checker that only
+     * looks at the first tier instead of iterating to a fixed point. */
+    for (i = 0; i < g.w.region_count; i++)
+        g.w.regions[i].terrain = TERRAIN_NORMAL;
+    {
+        int stranded = (g.w.spawn_region + 1) % g.w.region_count;
+        g.w.regions[stranded].terrain = TERRAIN_WATER; /* needs Wade */
+        for (i = 0; i < ENTITY_COUNT; i++) {
+            g.ents[i].region = (Uint8)g.w.spawn_region;
+            g.ents[i].grants = 0;
+        }
+        /* The only Wade grant sits behind the Wade gate. */
+        g.ents[0].region = (Uint8)stranded;
+        g.ents[0].grants = ABIL_WADE;
+        if (world_solvable(&g.w, g.ents, &restored)) {
+            printf("negative control: FAILED - self-locked gate reported solvable\n");
+            fails++;
+        } else if (restored != ENTITY_COUNT - 1) {
+            printf("negative control: expected %d of %d restored, got %d\n",
+                   ENTITY_COUNT - 1, ENTITY_COUNT, restored);
+            fails++;
+        }
+    }
+
+    printf("negative control (verifier rejects unwinnable worlds): %s\n",
+           fails ? "FAIL" : "PASS");
+    return fails;
+}
+
+/* The reachability invariant, checked independently of the generator that is
+ * supposed to enforce it. Also confirms every entity actually sits on a
+ * walkable tile in the region it claims — a fragment placed inside rock is
+ * unreachable no matter what the graph says. */
+static int reach_selftest(Uint64 seed, int verbose, int *relaxed)
+{
+    Game g;
+    Rngs rngs;
+    int i, fails = 0, restored = 0, souls = 0, grants = 0;
+
+    rngs_init(&rngs, seed);
+    (void)game_init(&g, &rngs);
+
+    if (g.w.region_count < 2)
+        return 0; /* degenerate world, covered by the region test */
+
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        int t = g.ents[i].tile;
+        int x, y;
+        if (t < 0) {
+            printf("  seed %.0f: entity %d unplaced\n", (double)seed, i);
+            fails++;
+            continue;
+        }
+        x = t % WORLD_W;
+        y = t / WORLD_W;
+        if (g.w.solid[y][x]) {
+            printf("  seed %.0f: entity %d is inside rock\n", (double)seed, i);
+            fails++;
+        }
+        if (g.w.region[y][x] != g.ents[i].region) {
+            printf("  seed %.0f: entity %d region mismatch (%d vs tile's %d)\n",
+                   (double)seed, i, g.ents[i].region, g.w.region[y][x]);
+            fails++;
+        }
+        if (g.ents[i].is_soul)
+            souls++;
+        if (g.ents[i].grants)
+            grants++;
+    }
+
+    if (souls != SOUL_COUNT) {
+        printf("  seed %.0f: %d Found Souls, expected %d\n", (double)seed, souls, SOUL_COUNT);
+        fails++;
+    }
+    if (grants != 3) {
+        printf("  seed %.0f: %d ability grants, expected 3\n", (double)seed, grants);
+        fails++;
+    }
+
+    /* The invariant itself. */
+    if (!world_solvable(&g.w, g.ents, &restored)) {
+        printf("  seed %.0f: UNWINNABLE - only %d of %d entities reachable\n",
+               (double)seed, restored, ENTITY_COUNT);
+        fails++;
+    }
+
+    if (g.gen_attempts < 0)
+        (*relaxed)++;
+
+    if (verbose)
+        printf("  seed %-10.0f entities %2d/%2d reachable  attempts %3d%s  %s\n",
+               (double)seed, restored, ENTITY_COUNT,
+               g.gen_attempts < 0 ? -g.gen_attempts : g.gen_attempts,
+               g.gen_attempts < 0 ? " (gating relaxed)" : "",
+               fails ? "FAIL" : "PASS");
     return fails;
 }
 
@@ -1001,6 +2335,7 @@ static int audio_selftest(int argc, char **argv, int ms)
     /* --rate exists purely to exercise the sample-rate-conversion path on a
      * machine whose device happens to match our request exactly. */
     a.req_rate = arg_int(argc, argv, "--rate", AUDIO_RATE);
+    a.tone = 1; /* the audio selftests measure this tone; the game is silent */
     rng_seed(&a.rng, (Uint64)arg_int(argc, argv, "--seed", 1), STREAM_AUDIO);
 
     if (SDL_Init(SDL_INIT_AUDIO) != 0) {
@@ -1038,7 +2373,20 @@ static int audio_selftest(int argc, char **argv, int ms)
            arg_int(argc, argv, "--seed", 1));
 
     SDL_PauseAudioDevice(dev, 0);
-    SDL_Delay((Uint32)ms);
+    if (arg_flag(argc, argv, "--sfx")) {
+        /* Hammer the restore beat from this thread while the callback runs, so
+         * the trigger path is exercised under real contention rather than in
+         * isolation. Every 40 ms means beats overlap their own 300 ms tail. */
+        int left = ms;
+        printf("signal   : + restore beat every 40 ms (real-time safety probe)\n");
+        while (left > 0) {
+            SDL_AtomicAdd(&a.sfx_fire, 1);
+            SDL_Delay(40);
+            left -= 40;
+        }
+    } else {
+        SDL_Delay((Uint32)ms);
+    }
     SDL_PauseAudioDevice(dev, 1);
     SDL_CloseAudioDevice(dev); /* callback is stopped and joined; state is safe to read */
 
@@ -1120,6 +2468,8 @@ int main(int argc, char **argv)
     int limit = arg_int(argc, argv, "--frames", 0);
     int frame = 0;
     int running = 1;
+    int overlay = 0, grid = 0, dirty = 1, title_dirty = 1;
+    int seed = arg_int(argc, argv, "--seed", 1);
 
 #if WAYFARER_SELFTEST
     {
@@ -1132,6 +2482,54 @@ int main(int argc, char **argv)
             int ims = arg_int(argc, argv, "--input-test", 0);
             if (ims > 0)
                 return input_selftest((Uint64)arg_int(argc, argv, "--seed", 1), ims);
+        }
+        {
+            int ams = arg_int(argc, argv, "--autoplay", 0);
+            if (ams > 0)
+                return autoplay_selftest((Uint64)arg_int(argc, argv, "--seed", 1), ams);
+        }
+        if (arg_flag(argc, argv, "--play-test")) {
+            int n = arg_int(argc, argv, "--seeds", 20);
+            int base = arg_int(argc, argv, "--seed", 1);
+            int s, bad = 0;
+            printf("=== headless playthrough to completion, %d seeds ===\n", n);
+            for (s = 0; s < n; s++)
+                bad += playthrough_selftest((Uint64)(base + s), 1);
+            printf("\n%s (%d seeds could not be completed)\n", bad ? "FAIL" : "PASS", bad);
+            return bad ? 1 : 0;
+        }
+        if (arg_flag(argc, argv, "--gating-test")) {
+            int n = arg_int(argc, argv, "--seeds", 20);
+            int base = arg_int(argc, argv, "--seed", 1);
+            int s, bad = 0;
+            printf("=== ability gating: walk vs graph, %d seeds ===\n", n);
+            for (s = 0; s < n; s++)
+                bad += gating_selftest((Uint64)(base + s), 1);
+            printf("\n%s (%d failures across %d seeds)\n", bad ? "FAIL" : "PASS", bad, n);
+            return bad ? 1 : 0;
+        }
+        if (arg_flag(argc, argv, "--reach-test")) {
+            int n = arg_int(argc, argv, "--seeds", 20);
+            int base = arg_int(argc, argv, "--seed", 1);
+            int s, bad = 0, relaxed = 0;
+            printf("=== reachability invariant, %d seeds ===\n", n);
+            for (s = 0; s < n; s++)
+                bad += reach_selftest((Uint64)(base + s), 1, &relaxed);
+            printf("\n");
+            bad += solvable_negative_test((Uint64)base);
+            printf("gating relaxed on %d of %d seeds\n", relaxed, n);
+            printf("%s (%d failures across %d seeds)\n", bad ? "FAIL" : "PASS", bad, n);
+            return bad ? 1 : 0;
+        }
+        if (arg_flag(argc, argv, "--region-test")) {
+            int n = arg_int(argc, argv, "--seeds", 20);
+            int base = arg_int(argc, argv, "--seed", 1);
+            int s, bad = 0;
+            printf("=== region graph selftest, %d seeds ===\n", n);
+            for (s = 0; s < n; s++)
+                bad += region_selftest((Uint64)(base + s), 1);
+            printf("\n%s (%d failures across %d seeds)\n", bad ? "FAIL" : "PASS", bad, n);
+            return bad ? 1 : 0;
         }
         if (arg_flag(argc, argv, "--move-test")) {
             int n = arg_int(argc, argv, "--seeds", 20);
@@ -1167,7 +2565,7 @@ int main(int argc, char **argv)
     SDL_zero(audio);
     audio.noise = arg_flag(argc, argv, "--noise");
     audio.req_rate = AUDIO_RATE;
-    rngs_init(&rngs, (Uint64)arg_int(argc, argv, "--seed", 1));
+    rngs_init(&rngs, (Uint64)seed);
     audio.rng = rngs.audio;
 
     /* Silence is an acceptable degraded mode; failing to launch is not. */
@@ -1189,10 +2587,37 @@ int main(int argc, char **argv)
         Input in;
 
         while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_QUIT)
+            if (ev.type == SDL_QUIT) {
                 running = 0;
-            else if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE)
-                running = 0;
+            } else if (ev.type == SDL_KEYDOWN) {
+                switch (ev.key.keysym.sym) {
+                case SDLK_ESCAPE:
+                    running = 0;
+                    break;
+                case SDLK_F1: /* region/terrain overlay, ignores fog */
+                    overlay = !overlay;
+                    break;
+                case SDLK_F2: /* multi-seed grid view */
+                    grid = !grid;
+                    dirty = 1;
+                    break;
+                case SDLK_e:
+                case SDLK_SPACE:
+                    if (!grid && try_restore(&game) >= 0)
+                        SDL_AtomicAdd(&audio.sfx_fire, 1);
+                    break;
+                case SDLK_r: /* regenerate with the next seed */
+                    seed++;
+                    rngs_init(&rngs, seed);
+                    (void)game_init(&game, &rngs);
+                    audio.rng = rngs.audio;
+                    dirty = 1;
+                    break;
+                default:
+                    break;
+                }
+                title_dirty = 1;
+            }
         }
 
         input_poll(&in);
@@ -1221,9 +2646,37 @@ int main(int argc, char **argv)
             return fb ? 4 : 3;
         }
 
-        camera_follow(&game, fb->w, fb->h);
-        render(fb, &game);
+        if (grid) {
+            /* Regenerate only when dirty — 12 worlds per frame would crawl —
+             * but always re-present, so a repaint after the surface is
+             * invalidated does not leave a blank window. */
+            if (dirty) {
+                render_grid(fb, seed);
+                dirty = 0;
+            }
+        } else {
+            camera_follow(&game, fb->w, fb->h);
+            render(fb, &game, overlay);
+        }
         SDL_UpdateWindowSurface(win);
+
+        /* No bitmap font until Week 5 (design/systems/Save and UI.md), so debug
+         * stats go in the title bar. Costs nothing and needs no glyph data. */
+        if (title_dirty) {
+            /* Confirmed 4-stage naming from design/Overview.md. */
+            static const char *const stage_name[4] = {
+                "Unexplored", "Partly Revealed", "Many Memories Restored", "Fully Restored"
+            };
+            char t[160];
+            SDL_snprintf(t, sizeof(t),
+                         "Wayfarer  seed %d  fragments %d/%d  souls %d/%d  %s%s%s",
+                         (int)seed, game.frags_restored, FRAGMENT_COUNT,
+                         game.souls_restored, SOUL_COUNT, stage_name[world_stage(&game)],
+                         overlay ? "  [F1 overlay]" : "",
+                         grid ? "  [F2 grid]" : "");
+            SDL_SetWindowTitle(win, t);
+            title_dirty = 0;
+        }
 
         /* Cap the render rate. There is no vsync to lean on: SDL's render
          * subsystem (and with it PRESENTVSYNC) is compiled out, and
@@ -1242,6 +2695,10 @@ int main(int argc, char **argv)
         }
 
         frame++;
+        /* Restoration eases in over time, so the stage can change with no input
+         * at all. Refresh periodically rather than only on keypress. */
+        if ((frame % 15) == 0)
+            title_dirty = 1;
         if (limit && frame >= limit)
             running = 0;
     }

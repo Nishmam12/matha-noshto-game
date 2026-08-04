@@ -19,6 +19,14 @@ Direct pixel-buffer rasterization via `SDL_LockTexture`, **or** procedurally gen
 Fog-to-color is a blend effect over generated geometry, not a sprite swap:
 - Track per-region "restoration %" as a float.
 - Render color = `lerp(grey, true color, restoration%)`.
+
+> **Implementation note, 2026-08-02 — an interpretation worth confirming.** Taken literally, the
+> world stays fully fogged until the first fragment is restored, including the fragment you must
+> find first. So the blend takes the stronger of two contributions: **sight** (walking somewhere
+> reveals its shape, capped at 0.42) and **restoration** (a restored region goes to full colour,
+> permanently). Restoration is still the only thing that brings colour back — sight only shows
+> terrain shape. Built and confirmed visually in [[2026-08-02-session-03]]; flagged here because
+> the note does not specify it.
 - Aggregate across all regions maps onto the 4-stage world-growth read (Unexplored / Partly Revealed / Many Memories Restored / Fully Restored) — see [[World Generation]].
 
 No SDL_image. No PNGs, no sprite sheets — see [[Agent Prompt]] for the excluded-libraries rule. This is the rendering technique that makes the "world remembers itself" hook visible without costing asset bytes — it's the visual half of the audio/visual coupling described in [[Audio and Synth]].

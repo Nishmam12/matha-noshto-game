@@ -7,6 +7,7 @@ tags: [moc, wayfarer]
 Exploration-driven memory-restoration game for the 2P Game Arcade 1.44MB Floppy Disk contest. Deadline: **September 4, 2026, 23:59**.
 
 ## Process
+- **[[Handover]] — start here if picking this up cold.** Current state, build commands, test suite, decisions already made, and every trap that has already cost time once.
 - [[Agent Prompt]] — role, engineering loop, QA rules, language/toolchain rationale for whoever (human or agent) is writing code against this plan.
 
 ## Design
