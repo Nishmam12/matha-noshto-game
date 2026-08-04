@@ -1,14 +1,14 @@
 ---
 tags: [design, phase, wayfarer]
 phase: 3
-status: code-complete
+status: done
 updated: 2026-08-05
 ---
 
 # Phase 03 — Legibility Tools
 
-**Status:** CODE-COMPLETE — everything below is built and verified except the one gate item that
-requires a person (see Evidence). Do not mark this DONE until someone has actually used the overlay.
+**Status:** DONE — `60b4e3a`, +0 shipping bytes. The human-usability gate was discharged the same
+day by the user running the self-test build.
 **Depends on:** [[Phase 02 - Roof And Fog]] (this phase exists *because* of how Phase 02 went).
 **Blocks:** [[Phase 07 - Asset Seam]] (baked sprites need to be judged against something better than
 a rebuild cycle), [[Phase 09 - Placeholder Art]] (all remaining palette/shading decisions), and
@@ -42,8 +42,8 @@ to display constant names and values somehow.
       already used to prove the perf counters cost nothing in the shipping binary.
 - [x] `--font-test` exists: renders the full supported charset to a BMP for inspection, with a
       negative control (an off-by-one glyph stride must be rejected, not silently misrendered).
-- [ ] **A human has used the overlay once and found it usable.** Still owed — this is the gate item
-      that cannot be discharged from here.
+- [x] **A human has used the overlay once and found it usable.** Discharged 2026-08-05: the user ran
+      the self-test build and reported *"everything works so far in self test run"*. Phase closed.
 
 ## Concrete tasks
 

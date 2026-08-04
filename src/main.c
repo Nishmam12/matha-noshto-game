@@ -52,14 +52,36 @@
  * so collision is unchanged in tile terms — player_blocked divides by TILE, so
  * doubling both the player box and the tile cancels exactly. Only absolute
  * pixel numbers move (speed_selftest's 110.00 becomes 220.00). */
-#define TILE     32
-#define WORLD_W  80
-#define WORLD_H  45
+#define TILE     24
+#define WORLD_W  108
+#define WORLD_H  60
 
-#define PLAYER_SIZE  24
-#define PLAYER_SPEED 220.0f /* world px/sec; 6.9 tiles/sec, as before */
+/* --- The art scale knob ---------------------------------------------------
+ *
+ * Every procedural prop, building part and elevation step in this file was
+ * hand-authored in absolute pixels against TILE == 32. That made TILE a lie:
+ * the projection identity held at any size, but changing TILE left a tree the
+ * same 30 px tall while the ground under it shrank, so the props grew
+ * *relative* to the world and the whole scene read as oversized.
+ *
+ * PX(n) means "n pixels, as authored at a 32 px tile". Wrapping the authored
+ * dimensions in it makes TILE a single honest knob for the entire visual
+ * scale: halve TILE and the trees, houses, cliffs, player and reach ring all
+ * halve with it, keeping their proportions to each other and to the ground.
+ *
+ * Rounds to nearest rather than truncating, so a 1 px detail line does not
+ * quietly become a 0 px one at smaller tiles and delete itself. */
+#define TILE_REF 32
+#define PX(n)    (((n) * TILE + TILE_REF / 2) / TILE_REF)
+#define PXF(n)   ((n) * (float)TILE / (float)TILE_REF)
 
-#define REVEAL_TILES 5     /* sight radius, in tiles */
+#define PLAYER_SIZE  PX(24)
+#define PLAYER_SPEED PXF(220.0f) /* world px/sec; 6.9 tiles/sec at any TILE */
+
+/* In tiles, so it scales with tile COUNT rather than tile size. Raised from 5
+ * alongside TILE 32 -> 24 to keep the sight circle roughly the same size in
+ * world pixels — 5 tiles at 32 px and 7 at 24 px are both about 160 px. */
+#define REVEAL_TILES 7     /* sight radius, in tiles */
 #define REVEAL_RATE  2.5f  /* sight units/sec */
 
 /* Walking somewhere reveals its SHAPE but not its colour — sight tops out well
@@ -74,7 +96,7 @@
 #define SIGHT_MAX    0.50f
 #define RESTORE_RATE 0.9f  /* region restoration units/sec once triggered */
 
-#define INTERACT_RADIUS 44.0f /* world px; same fraction of a tile as before */
+#define INTERACT_RADIUS PXF(44.0f) /* world px; same fraction of a tile as before */
 
 /* Where unrevealed land resolves to. This used to be (44,52,68) applied on top
  * of a luminance already scaled to 0.55 — a DARK blue-grey, and since walking
@@ -130,10 +152,10 @@ static FogTune fog_tune = { FOG_TINT_R, FOG_TINT_G, FOG_TINT_B, FOG_KEEP };
 #define ISO_HH    (TILE / 2)                            /* 16, diamond half-height */
 #define DIA_W     (2 * ISO_HW)                          /* 64 */
 #define DIA_H     (2 * ISO_HH)                          /* 32 */
-#define ELEV_MAX  48                                    /* tallest raised tile, px */
-#define ELEV_STEP 12    /* one terrace per ring of distance into a rock mass */
-#define ELEV_WATER (-6) /* water sits below the ground plane */
-#define ELEV_LEDGE 16   /* Climb terrain reads as a shelf before you can climb */
+#define ELEV_MAX  PX(48)     /* tallest raised tile, px */
+#define ELEV_STEP PX(12)     /* one terrace per ring of distance into a rock mass */
+#define ELEV_WATER (-PX(6))  /* water sits below the ground plane */
+#define ELEV_LEDGE PX(16)    /* Climb terrain reads as a shelf before you can climb */
 
 /* Face shading — the whole lighting model. One notional light from the upper
  * left, no normals and no dot products: the top face keeps its true colour and
@@ -520,12 +542,17 @@ typedef struct {
 #define BUILDING_MAX 40
 /* Houses cluster into villages rather than covering the island. BUILDING_TARGET
  * is what placement actually aims for; BUILDING_MAX stays the array bound. */
-#define VILLAGE_SITES   3
-#define VILLAGE_RADIUS  9   /* tiles from a site centre to its outermost plot */
-#define VILLAGE_SPACING 22  /* minimum tiles between two site centres */
-#define BUILDING_TARGET 15
-#define STOREY_H     14   /* wall px per storey */
-#define WALL_BASE    10   /* plinth under the first storey */
+/* These are in TILES, so they do not scale with tile size — they had to be
+ * re-derived by hand for TILE 32 -> 24. Radius and spacing grew by 32/24 so a
+ * village stays the same size in world pixels rather than shrinking with the
+ * tiles; sites and target grew because the world now holds 1.8x as many tiles
+ * and 3 villages in it read as an empty island. */
+#define VILLAGE_SITES   4
+#define VILLAGE_RADIUS  12  /* tiles from a site centre to its outermost plot */
+#define VILLAGE_SPACING 29  /* minimum tiles between two site centres */
+#define BUILDING_TARGET 22
+#define STOREY_H     PX(14)   /* wall px per storey */
+#define WALL_BASE    PX(10)   /* plinth under the first storey */
 
 /* What a tile is made of. `solid` stays the single collision truth — both ROCK
  * and OCEAN are solid and neither is walkable — and this only records WHICH kind
@@ -1474,7 +1501,7 @@ static void world_heights(World *w)
                 int step = dist[y][x] - 1;
                 if (step < 0) step = 0;
                 if (step > 3) step = 3;
-                h = ELEV_WATER - step * 4;
+                h = ELEV_WATER - step * PX(4);
             } else if (w->solid[y][x]) {
                 h = dist[y][x] * ELEV_STEP;
                 if (h > ELEV_MAX) h = ELEV_MAX;
@@ -2064,10 +2091,14 @@ static void tile_detail(SDL_Surface *fb, int ax, int ay, int h, Uint32 hash,
     int k;
 
     for (k = 0; k < nmark; k++) {
-        /* Inset to 4..27 of the tile's 32 px so a mark never straddles the
-         * diamond's very edge, where it would read as a notch in the outline. */
-        int ox = 4 + (int)((hash >> (k * 4)) & 15) + (int)((hash >> (k * 4 + 2)) & 7);
-        int oy = 4 + (int)((hash >> (k * 4 + 6)) & 15) + (int)((hash >> (k * 4 + 1)) & 7);
+        /* Inset to 4..27 of a 32 px tile so a mark never straddles the
+         * diamond's very edge, where it would read as a notch in the outline.
+         *
+         * PX() wraps the WHOLE offset, not just the constant: the hash supplies
+         * a 0..22 spread authored against a 32 px tile, and at TILE 24 an
+         * unscaled 27 would fall outside the diamond entirely. */
+        int ox = PX(4 + (int)((hash >> (k * 4)) & 15) + (int)((hash >> (k * 4 + 2)) & 7));
+        int oy = PX(4 + (int)((hash >> (k * 4 + 6)) & 15) + (int)((hash >> (k * 4 + 1)) & 7));
         fill_rect(fb, ax + ox - oy, ay + ((ox + oy) >> 1) - h, mw, 1, c);
     }
 }
@@ -2268,9 +2299,9 @@ static void draw_tree(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
     /* Trunk kept short relative to the crown: at 11..17 px under a 20 px canopy
      * every tree read as a lollipop. The crown now starts low, the way a
      * deciduous tree actually does. */
-    int th   = 7 + (int)((h >> 18) & 3) * 2;   /* trunk height  7..13 */
-    int cw   = 22 + (int)((h >> 20) & 3) * 3;  /* canopy width  22..31 */
-    int ch   = 22 + (int)((h >> 22) & 3) * 3;  /* canopy height 22..31 */
+    int th   = PX(7) + (int)((h >> 18) & 3) * PX(2);   /* trunk height  7..13 @32 */
+    int cw   = PX(22) + (int)((h >> 20) & 3) * PX(3);  /* canopy width  22..31 @32 */
+    int ch   = PX(22) + (int)((h >> 22) & 3) * PX(3);  /* canopy height 22..31 @32 */
     int lean = (int)((h >> 24) & 3) - 1;
     int step = ch / LOBES;
     int top  = by - th - ch;
@@ -2282,36 +2313,36 @@ static void draw_tree(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
      * design/Art Bible.md §3 — "everything touches the ground". */
     iso_diamond(fb, cx, by - 1, cw / 3, fog_lerp(fb, 0x24, 0x33, 0x22, rev));
 
-    fill_rect(fb, cx - 3, by - th, 3, th, fog_lerp(fb, tp[0][0], tp[0][1], tp[0][2], rev));
-    fill_rect(fb, cx,     by - th, 2, th, fog_lerp(fb, tp[1][0], tp[1][1], tp[1][2], rev));
-    fill_rect(fb, cx + 2, by - th, 1, th, fog_lerp(fb, tp[2][0], tp[2][1], tp[2][2], rev));
+    fill_rect(fb, cx - PX(3), by - th, PX(3), th, fog_lerp(fb, tp[0][0], tp[0][1], tp[0][2], rev));
+    fill_rect(fb, cx,         by - th, PX(2), th, fog_lerp(fb, tp[1][0], tp[1][1], tp[1][2], rev));
+    fill_rect(fb, cx + PX(2), by - th, PX(1), th, fog_lerp(fb, tp[2][0], tp[2][1], tp[2][2], rev));
 
     cx += lean;
     for (i = 0; i < LOBES; i++) {
         int lw = cw * lobe_w[i] / 100;
         int s  = lobe_s[i];
-        int ly = top + i * step + (step + 4) / 2;
-        fill_ellipse(fb, cx, ly, lw / 2, (step + 5) / 2,
+        int ly = top + i * step + (step + PX(4)) / 2;
+        fill_ellipse(fb, cx, ly, lw / 2, (step + PX(5)) / 2,
                      fog_lerp(fb, cp[s][0], cp[s][1], cp[s][2], rev));
     }
     /* The few pixels that sell the volume: a highlight on the up-left shoulder,
      * where the notional light already lands on the tile faces. */
-    fill_ellipse(fb, cx - (cw * 95 / 100) / 4, top + step + 2, 4, 2,
+    fill_ellipse(fb, cx - (cw * 95 / 100) / 4, top + step + PX(2), PX(4), PX(2),
                  fog_lerp(fb, cp[3][0], cp[3][1], cp[3][2], rev));
 }
 
 static void draw_bush(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
 {
     const Uint8 (*cp)[3] = canopy_pal[(h >> 13) & 7];
-    int bw = 13 + (int)((h >> 20) & 3) * 2;
-    int bh = 8 + (int)((h >> 22) & 3) * 2;
+    int bw = PX(13) + (int)((h >> 20) & 3) * PX(2);
+    int bh = PX(8) + (int)((h >> 22) & 3) * PX(2);
 
     iso_diamond(fb, cx, by - 1, bw / 3, fog_lerp(fb, 0x24, 0x33, 0x22, rev));
     fill_ellipse(fb, cx, by - bh / 2, bw / 2, (bh + 1) / 2,
                  fog_lerp(fb, cp[1][0], cp[1][1], cp[1][2], rev));
-    fill_ellipse(fb, cx, by - bh - 1, bw / 3, 3,
+    fill_ellipse(fb, cx, by - bh - 1, bw / 3, PX(3),
                  fog_lerp(fb, cp[2][0], cp[2][1], cp[2][2], rev));
-    fill_rect(fb, cx - bw / 3 + 1, by - bh - 2, 4, 2,
+    fill_rect(fb, cx - bw / 3 + 1, by - bh - PX(2), PX(4), PX(2),
               fog_lerp(fb, cp[3][0], cp[3][1], cp[3][2], rev));
 }
 
@@ -2320,14 +2351,14 @@ static void draw_bush(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
 static void draw_rock(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
 {
     const Uint8 (*p)[3] = rock_pal[(h >> 13) % 3];
-    int rw = 12 + (int)((h >> 20) & 3) * 3;
-    int rh = 7 + (int)((h >> 22) & 3) * 2;
+    int rw = PX(12) + (int)((h >> 20) & 3) * PX(3);
+    int rh = PX(7) + (int)((h >> 22) & 3) * PX(2);
 
     fill_rect(fb, cx - rw / 2, by - rh, rw, rh,
               fog_lerp(fb, p[1][0], p[1][1], p[1][2], rev));
     fill_rect(fb, cx - rw / 2, by - rh, rw / 2, rh,
               fog_lerp(fb, p[0][0], p[0][1], p[0][2], rev));
-    fill_rect(fb, cx - rw / 4, by - rh - 3, rw * 2 / 3, 4,
+    fill_rect(fb, cx - rw / 4, by - rh - PX(3), rw * 2 / 3, PX(4),
               fog_lerp(fb, p[2][0], p[2][1], p[2][2], rev));
 }
 
@@ -2340,9 +2371,9 @@ static void draw_reed(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
     int i;
 
     for (i = 0; i < 5; i++) {
-        int ox = -8 + i * 4 + (int)((h >> (i * 3)) & 3);
-        int bh = 9 + (int)((h >> (i * 3 + 2)) & 7);
-        fill_rect(fb, cx + ox, by - bh, 1, bh, (i & 1) ? lit : dark);
+        int ox = -PX(8) + i * PX(4) + (int)((h >> (i * 3)) & 3);
+        int bh = PX(9) + (int)((h >> (i * 3 + 2)) & 7);
+        fill_rect(fb, cx + ox, by - bh, PX(1), bh, (i & 1) ? lit : dark);
     }
 }
 
@@ -2360,10 +2391,10 @@ static void draw_flower(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
     int i;
 
     for (i = 0; i < 3; i++) {
-        int ox = -5 + i * 5 + (int)((h >> (i * 4)) & 3);
-        int bh = 5 + (int)((h >> (i * 4 + 2)) & 3);
-        fill_rect(fb, cx + ox, by - bh, 1, bh, stem);
-        fill_rect(fb, cx + ox - 1, by - bh - 2, 3, 2, head);
+        int ox = -PX(5) + i * PX(5) + (int)((h >> (i * 4)) & 3);
+        int bh = PX(5) + (int)((h >> (i * 4 + 2)) & 3);
+        fill_rect(fb, cx + ox, by - bh, PX(1), bh, stem);
+        fill_rect(fb, cx + ox - 1, by - bh - PX(2), PX(3), PX(2), head);
     }
 }
 
@@ -2372,18 +2403,18 @@ static void draw_flower(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
 static void draw_crystal(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
 {
     const Uint8 (*p)[3] = crystal_pal[(h >> 13) % 3];
-    int ch = 14 + (int)((h >> 20) & 3) * 3;
+    int ch = PX(14) + (int)((h >> 20) & 3) * PX(3);
     int i, bands = 4;
 
     for (i = 0; i < bands; i++) {
-        int w = 8 - i * 2;
+        int w = PX(8) - i * PX(2);
         int s = (i * 3) / bands;
-        if (w < 2) w = 2;
+        if (w < PX(2)) w = PX(2);
         fill_rect(fb, cx - w / 2, by - (ch * (i + 1)) / bands,
                   w, ch / bands + 1,
                   fog_lerp(fb, p[s][0], p[s][1], p[s][2], rev));
     }
-    fill_rect(fb, cx - 1, by - ch - 2, 2, 3,
+    fill_rect(fb, cx - 1, by - ch - PX(2), PX(2), PX(3),
               fog_lerp(fb, 0xf0, 0xe8, 0xff, rev));
 }
 
@@ -2391,14 +2422,14 @@ static void draw_crystal(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
 static void draw_stump(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
 {
     const Uint8 (*tp)[3] = trunk_pal[(h >> 16) & 3];
-    int sw = 8 + (int)((h >> 20) & 3);
-    int sh = 5 + (int)((h >> 22) & 1) * 2;
+    int sw = PX(8) + (int)((h >> 20) & 3);
+    int sh = PX(5) + (int)((h >> 22) & 1) * PX(2);
 
     fill_rect(fb, cx - sw / 2, by - sh, sw, sh,
               fog_lerp(fb, tp[0][0], tp[0][1], tp[0][2], rev));
     fill_rect(fb, cx - sw / 2, by - sh, sw / 2, sh,
               fog_lerp(fb, tp[1][0], tp[1][1], tp[1][2], rev));
-    fill_rect(fb, cx - sw / 2, by - sh - 2, sw, 3,
+    fill_rect(fb, cx - sw / 2, by - sh - PX(2), sw, PX(3),
               fog_lerp(fb, tp[2][0], tp[2][1], tp[2][2], rev));
 }
 
@@ -2416,8 +2447,8 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
      * sweep draws that neighbour afterwards, but the prop is tall enough to
      * poke out above it, which is the one depth artefact the sweep cannot fix.
      * Three lines here beat a z-buffer. */
-    if (height_at(w, tx + 1, ty) - height_at(w, tx, ty) >= 24 ||
-        height_at(w, tx, ty + 1) - height_at(w, tx, ty) >= 24)
+    if (height_at(w, tx + 1, ty) - height_at(w, tx, ty) >= PX(24) ||
+        height_at(w, tx, ty + 1) - height_at(w, tx, ty) >= PX(24))
         return PROP_NONE;
 
     /* Boulders on the tops of cliffs, sparsely — enough to break the bare
@@ -2474,15 +2505,15 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
      *
      * Seven steps rather than three, for the same reason: over a 130 px wide
      * diamond, three steps is a ziggurat and seven reads as a slope. */
-    rw    = (b->w + b->h) * ISO_HW / 2 + 5;
+    rw    = (b->w + b->h) * ISO_HW / 2 + PX(5);
     steps = 8;
     {
         int rise = (BV_RSHAPE(v) >= 3) ? (rw * 3) / 4   /* steep */
                  : (BV_RSHAPE(v) == 0) ? (rw * 2) / 5   /* shallow */
                                        : rw / 2;        /* 45 degrees */
         pitch = rise / steps;
-        if (pitch < 3)
-            pitch = 3;
+        if (pitch < 2)
+            pitch = 2;
     }
 
     /* Each slice split left/right, so the roof has two lit faces the way every
@@ -2514,11 +2545,11 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
     /* Chimney, on the roof rather than beside it. */
     if (BV_CHIM(v)) {
         int ox = (BV_CHIM(v) == 1) ? -rw / 3 : rw / 3;
-        int ch = 8 + (int)BV_CHIM(v) * 3;
-        fill_rect(fb, cx + ox - 3, cy - wall - steps * pitch - ch, 6, ch + 6,
-                  fog_lerp(fb, 0x6e, 0x5a, 0x4e, rev));
-        fill_rect(fb, cx + ox - 4, cy - wall - steps * pitch - ch - 2, 8, 3,
-                  fog_lerp(fb, 0x86, 0x72, 0x64, rev));
+        int ch = PX(8) + (int)BV_CHIM(v) * PX(3);
+        fill_rect(fb, cx + ox - PX(3), cy - wall - steps * pitch - ch,
+                  PX(6), ch + PX(6), fog_lerp(fb, 0x6e, 0x5a, 0x4e, rev));
+        fill_rect(fb, cx + ox - PX(4), cy - wall - steps * pitch - ch - PX(2),
+                  PX(8), PX(3), fog_lerp(fb, 0x86, 0x72, 0x64, rev));
     }
 
     /* Facade: door and windows on the two faces the camera can see. The wall
@@ -2536,26 +2567,26 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
         /* Door on the down-right face, one storey tall. */
         {
             int dx = cx + rw / 3, dy = fy + (rw / 3) / 2;
-            fill_rect(fb, dx - 4, dy - 16, 8, 16, dark);
+            fill_rect(fb, dx - PX(4), dy - PX(16), PX(8), PX(16), dark);
             if (BV_DOOR(v) >= 2) /* arched or double: a lintel */
-                fill_rect(fb, dx - 5, dy - 18, 10, 2, trim);
+                fill_rect(fb, dx - PX(5), dy - PX(18), PX(10), PX(2), trim);
         }
         /* Windows on the down-left face, spread along it. */
         for (i = 0; i < nwin; i++) {
             int ox = -rw + (rw * 2 * (i + 1)) / (nwin + 2);
             int wx = cx + ox / 2 - rw / 4, wy = fy + (ox / 2 + rw / 4) / 2;
-            int wh = 7;
-            fill_rect(fb, wx - 3, wy - 14 - wh, 7, wh, glass);
+            int wh = PX(7);
+            fill_rect(fb, wx - PX(3), wy - PX(14) - wh, PX(7), wh, glass);
             if (BV_TRIM(v) & 1)
-                fill_rect(fb, wx - 4, wy - 15 - wh, 9, 2, trim);
+                fill_rect(fb, wx - PX(4), wy - PX(15) - wh, PX(9), PX(2), trim);
         }
         /* A hanging sign or banner: the one asymmetric detail, so a row of
          * houses does not read as a repeated stamp. */
         if (BV_SIGN(v) == 1)
-            fill_rect(fb, cx + rw / 2, fy + rw / 4 - 24, 7, 10,
+            fill_rect(fb, cx + rw / 2, fy + rw / 4 - PX(24), PX(7), PX(10),
                       fog_lerp(fb, 0x8c, 0x5a, 0x36, rev));
         else if (BV_SIGN(v) == 2)
-            fill_rect(fb, cx - rw / 2 - 3, fy - rw / 4 - 26, 5, 14,
+            fill_rect(fb, cx - rw / 2 - PX(3), fy - rw / 4 - PX(26), PX(5), PX(14),
                       fog_lerp(fb, 0x50, 0x64, 0xa8, rev));
     }
     (void)w;
@@ -2717,19 +2748,19 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
              * horizontal strata that emphasise the shelf. */
             terr = g->w.solid[ty][tx] ? -1 : (g->w.region[ty][tx] == REGION_NONE
                        ? TERRAIN_NORMAL : g->w.regions[g->w.region[ty][tx]].terrain);
-            nmark = 5; mw = 2;
+            nmark = 5; mw = PX(2);
             if (terr < 0) {
                 /* Rock. Long marks, because stone reads through aligned
                  * repetition — strata, not speckle (design/Art Bible.md §6). */
-                mark = fog_lerp(fb, 0x6e, 0x6c, 0x7a, rev); nmark = 4; mw = 6;
+                mark = fog_lerp(fb, 0x6e, 0x6c, 0x7a, rev); nmark = 4; mw = PX(6);
             } else if (terr == TERRAIN_LEDGE) {
-                mark = fog_lerp(fb, 0xa8, 0x90, 0x60, rev); nmark = 3; mw = 7;
+                mark = fog_lerp(fb, 0xa8, 0x90, 0x60, rev); nmark = 3; mw = PX(7);
             } else if (terr == TERRAIN_WATER) {
-                mark = fog_lerp(fb, 0x5a, 0xa0, 0xa8, rev); nmark = 3; mw = 5;
+                mark = fog_lerp(fb, 0x5a, 0xa0, 0xa8, rev); nmark = 3; mw = PX(5);
             } else if (terr == TERRAIN_DARK) {
-                mark = fog_lerp(fb, 0x58, 0x4c, 0x74, rev); nmark = 2; mw = 2;
+                mark = fog_lerp(fb, 0x58, 0x4c, 0x74, rev); nmark = 2; mw = PX(2);
             } else {
-                mark = fog_lerp(fb, 0x55, 0x7a, 0x45, rev); nmark = 6; mw = 2;
+                mark = fog_lerp(fb, 0x55, 0x7a, 0x45, rev); nmark = 6; mw = PX(2);
             }
             tile_detail(fb, ax, ay, h, hash, mark, nmark, mw);
             /* Grass gets a second, darker scatter. One shade of speckle reads
@@ -2802,16 +2833,16 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             continue; /* Lost: not yet discovered */
         if (g->ents[i].is_soul) {
             if (g->ents[i].restored) {
-                cr = 0xf0; cg = 0xd0; cb = 0x90; s = 18; /* Remembered */
+                cr = 0xf0; cg = 0xd0; cb = 0x90; s = PX(18); /* Remembered */
             } else {
-                cr = 0x9a; cg = 0xa8; cb = 0xb8; s = 18; /* Found */
+                cr = 0x9a; cg = 0xa8; cb = 0xb8; s = PX(18); /* Found */
             }
         } else if (g->ents[i].restored) {
-            cr = 0x6a; cg = 0x6a; cb = 0x62; s = 8;
+            cr = 0x6a; cg = 0x6a; cb = 0x62; s = PX(8);
         } else if (g->ents[i].grants) {
-            cr = 0xff; cg = 0x9a; cb = 0x3c; s = 16;
+            cr = 0xff; cg = 0x9a; cb = 0x3c; s = PX(16);
         } else {
-            cr = 0xff; cg = 0xd7; cb = 0x6a; s = 12;
+            cr = 0xff; cg = 0xd7; cb = 0x6a; s = PX(12);
         }
         /* Entities are tile-anchored, so project the tile centre, then lift by
          * the tile's height — without this a fragment on a ledge is drawn
@@ -2839,7 +2870,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
              * key will do anything. Drawn at the feet, not the centre, so it
              * reads as lying on the tile. */
             if (entity_in_reach(g) >= 0)
-                iso_ring(fb, px, py + PLAYER_SIZE / 2, 26,
+                iso_ring(fb, px, py + PLAYER_SIZE / 2, PX(26),
                          SDL_MapRGB(fb->format, 0xff, 0xf0, 0xc0));
             /* The camera deliberately is NOT lifted by height: following the
              * visual height would jerk the whole view the instant you step onto
