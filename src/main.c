@@ -29,8 +29,19 @@
 #define WAYFARER_PERF WAYFARER_SELFTEST
 #endif
 
-#define WIN_W 640
-#define WIN_H 360
+/* We rasterise at LOGICAL_W x LOGICAL_H and hard-double into the window. The
+ * doubling is the point, not a shortcut: a 1 px highlight on a trunk is a
+ * hairline at native 1080p and a visible 2 px band when drawn at 960x540 and
+ * scaled, which is the difference between "procedural shapes" and "pixel art".
+ * It also keeps TILE, PLAYER_SIZE and INTERACT_RADIUS meaning exactly what they
+ * always meant, and makes window size a single constant.
+ *
+ * The scale is chosen at startup against the desktop size rather than baked in,
+ * because a 1920x1080 window does not fit on a 1920x1080 desktop once the title
+ * bar and taskbar are counted. --scale N overrides it. */
+#define LOGICAL_W 960
+#define LOGICAL_H 540
+#define WIN_SCALE_MAX 3
 
 /* Larger than the view so exploration means moving the camera, which is what
  * makes the reveal read as discovery.
@@ -1345,13 +1356,14 @@ static void perf_frame(Perf *p, double render_ms, double present_ms,
     perf_calls = 0;
 }
 
-static void perf_report(const Perf *p, int w, int h)
+static void perf_report(const Perf *p, int w, int h, int scale)
 {
     double n     = (double)(p->frames > 0 ? p->frames : 1);
     double frame = p->frame_sum / n;
     double px    = p->px_sum / n;
 
-    printf("=== render perf: %d frames at %dx%d ===\n", p->frames, w, h);
+    printf("=== render perf: %d frames at %dx%d logical, x%d -> %dx%d ===\n",
+           p->frames, w, h, scale, w * scale, h * scale);
     printf("render   mean %7.3f ms    max %7.3f ms\n", p->render_sum / n, p->render_max);
     printf("present  mean %7.3f ms\n", p->present_sum / n);
     printf("sleep    mean %7.3f ms    <- frame cap; SDL_Delay granularity lands here\n",
@@ -1390,6 +1402,58 @@ static void fill_rect(SDL_Surface *s, int x, int y, int w, int h, Uint32 colour)
         for (ix = 0; ix < w; ix++)
             row[x + ix] = colour;
     }
+}
+
+/* Integer nearest-neighbour upscale, logical -> window, centred with the
+ * leftover margin cleared. Nearest-neighbour and integer-only on purpose:
+ * anything smoother would undo the hard pixel edges this exists to produce.
+ *
+ * Each source row is expanded once and the result memcpy'd down to the other
+ * s-1 rows, so scaling vertically costs a linear copy rather than another pass
+ * of per-pixel work. Centring matters because a fullscreen window is rarely an
+ * exact multiple of the logical size — 960x540 at x2 leaves a 64x36 border on
+ * a 2048x1152 desktop, and that border holds whatever was in the surface
+ * before unless it is cleared. */
+static void blit_scale(const SDL_Surface *src, SDL_Surface *dst, int s)
+{
+    int y, x, k, ox, oy, dw, dh;
+
+    if (s < 1)
+        s = 1;
+    dw = src->w * s;
+    dh = src->h * s;
+    if (dst->w < dw || dst->h < dh)
+        return;
+    ox = (dst->w - dw) / 2;
+    oy = (dst->h - dh) / 2;
+
+    /* Margins only, not the whole surface: at x2 on a 2048x1152 desktop this is
+     * ~285k px rather than 2.36M. */
+    if (oy > 0 || ox > 0) {
+        for (y = 0; y < dst->h; y++) {
+            Uint32 *row = (Uint32 *)((Uint8 *)dst->pixels + y * dst->pitch);
+            if (y < oy || y >= oy + dh) {
+                SDL_memset4(row, 0, (size_t)dst->w);
+            } else if (ox > 0) {
+                SDL_memset4(row, 0, (size_t)ox);
+                SDL_memset4(row + ox + dw, 0, (size_t)(dst->w - ox - dw));
+            }
+        }
+    }
+
+    for (y = 0; y < src->h; y++) {
+        const Uint32 *sp = (const Uint32 *)((const Uint8 *)src->pixels + y * src->pitch);
+        Uint32 *d0 = (Uint32 *)((Uint8 *)dst->pixels + (oy + y * s) * dst->pitch) + ox;
+        for (x = 0; x < src->w; x++) {
+            Uint32 c = sp[x];
+            for (k = 0; k < s; k++)
+                d0[x * s + k] = c;
+        }
+        for (k = 1; k < s; k++)
+            SDL_memcpy((Uint8 *)d0 + (size_t)k * dst->pitch, d0,
+                       (size_t)dw * sizeof(Uint32));
+    }
+    PERF_COUNT(dw * dh);
 }
 
 /* World pixels -> isometric map pixels. The camera is NOT applied here; callers
@@ -1757,6 +1821,81 @@ static void camera_follow(Game *g, int view_w, int view_h)
     if (g->cam_y < 0) g->cam_y = 0;
     if (max_x > 0 && g->cam_x > max_x) g->cam_x = max_x;
     if (max_y > 0 && g->cam_y > max_y) g->cam_y = max_y;
+}
+
+/* --- window and presentation ---------------------------------------------
+ *
+ * The game draws into a LOGICAL_W x LOGICAL_H heap backbuffer and that is
+ * hard-doubled into the window. Everything here exists so main() and the
+ * autoplay harness present through the same path rather than two copies that
+ * can drift. */
+
+/* Largest integer scale whose window still fits on screen. Usable bounds
+ * already exclude the taskbar, so only the title bar has to be allowed for;
+ * guessing at the taskbar too was costing a whole scale step on a 2048x1152
+ * desktop, where x2 fits with 72 px to spare. Falls back to the full desktop
+ * mode, then to 1, which always fits. */
+#define WIN_TITLEBAR 40
+
+static int pick_scale(void)
+{
+    SDL_Rect r;
+    SDL_DisplayMode dm;
+    int sx, sy, s;
+
+    if (SDL_GetDisplayUsableBounds(0, &r) == 0 && r.w > 0 && r.h > 0) {
+        sx = r.w / LOGICAL_W;
+        sy = (r.h - WIN_TITLEBAR) / LOGICAL_H;
+    } else if (SDL_GetDesktopDisplayMode(0, &dm) == 0) {
+        sx = dm.w / LOGICAL_W;
+        sy = (dm.h - 80) / LOGICAL_H;
+    } else {
+        return 1;
+    }
+    s = sx < sy ? sx : sy;
+    if (s < 1) s = 1;
+    if (s > WIN_SCALE_MAX) s = WIN_SCALE_MAX;
+    return s;
+}
+
+/* Wrap an SDL_malloc'd buffer as a drawable surface in the window's own pixel
+ * format, which fog_lerp needs for SDL_MapRGB. Heap, never static: 2 MB of
+ * runtime memory and zero exe bytes.
+ *
+ * Returns NULL if it cannot be made, and the caller then draws straight into
+ * the window surface at native resolution. That is a real degraded mode rather
+ * than a crash — the renderer does not care what resolution it is handed. */
+static SDL_Surface *backbuffer_new(const SDL_Surface *win_fb, void **pixels)
+{
+    SDL_Surface *s;
+    void *px = SDL_malloc((size_t)LOGICAL_W * LOGICAL_H * 4);
+
+    *pixels = px;
+    if (!px)
+        return NULL;
+    s = SDL_CreateRGBSurfaceWithFormatFrom(px, LOGICAL_W, LOGICAL_H, 32,
+                                           LOGICAL_W * 4, win_fb->format->format);
+    if (!s) {
+        SDL_free(px);
+        *pixels = NULL;
+    }
+    return s;
+}
+
+/* Push whatever was drawn to the screen. The scale is recomputed from the live
+ * surface every frame rather than remembered, so toggling fullscreen — where
+ * the window stops being an exact multiple of the logical size — needs no
+ * special case. `back` may be NULL (degraded mode), in which case the drawing
+ * already went straight to the window surface. */
+static void present(SDL_Window *win, SDL_Surface *fb, SDL_Surface *back)
+{
+    if (back) {
+        int sx = fb->w / back->w;
+        int sy = fb->h / back->h;
+        int s = sx < sy ? sx : sy;
+        blit_scale(back, fb, s < 1 ? 1 : s);
+    }
+    SDL_UpdateWindowSurface(win);
 }
 
 /* ------------------------------------------------------------- selftest -- */
@@ -2239,19 +2378,26 @@ static int autoplay_selftest(Uint64 seed, int ms)
     Rngs rngs;
     Scratch sc;
     SDL_Window *win;
-    SDL_Surface *fb;
+    SDL_Surface *fb, *back = NULL, *draw;
+    void *back_px = NULL;
     Uint32 end;
-    int restores = 0;
+    int restores = 0, scale;
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         printf("FAIL  SDL_Init(VIDEO): %s\n", SDL_GetError());
         return 1;
     }
+    scale = pick_scale();
     win = SDL_CreateWindow("Wayfarer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                           WIN_W, WIN_H, SDL_WINDOW_SHOWN);
+                           LOGICAL_W * scale, LOGICAL_H * scale, SDL_WINDOW_SHOWN);
     if (!win) {
         SDL_Quit();
         return 1;
+    }
+    if (scale >= 2) {
+        SDL_Surface *wfb = SDL_GetWindowSurface(win);
+        if (wfb && wfb->format->BytesPerPixel == 4)
+            back = backbuffer_new(wfb, &back_px);
     }
 
     rngs_init(&rngs, seed);
@@ -2275,15 +2421,19 @@ static int autoplay_selftest(Uint64 seed, int ms)
         fb = SDL_GetWindowSurface(win);
         if (!fb || fb->format->BytesPerPixel != 4)
             break;
-        camera_follow(&g, fb->w, fb->h);
-        render(fb, &g, 0);
-        SDL_UpdateWindowSurface(win);
+        draw = back ? back : fb;
+        camera_follow(&g, draw->w, draw->h);
+        render(draw, &g, 0);
+        present(win, fb, back);
         SDL_Delay(4); /* faster than real time; this is a capture aid */
     }
 
     printf("restored %d  fragments %d/%d  souls %d/%d  stage %d\n",
            restores, g.frags_restored, FRAGMENT_COUNT, g.souls_restored,
            SOUL_COUNT, world_stage(&g));
+    if (back)
+        SDL_FreeSurface(back);
+    SDL_free(back_px);
     SDL_DestroyWindow(win);
     SDL_Quit();
     return 0;
@@ -2497,8 +2647,10 @@ static int input_selftest(Uint64 seed, int ms)
         printf("FAIL  SDL_Init(VIDEO): %s\n", SDL_GetError());
         return 1;
     }
+    /* Scale 1: this harness measures the input path, and a small window is
+     * both sufficient and less disruptive to whatever else is on screen. */
     win = SDL_CreateWindow("Wayfarer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                           WIN_W, WIN_H, SDL_WINDOW_SHOWN);
+                           LOGICAL_W, LOGICAL_H, SDL_WINDOW_SHOWN);
     if (!win) {
         SDL_Quit();
         return 1;
@@ -2865,6 +3017,55 @@ static int iso_selftest(Uint64 seed)
         if (wrong) fails++;
     }
 
+    /* ---- case 4: the upscale is exactly nearest-neighbour -----------------
+     * The logical image must survive scaling untouched. Comparing framebuffer
+     * checksums across the resolution change cannot show that — the images are
+     * different sizes — so check the actual property: every source pixel
+     * becomes exactly its own s-by-s block at the right place, and every pixel
+     * outside the scaled image is cleared.
+     *
+     * The destination is deliberately NOT a multiple of the source, because
+     * that is the fullscreen case where a centring or margin bug would live. */
+    {
+        const int sw = 64, sh = 48, dw = 200, dh = 160;
+        Uint32 *src = (Uint32 *)SDL_calloc((size_t)sw * sh, sizeof(Uint32));
+        Uint32 *dst = (Uint32 *)SDL_calloc((size_t)dw * dh, sizeof(Uint32));
+        SDL_Surface ssrc, sdst;
+        int s, x, y;
+
+        if (src && dst) {
+            fake_surface(&ssrc, src, sw, sh);
+            fake_surface(&sdst, dst, dw, dh);
+            for (i = 0; i < sw * sh; i++)
+                src[i] = (Uint32)(i * 2654435761u) | 1u; /* distinct and non-zero */
+
+            for (s = 1; s <= 3; s++) {
+                int bad = 0, dirt = 0;
+                int ox = (dw - sw * s) / 2, oy = (dh - sh * s) / 2;
+                SDL_memset(dst, 0xAB, (size_t)dw * dh * sizeof(Uint32)); /* pre-dirty */
+                blit_scale(&ssrc, &sdst, s);
+                for (y = 0; y < dh; y++)
+                    for (x = 0; x < dw; x++) {
+                        Uint32 got = dst[y * dw + x];
+                        if (x >= ox && x < ox + sw * s && y >= oy && y < oy + sh * s) {
+                            if (got != src[((y - oy) / s) * sw + (x - ox) / s])
+                                bad++;
+                        } else if (got) {
+                            dirt++; /* margin must be cleared, not left stale */
+                        }
+                    }
+                printf("upscale x%d: %d wrong px, %d stale margin px (expect 0, 0)\n",
+                       s, bad, dirt);
+                if (bad || dirt) fails++;
+            }
+        } else {
+            printf("FAIL  out of memory in upscale check\n");
+            fails++;
+        }
+        SDL_free(src);
+        SDL_free(dst);
+    }
+
     SDL_free(comp);
     SDL_free(solo);
     SDL_free(band);
@@ -3009,6 +3210,10 @@ int main(int argc, char **argv)
 {
     SDL_Window *win;
     SDL_Surface *fb;
+    SDL_Surface *back = NULL; /* logical-resolution backbuffer, or NULL */
+    SDL_Surface *draw;        /* whichever of the two the renderer writes into */
+    void *back_px = NULL;
+    int scale;
     SDL_Event ev;
     Audio audio;
     Rngs rngs;
@@ -3021,7 +3226,7 @@ int main(int argc, char **argv)
     int limit = arg_int(argc, argv, "--frames", 0);
     int frame = 0;
     int running = 1;
-    int overlay = 0, grid = 0, dirty = 1, title_dirty = 1;
+    int overlay = 0, grid = 0, dirty = 1, title_dirty = 1, fullscreen = 0;
     int seed = arg_int(argc, argv, "--seed", 1);
 #if WAYFARER_PERF
     Perf pf;
@@ -3120,11 +3325,24 @@ int main(int argc, char **argv)
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
         return 1;
 
+    scale = arg_int(argc, argv, "--scale", 0);
+    if (scale < 1)
+        scale = pick_scale();
     win = SDL_CreateWindow("Wayfarer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                           WIN_W, WIN_H, SDL_WINDOW_SHOWN);
+                           LOGICAL_W * scale, LOGICAL_H * scale, SDL_WINDOW_SHOWN);
     if (!win) {
         SDL_Quit();
         return 2;
+    }
+
+    /* Needs the window's pixel format, so it cannot be built before this point.
+     * Allocated even at scale 1, where present() copies 1:1 — F11 can raise the
+     * scale at any moment, and a rendering path that only exists above a
+     * threshold is a path that only gets tested above one. */
+    {
+        SDL_Surface *wfb = SDL_GetWindowSurface(win);
+        if (wfb && wfb->format->BytesPerPixel == 4)
+            back = backbuffer_new(wfb, &back_px);
     }
 
 #if WAYFARER_PERF
@@ -3176,6 +3394,15 @@ int main(int argc, char **argv)
                     grid = !grid;
                     dirty = 1;
                     break;
+                case SDLK_F11:
+                    /* Borderless fullscreen. On a display that is tall enough
+                     * for the doubled image but not for the window chrome as
+                     * well, this is the only way to get the intended pixel
+                     * scale — and it is where a pixel-art game wants to be. */
+                    fullscreen = !fullscreen;
+                    SDL_SetWindowFullscreen(win, fullscreen
+                                            ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                    break;
                 case SDLK_e:
                 case SDLK_SPACE:
                     if (!grid && try_restore(&game) >= 0)
@@ -3226,6 +3453,7 @@ int main(int argc, char **argv)
             return fb ? 4 : 3;
         }
 
+        draw = back ? back : fb;
 #if WAYFARER_PERF
         t_a = SDL_GetPerformanceCounter();
 #endif
@@ -3234,17 +3462,17 @@ int main(int argc, char **argv)
              * but always re-present, so a repaint after the surface is
              * invalidated does not leave a blank window. */
             if (dirty) {
-                render_grid(fb, seed);
+                render_grid(draw, seed);
                 dirty = 0;
             }
         } else {
-            camera_follow(&game, fb->w, fb->h);
-            render(fb, &game, overlay);
+            camera_follow(&game, draw->w, draw->h);
+            render(draw, &game, overlay);
         }
 #if WAYFARER_PERF
         t_b = SDL_GetPerformanceCounter();
 #endif
-        SDL_UpdateWindowSurface(win);
+        present(win, fb, back);
 #if WAYFARER_PERF
         t_c = SDL_GetPerformanceCounter();
         ms_render  = (double)(t_b - t_a) / perf * 1000.0;
@@ -3257,7 +3485,7 @@ int main(int argc, char **argv)
          * Handover.md); saving the surface we just drew is exact, and every
          * remaining slice of the isometric work needs to be looked at. */
         if (shot && limit && frame + 1 >= limit)
-            SDL_SaveBMP(fb, shot);
+            SDL_SaveBMP(draw, shot); /* the logical image, not the upscale */
 #endif
 
         /* No bitmap font until Week 5 (design/systems/Save and UI.md), so debug
@@ -3325,14 +3553,18 @@ int main(int argc, char **argv)
     }
 
 #if WAYFARER_PERF
-    /* Report before tearing the window down, so fb->w/h are still the real
-     * surface dimensions rather than remembered constants. */
+    /* Reported against the LOGICAL size — that is what render() actually filled,
+     * and quoting the window size would make the pixel ratio meaningless. */
     if (show_perf)
-        perf_report(&pf, fb ? fb->w : WIN_W, fb ? fb->h : WIN_H);
+        perf_report(&pf, back ? back->w : LOGICAL_W, back ? back->h : LOGICAL_H,
+                    scale);
 #endif
 
     if (dev)
         SDL_CloseAudioDevice(dev);
+    if (back)
+        SDL_FreeSurface(back);
+    SDL_free(back_px);
     SDL_DestroyWindow(win);
     SDL_Quit();
     return 0;
