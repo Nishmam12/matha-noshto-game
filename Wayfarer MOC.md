@@ -12,6 +12,7 @@ Exploration-driven memory-restoration game for the 2P Game Arcade 1.44MB Floppy 
 
 ## Design
 - [[Overview]] — core concept, confirmed pillars/naming, loop, judging-criteria alignment
+- [[Art Bible]] — **provisional** visual identity: palette ramps, shape language, fog destination, and the sprite/bake asset contract
 - [[World Generation]]
 - [[Fog and Reveal]]
 - [[Isometric Rendering]]

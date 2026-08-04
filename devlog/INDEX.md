@@ -7,13 +7,23 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 689,152 bytes
-**Current status:** verified — isometric renderer and procedural buildings in place; no animation,
-no character, no audio, no font
-**Headroom:** 750,848 bytes under the 1,440,000 ship target
+**Current `.exe` size:** 690,176 bytes
+**Current status:** verified — island landform, clustered villages, rounded foliage and a first
+palette pass; no animation, no character, no audio, no font. Fog and input orientation are both
+known defects and both untouched
+**Headroom:** 749,824 bytes under the 1,440,000 ship target
 
 ## Sessions
 
+- [[2026-08-04-session-01]] *(Session 02)* — **The landform, and a first honest look at it.**
+  Replaced the cave generator with an island height field: coastline, ocean, inland rock outcrops,
+  villages clustered onto sites instead of scattered over every open plot. Found three defects by
+  screenshotting rather than testing — flat-slab outcrops, a checkerboard height jitter, and canopy
+  lobes that were axis-aligned rectangles — and fixed all three, adding `fill_ellipse` and prop
+  contact shadows. New provisional [[Art Bible]]. **No collision input changed**, so the 50-seed
+  completability proof was re-run rather than re-argued; whole suite PASS. Left explicitly undone:
+  `--land-test` and its negative control, the fog rewrite, screen-aligned input, and building roof
+  face-shading (diagnosed, with a note in `draw_building` recording a failed attempt).
 - [[2026-08-04-session-01]] — **Isometric pivot, part 1.** Render instrumentation first (the old
   "56 fps" measured `SDL_Delay`, not drawing). Then 32 px tiles, a 2:1 isometric projection with a
   provably gap-free column rasteriser, elevation with cliff faces, a 960×540 logical buffer

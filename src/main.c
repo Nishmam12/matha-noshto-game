@@ -482,11 +482,30 @@ typedef struct {
 } Building;
 
 #define BUILDING_MAX 40
+/* Houses cluster into villages rather than covering the island. BUILDING_TARGET
+ * is what placement actually aims for; BUILDING_MAX stays the array bound. */
+#define VILLAGE_SITES   3
+#define VILLAGE_RADIUS  9   /* tiles from a site centre to its outermost plot */
+#define VILLAGE_SPACING 22  /* minimum tiles between two site centres */
+#define BUILDING_TARGET 15
 #define STOREY_H     14   /* wall px per storey */
 #define WALL_BASE    10   /* plinth under the first storey */
 
+/* What a tile is made of. `solid` stays the single collision truth — both ROCK
+ * and OCEAN are solid and neither is walkable — and this only records WHICH kind
+ * of solid, so water can be drawn as water instead of as brown rock. Read by
+ * rendering and by world_heights; never by collision. */
+enum {
+    SURF_LAND = 0, /* open ground */
+    SURF_ROCK,     /* cliff or outcrop: solid, raised */
+    SURF_OCEAN     /* sea: solid, sunken */
+};
+
 typedef struct {
     Uint8  solid[WORLD_H][WORLD_W];
+    /* Written by world_gen alongside `solid`, which is derived from it. Read
+     * only by rendering and by world_heights — see the SURF_* note above. */
+    Uint8  surf[WORLD_H][WORLD_W];
     float  reveal[WORLD_H][WORLD_W]; /* 0 = fogged and colourless, 1 = restored */
     Uint8  region[WORLD_H][WORLD_W]; /* REGION_NONE where solid or unreachable */
     /* DERIVED, RENDER-ONLY. Draw height in screen px, computed once at the end
@@ -544,42 +563,128 @@ static int solid_at(const World *w, int tx, int ty)
     return w->solid[ty][tx];
 }
 
-/* Cellular-automaton cave. Cheap, seeded, and produces rounded blobs that give
- * the reveal something worth walking around. Placeholder generation only. */
+/* --- island generation ----------------------------------------------------
+ *
+ * This was a cellular-automaton cave, and because world_heights derives terrace
+ * height from distance into a rock mass, the LANDFORM was cave noise. On screen
+ * that read as random brown lumps rather than as a place, and there was no
+ * coastline anywhere — design/Art Bible.md §6 is explicit that water has to be a
+ * body with a shore, not a scattering of blue tiles.
+ *
+ * An island instead. A radial term makes the middle high and the rim low; two
+ * octaves of value noise push the coastline in and out so it is ragged rather
+ * than elliptical; a third, higher-frequency octave raises rock outcrops inland
+ * so the interior still has structure to walk around. The radial term uses
+ * NORMALISED coordinates, so the island is stretched to the world's 80x45
+ * proportion — which lands as a diamond in the isometric projection, the shape
+ * an isometric island wants to be.
+ *
+ * Crucially this writes `solid` and nothing else that collision can observe.
+ * Ocean and rock are both solid; which one a tile is lives in `surf` and is
+ * render-only. So the region partition, building placement and the 50-seed
+ * completability proof all still see exactly what they saw before, and could be
+ * re-RUN rather than re-argued. */
+#define LAND_LAT_W    13   /* coarse height lattice; ~6.7 tiles per cell */
+#define LAND_LAT_H     9
+#define LAND_LAT2_W   25   /* fine height octave */
+#define LAND_LAT2_H   17
+/* Outcrop lattice. Deliberately LOW frequency: at 33x19 the threshold produced
+ * dozens of small blobs, and because world_heights raises a one-ring outcrop to
+ * exactly one terrace, every one of them came out as an identical flat-topped
+ * 12 px platform — on screen, a lawn scattered with concrete slabs. Fewer and
+ * larger outcrops give the chamfer room to produce several terraces within one
+ * mass, which is what makes rock read as rock. */
+#define LAND_ROCK_W   17
+#define LAND_ROCK_H   11
+#define LAND_SEA      0.24f /* height below this is ocean; lower = bigger island */
+#define LAND_ROUGH    0.55f /* how far noise moves the coastline in and out */
+/* Raised from 0.68: at that threshold a single outcrop could cover 40% of the
+ * screen, and because rock is the darkest large surface in the palette the
+ * result read as a quarry with a lawn around it rather than as a hillside. */
+#define LAND_ROCK_T   0.74f /* outcrop threshold */
+
+static void land_lattice(Rng *rng, float *lat, int n)
+{
+    int i;
+
+    for (i = 0; i < n; i++)
+        lat[i] = rng_float(rng);
+}
+
+/* Bilinear value noise over a random lattice, smoothstepped so cell boundaries
+ * do not crease into visible straight lines across the coast. */
+static float land_noise(const float *lat, int lw, int lh, float fx, float fy)
+{
+    int x0, y0, x1, y1;
+    float tx, ty, a, b;
+
+    fx *= (float)(lw - 1);
+    fy *= (float)(lh - 1);
+    x0 = (int)fx;
+    y0 = (int)fy;
+    if (x0 > lw - 2) x0 = lw - 2;
+    if (y0 > lh - 2) y0 = lh - 2;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    x1 = x0 + 1;
+    y1 = y0 + 1;
+
+    tx = fx - (float)x0;
+    ty = fy - (float)y0;
+    tx = tx * tx * (3.0f - 2.0f * tx);
+    ty = ty * ty * (3.0f - 2.0f * ty);
+
+    a = lat[y0 * lw + x0] + (lat[y0 * lw + x1] - lat[y0 * lw + x0]) * tx;
+    b = lat[y1 * lw + x0] + (lat[y1 * lw + x1] - lat[y1 * lw + x0]) * tx;
+    return a + (b - a) * ty;
+}
+
 static void world_gen(World *w, Rng *rng)
 {
-    /* Deliberately a local, not a static. On PE/COFF, -fdata-sections emits
+    /* Deliberately locals, not statics. On PE/COFF, -fdata-sections emits
      * zero-initialised statics as .data$name COMDATs, which are stored in the
      * file — 40 KB of literal zeros measured in the executable before this was
-     * moved to the stack. Keep world-sized scratch buffers off the static path. */
-    Uint8 next[WORLD_H][WORLD_W];
-    int x, y, pass;
+     * moved to the stack. Keep generation scratch off the static path. */
+    float lat0[LAND_LAT_W * LAND_LAT_H];
+    float lat1[LAND_LAT2_W * LAND_LAT2_H];
+    float rock[LAND_ROCK_W * LAND_ROCK_H];
+    int x, y;
 
-    for (y = 0; y < WORLD_H; y++)
-        for (x = 0; x < WORLD_W; x++)
-            w->solid[y][x] = (x == 0 || y == 0 || x == WORLD_W - 1 || y == WORLD_H - 1)
-                                 ? 1
-                                 : (rng_float(rng) < 0.42f);
+    land_lattice(rng, lat0, LAND_LAT_W * LAND_LAT_H);
+    land_lattice(rng, lat1, LAND_LAT2_W * LAND_LAT2_H);
+    land_lattice(rng, rock, LAND_ROCK_W * LAND_ROCK_H);
 
-    for (pass = 0; pass < 4; pass++) {
-        for (y = 0; y < WORLD_H; y++) {
-            for (x = 0; x < WORLD_W; x++) {
-                int n = 0, dx, dy;
-                for (dy = -1; dy <= 1; dy++)
-                    for (dx = -1; dx <= 1; dx++)
-                        if (dx || dy)
-                            n += solid_at(w, x + dx, y + dy);
-                next[y][x] = (Uint8)(n >= 5 ? 1 : (n <= 2 ? 0 : w->solid[y][x]));
-                if (x == 0 || y == 0 || x == WORLD_W - 1 || y == WORLD_H - 1)
-                    next[y][x] = 1;
-            }
-        }
-        SDL_memcpy(w->solid, next, sizeof(next));
-    }
+    for (y = 0; y < WORLD_H; y++) {
+        for (x = 0; x < WORLD_W; x++) {
+            float fx = (float)x / (float)(WORLD_W - 1);
+            float fy = (float)y / (float)(WORLD_H - 1);
+            float ex = (fx - 0.5f) * 2.0f;
+            float ey = (fy - 0.5f) * 2.0f;
+            float d  = SDL_sqrtf(ex * ex + ey * ey);
+            /* Two octaves, recentred on zero so they push the coast both ways
+             * rather than only outward. */
+            float n  = (0.62f * land_noise(lat0, LAND_LAT_W, LAND_LAT_H, fx, fy)
+                      + 0.38f * land_noise(lat1, LAND_LAT2_W, LAND_LAT2_H, fx, fy))
+                     - 0.5f;
+            float h  = (1.0f - d) + n * LAND_ROUGH;
+            Uint8 s;
 
-    for (y = 0; y < WORLD_H; y++)
-        for (x = 0; x < WORLD_W; x++)
+            /* The rim is always water, so nothing can walk off the world and
+             * solid_at's out-of-bounds wall never has to be seen. */
+            if (x == 0 || y == 0 || x == WORLD_W - 1 || y == WORLD_H - 1)
+                s = SURF_OCEAN;
+            else if (h < LAND_SEA)
+                s = SURF_OCEAN;
+            else if (land_noise(rock, LAND_ROCK_W, LAND_ROCK_H, fx, fy) > LAND_ROCK_T)
+                s = SURF_ROCK;
+            else
+                s = SURF_LAND;
+
+            w->surf[y][x] = s;
+            w->solid[y][x] = (Uint8)(s != SURF_LAND);
             w->reveal[y][x] = 0.0f;
+        }
+    }
 }
 
 /* Stamp buildings into the open ground.
@@ -595,25 +700,69 @@ static void world_gen(World *w, Rng *rng)
  * approachable from at least one side. */
 static void place_buildings(World *w, Rng *rng)
 {
-    int tries;
+    int sx[VILLAGE_SITES], sy[VILLAGE_SITES];
+    int sites = 0, tries;
 
     w->bld_count = 0;
     SDL_memset(w->bld_at, 0, sizeof(w->bld_at));
 
-    /* 3000 attempts rather than 900: the plot test is strict (a footprint plus
-     * a one-tile skirt all open), so most attempts land on rock and are
-     * rejected cheaply. At 900 the mean was 13 buildings per world, which reads
-     * as a hamlet; this brings it up to something worth calling a village. */
-    for (tries = 0; tries < 3000 && w->bld_count < BUILDING_MAX; tries++) {
-        int bw = 2 + (int)rng_below(rng, 3);          /* 2..4 tiles */
-        int bh = 2 + (int)rng_below(rng, 3);
-        int bx = 2 + (int)rng_below(rng, WORLD_W - bw - 4);
-        int by = 2 + (int)rng_below(rng, WORLD_H - bh - 4);
+    /* Pick village sites first. Scattering houses uniformly over the whole
+     * island put a building on almost every open plot the moment the landmass
+     * grew — on screen, a suburb of identical boxes with no ground between
+     * them. Clustering is what makes the same houses read as a village with
+     * countryside around it, and it costs one rejection test.
+     *
+     * Sites are kept VILLAGE_SPACING apart so two clusters never merge back
+     * into the uniform scatter this replaced. */
+    for (tries = 0; tries < 400 && sites < VILLAGE_SITES; tries++) {
+        int cx = 6 + (int)rng_below(rng, WORLD_W - 12);
+        int cy = 5 + (int)rng_below(rng, WORLD_H - 10);
+        int i, ok = 1;
+
+        if (solid_at(w, cx, cy))
+            continue;
+        for (i = 0; i < sites; i++) {
+            int dx = cx - sx[i], dy = cy - sy[i];
+            if (dx * dx + dy * dy < VILLAGE_SPACING * VILLAGE_SPACING)
+                ok = 0;
+        }
+        if (!ok)
+            continue;
+        sx[sites] = cx;
+        sy[sites] = cy;
+        sites++;
+    }
+    if (sites == 0)
+        return; /* no open ground at all; the verifier will reject this world */
+
+    /* Footprints are 2..3 tiles, not 2..4. A 4-tile house is 256 px wide on
+     * screen against a ~20 px tree, which broke the scale contract in
+     * design/Art Bible.md §4 badly enough that the world read as warehouses
+     * with shrubs. */
+    for (tries = 0; tries < 5000 && w->bld_count < BUILDING_TARGET; tries++) {
+        int s  = (int)rng_below(rng, (Uint32)sites);
+        int bw = 2 + (int)rng_below(rng, 2);          /* 2..3 tiles */
+        int bh = 2 + (int)rng_below(rng, 2);
+        /* Two draws summed, so plots bunch toward the site centre and thin out
+         * at the edge rather than filling a hard-edged disc. */
+        int bx = sx[s] - VILLAGE_RADIUS
+               + (int)rng_below(rng, VILLAGE_RADIUS + 1)
+               + (int)rng_below(rng, VILLAGE_RADIUS + 1);
+        int by = sy[s] - VILLAGE_RADIUS
+               + (int)rng_below(rng, VILLAGE_RADIUS + 1)
+               + (int)rng_below(rng, VILLAGE_RADIUS + 1);
         int x, y, ok = 1;
 
-        /* The footprint and a one-tile skirt must all be open ground. */
-        for (y = by - 1; y <= by + bh && ok; y++)
-            for (x = bx - 1; x <= bx + bw && ok; x++)
+        if (bx < 2 || by < 2 || bx + bw > WORLD_W - 2 || by + bh > WORLD_H - 2)
+            continue;
+
+        /* The footprint and a TWO-tile skirt must all be open ground. At one
+         * tile, neighbouring houses ended up with a single tile between them
+         * and the cluster read as one continuous terrace of roofs; two tiles
+         * leaves a lane wide enough to walk down and to see ground through.
+         * It also still guarantees the plot is approachable from every side. */
+        for (y = by - 2; y <= by + bh + 1 && ok; y++)
+            for (x = bx - 2; x <= bx + bw + 1 && ok; x++)
                 if (solid_at(w, x, y))
                     ok = 0;
         if (!ok)
@@ -1280,9 +1429,41 @@ static void world_heights(World *w)
                  * front faces at wall height, which IS the wall — no separate
                  * wall-drawing code exists anywhere. */
                 h = WALL_BASE + w->bld[w->bld_at[y][x] - 1].levels * STOREY_H;
+            } else if (w->surf[y][x] == SURF_OCEAN) {
+                /* Sea floor, stepping down away from the shore. Without this the
+                 * chamfer below would read open water as the deep interior of a
+                 * rock mass and raise it to ELEV_MAX — an ocean drawn as a
+                 * 48 px plateau. It steps rather than sitting flat so the shelf
+                 * reads as depth. */
+                int step = dist[y][x] - 1;
+                if (step < 0) step = 0;
+                if (step > 3) step = 3;
+                h = ELEV_WATER - step * 4;
             } else if (w->solid[y][x]) {
                 h = dist[y][x] * ELEV_STEP;
                 if (h > ELEV_MAX) h = ELEV_MAX;
+                /* Break the terrace top. Without this every tile of a one-ring
+                 * outcrop sits at exactly ELEV_STEP and the mass reads as a
+                 * poured slab; the jitter turns the top into small facets and
+                 * the rasteriser draws the resulting 1-8 px steps for free.
+                 *
+                 * A positional hash, NOT an RNG stream — decoration must never
+                 * perturb terrain or entity placement (see the note on the
+                 * decoration hash). It is also render-only: `height` is not a
+                 * collision input, so no seed's solvability can change. */
+                {
+                    /* Hashed on the 2x2 block, not the tile, and by +-2 rather
+                     * than +-4. Per-tile jitter at full amplitude turned every
+                     * outcrop top into a visible checkerboard — adjacent tiles
+                     * disagreed every time, so the rasteriser drew a step
+                     * between all of them. Sharing a value across a block gives
+                     * facets a few tiles wide, which is what rock looks like. */
+                    Uint32 j = (Uint32)(x >> 1) * 73856093u
+                             ^ (Uint32)(y >> 1) * 19349663u;
+                    j ^= j >> 13;
+                    h += (int)(j % 5u) - 2;
+                    if (h < ELEV_STEP / 2) h = ELEV_STEP / 2;
+                }
             } else {
                 Uint8 rg = w->region[y][x];
                 int t = (rg == REGION_NONE) ? TERRAIN_NORMAL
@@ -1779,10 +1960,36 @@ static void iso_diamond(SDL_Surface *fb, int cx, int cy, int rw, Uint32 c)
 static void terrain_colour(int terrain, int *r, int *g, int *b)
 {
     switch (terrain) {
-    case TERRAIN_WATER: *r = 0x3a; *g = 0x72; *b = 0xa8; break; /* Wade */
-    case TERRAIN_LEDGE: *r = 0x8a; *g = 0x7a; *b = 0x5a; break; /* Climb */
-    case TERRAIN_DARK:  *r = 0x4a; *g = 0x3a; *b = 0x6a; break; /* Kindle */
-    default:            *r = 0x4e; *g = 0x9e; *b = 0x54; break;
+    case TERRAIN_WATER: *r = 0x2f; *g = 0x6d; *b = 0x7d; break; /* Wade */
+    case TERRAIN_LEDGE: *r = 0x8c; *g = 0x70; *b = 0x48; break; /* Climb */
+    case TERRAIN_DARK:  *r = 0x3b; *g = 0x33; *b = 0x50; break; /* Kindle */
+    /* Sage, not the primary green this was. design/Art Bible.md §4: the old
+     * 0x4e9e54 was the most saturated thing on screen and flattened everything
+     * next to it — trees included, which is what made them merge into the lawn. */
+    default:            *r = 0x3e; *g = 0x5c; *b = 0x35; break;
+    }
+}
+
+/* A filled ellipse, one horizontal run per row.
+ *
+ * Canopy lobes used to be axis-aligned fill_rects, and that is the single
+ * reason trees read as broccoli: six stacked rectangles of decreasing width are
+ * a stepped pyramid however carefully their widths are chosen, and no amount of
+ * palette work fixes a silhouette. design/Art Bible.md §3 asks for foliage to be
+ * ROUND against angular architecture and faceted rock, and this is the primitive
+ * that buys it. Costs one span per row against one per lobe — nothing, against
+ * the ~150x render headroom measured in devlog/2026-08-04-session-01. */
+static void fill_ellipse(SDL_Surface *fb, int cx, int cy, int rx, int ry, Uint32 c)
+{
+    int dy;
+
+    if (rx <= 0 || ry <= 0)
+        return;
+    for (dy = -ry; dy <= ry; dy++) {
+        float t = (float)dy / (float)ry;
+        int w = (int)((float)rx * SDL_sqrtf(1.0f - t * t) + 0.5f);
+        if (w > 0)
+            fill_rect(fb, cx - w, cy + dy, w * 2, 1, c);
     }
 }
 
@@ -1803,17 +2010,24 @@ static void terrain_colour(int terrain, int *r, int *g, int *b)
  * enough because the eye reads silhouette before colour — the shape jitter does
  * the work, and the palettes only have to stop the wood being a monoculture. */
 
-/* Canopy palettes, four shades each, dark to light. Two autumn, one blue-green,
- * one near-black conifer, the rest ordinary greens. */
+/* Canopy palettes, four shades each, dark to light, all inside the foliage value
+ * band of design/Art Bible.md §4.
+ *
+ * The two autumn palettes that used to sit at indices 4 and 5 are gone. At full
+ * reveal they read as autumn; at the 0.42 that walking alone ever reaches they
+ * read as DEAD, and with a quarter of the wood drawn in them every screenshot
+ * looked like a blighted forest. Variety now comes from hue within green —
+ * blue-green, olive, teal, yellow-green — which survives the fog blend because
+ * it is carried by value, not by hue. */
 static const Uint8 canopy_pal[8][4][3] = {
-    { {0x1e,0x38,0x22},{0x2c,0x50,0x2e},{0x3e,0x6c,0x3a},{0x58,0x8e,0x4c} },
-    { {0x1a,0x33,0x28},{0x27,0x4b,0x38},{0x38,0x66,0x4a},{0x50,0x86,0x60} },
-    { {0x22,0x34,0x1c},{0x33,0x4c,0x26},{0x47,0x67,0x32},{0x63,0x88,0x44} },
-    { {0x1c,0x30,0x2e},{0x28,0x46,0x42},{0x38,0x60,0x58},{0x4e,0x80,0x72} },
-    { {0x34,0x26,0x16},{0x4e,0x38,0x1e},{0x6c,0x50,0x26},{0x8e,0x6e,0x34} },
-    { {0x38,0x22,0x18},{0x54,0x33,0x20},{0x74,0x4a,0x28},{0x96,0x66,0x34} },
-    { {0x14,0x26,0x1e},{0x1e,0x38,0x2c},{0x2a,0x4e,0x3c},{0x3a,0x68,0x50} },
-    { {0x26,0x3a,0x20},{0x38,0x56,0x2e},{0x4e,0x74,0x3e},{0x6c,0x98,0x52} }
+    { {0x1e,0x33,0x24},{0x2b,0x4a,0x2e},{0x3d,0x66,0x3a},{0x54,0x80,0x49} },
+    { {0x1a,0x30,0x28},{0x26,0x46,0x38},{0x36,0x60,0x4c},{0x4a,0x7a,0x62} },
+    { {0x20,0x31,0x1c},{0x2f,0x48,0x27},{0x42,0x63,0x35},{0x5b,0x7e,0x47} },
+    { {0x16,0x28,0x24},{0x21,0x3b,0x35},{0x2f,0x53,0x49},{0x40,0x6e,0x60} },
+    { {0x24,0x36,0x1e},{0x35,0x4e,0x2b},{0x49,0x6b,0x3b},{0x63,0x88,0x4d} },
+    { {0x1c,0x2c,0x20},{0x28,0x41,0x2e},{0x38,0x5a,0x3f},{0x4c,0x74,0x53} },
+    { {0x12,0x22,0x1a},{0x1b,0x33,0x27},{0x27,0x48,0x36},{0x36,0x60,0x49} },
+    { {0x26,0x38,0x22},{0x37,0x52,0x30},{0x4c,0x70,0x41},{0x68,0x90,0x55} }
 };
 
 /* Trunk palettes: shadow side, body, lit side. Three slices is what makes a
@@ -1869,6 +2083,12 @@ static void draw_tree(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
     int top  = by - th - ch;
     int i;
 
+    /* Contact shadow first, flat on the ground plane. Without one a prop floats:
+     * in an isometric projection there is no other cue for where its base
+     * actually meets the tile, and every prop in the world was floating.
+     * design/Art Bible.md §3 — "everything touches the ground". */
+    iso_diamond(fb, cx, by - 1, cw / 3, fog_lerp(fb, 0x24, 0x33, 0x22, rev));
+
     fill_rect(fb, cx - 3, by - th, 3, th, fog_lerp(fb, tp[0][0], tp[0][1], tp[0][2], rev));
     fill_rect(fb, cx,     by - th, 2, th, fog_lerp(fb, tp[1][0], tp[1][1], tp[1][2], rev));
     fill_rect(fb, cx + 2, by - th, 1, th, fog_lerp(fb, tp[2][0], tp[2][1], tp[2][2], rev));
@@ -1877,13 +2097,14 @@ static void draw_tree(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
     for (i = 0; i < LOBES; i++) {
         int lw = cw * lobe_w[i] / 100;
         int s  = lobe_s[i];
-        fill_rect(fb, cx - lw / 2, top + i * step, lw, step + 4,
-                  fog_lerp(fb, cp[s][0], cp[s][1], cp[s][2], rev));
+        int ly = top + i * step + (step + 4) / 2;
+        fill_ellipse(fb, cx, ly, lw / 2, (step + 5) / 2,
+                     fog_lerp(fb, cp[s][0], cp[s][1], cp[s][2], rev));
     }
     /* The few pixels that sell the volume: a highlight on the up-left shoulder,
      * where the notional light already lands on the tile faces. */
-    fill_rect(fb, cx - (cw * 95 / 100) / 2 + 2, top + step + 1, 5, 3,
-              fog_lerp(fb, cp[3][0], cp[3][1], cp[3][2], rev));
+    fill_ellipse(fb, cx - (cw * 95 / 100) / 4, top + step + 2, 4, 2,
+                 fog_lerp(fb, cp[3][0], cp[3][1], cp[3][2], rev));
 }
 
 static void draw_bush(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
@@ -1892,10 +2113,11 @@ static void draw_bush(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
     int bw = 13 + (int)((h >> 20) & 3) * 2;
     int bh = 8 + (int)((h >> 22) & 3) * 2;
 
-    fill_rect(fb, cx - bw / 2, by - bh, bw, bh,
-              fog_lerp(fb, cp[1][0], cp[1][1], cp[1][2], rev));
-    fill_rect(fb, cx - bw / 3, by - bh - 3, bw * 2 / 3, 5,
-              fog_lerp(fb, cp[2][0], cp[2][1], cp[2][2], rev));
+    iso_diamond(fb, cx, by - 1, bw / 3, fog_lerp(fb, 0x24, 0x33, 0x22, rev));
+    fill_ellipse(fb, cx, by - bh / 2, bw / 2, (bh + 1) / 2,
+                 fog_lerp(fb, cp[1][0], cp[1][1], cp[1][2], rev));
+    fill_ellipse(fb, cx, by - bh - 1, bw / 3, 3,
+                 fog_lerp(fb, cp[2][0], cp[2][1], cp[2][2], rev));
     fill_rect(fb, cx - bw / 3 + 1, by - bh - 2, 4, 2,
               fog_lerp(fb, cp[3][0], cp[3][1], cp[3][2], rev));
 }
@@ -2059,8 +2281,8 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
      *
      * Seven steps rather than three, for the same reason: over a 130 px wide
      * diamond, three steps is a ziggurat and seven reads as a slope. */
-    rw    = (b->w + b->h) * ISO_HW / 2 + 3;
-    steps = 7;
+    rw    = (b->w + b->h) * ISO_HW / 2 + 5;
+    steps = 8;
     {
         int rise = (BV_RSHAPE(v) >= 3) ? (rw * 3) / 4   /* steep */
                  : (BV_RSHAPE(v) == 0) ? (rw * 2) / 5   /* shallow */
@@ -2070,14 +2292,26 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
             pitch = 3;
     }
 
+    /* NOTE: an eave-shadow diamond was tried here and removed. Drawn at full rw
+     * under the roof line it read as a light rim around a flat plate, because
+     * the roof above it is ALSO a stack of concentric diamonds — the two
+     * together gave concentric rings, which is the one thing that reads less
+     * like a roof than a plain slope.
+     *
+     * The real defect is that this roof has no left/right face split. Terrain
+     * gets its volume from FACE_L/FACE_R, and the roof gets none, so it reads
+     * flat no matter how the steps are shaded. Fixing it needs a half-diamond
+     * fill and is its own slice. */
     for (k = 0; k < steps; k++) {
         int krw = rw - (rw * k) / (steps + 1);
         int s   = (k * 3) / steps;
         iso_diamond(fb, cx, cy - wall - k * pitch, krw,
                     fog_lerp(fb, rp[s][0], rp[s][1], rp[s][2], rev));
     }
-    /* Ridge cap: the few px that stop the stack reading as a ziggurat. */
-    iso_diamond(fb, cx, cy - wall - steps * pitch, rw / (steps + 1) + 3,
+    /* Ridge cap. Small on purpose: at rw/(steps+1)+3 the top diamond was wide
+     * enough to read as a flat plateau, which is what made the roof look like a
+     * tarp stretched over a box instead of coming to a peak. */
+    iso_diamond(fb, cx, cy - wall - steps * pitch, rw / (steps + 2),
                 fog_lerp(fb, rp[2][0], rp[2][1], rp[2][2], rev));
 
     /* Chimney, on the roof rather than beside it. */
@@ -2171,8 +2405,30 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
     if (bi) {
         const Uint8 *p = wall_pal[BV_WALL(g->w.bld[bi - 1].variant)];
         *cr = p[0]; *cg = p[1]; *cb = p[2];
+    } else if (g->w.surf[ty][tx] == SURF_OCEAN) {
+        /* Water ramp, design/Art Bible.md §4, picked by depth. A single flat
+         * blue reads as painted paper; stepping the ramp with the sea floor
+         * makes the shelf near the shore read as shallows. */
+        static const Uint8 water_ramp[4][3] = {
+            {0x2f,0x6d,0x7d}, {0x25,0x5b,0x6c}, {0x1e,0x4a,0x5c}, {0x18,0x3d,0x4d}
+        };
+        int d = (ELEV_WATER - g->w.height[ty][tx]) / 4;
+        if (d < 0) d = 0;
+        if (d > 3) d = 3;
+        *cr = water_ramp[d][0]; *cg = water_ramp[d][1]; *cb = water_ramp[d][2];
     } else if (g->w.solid[ty][tx]) {
-        *cr = 0x5a; *cg = 0x4a; *cb = 0x3c;
+        /* Stone ramp, varied per tile. One flat grey over a whole outcrop was
+         * the other half of the "concrete slab" read — real rock has tonal
+         * variation across its face, and three shades is enough to get it. */
+        /* Lighter than the ramp's nominal base. Rock reads against grass, and
+         * grass here is a mid-value sage — stone darker than it inverted the
+         * usual landscape reading, where stone catches light and vegetation
+         * holds the shadows. */
+        static const Uint8 stone_ramp[3][3] = {
+            {0x50,0x4e,0x5c}, {0x5c,0x5a,0x68}, {0x69,0x67,0x75}
+        };
+        const Uint8 *p = stone_ramp[tile_hash(g->seed, tx, ty) % 3u];
+        *cr = p[0]; *cg = p[1]; *cb = p[2];
     } else {
         Uint8 reg = g->w.region[ty][tx];
         terrain_colour(reg == REGION_NONE ? TERRAIN_NORMAL
@@ -2264,22 +2520,26 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                        ? TERRAIN_NORMAL : g->w.regions[g->w.region[ty][tx]].terrain);
             nmark = 5; mw = 2;
             if (terr < 0) {
-                mark = fog_lerp(fb, 0x74, 0x64, 0x54, rev); nmark = 3; mw = 3;
+                /* Rock. Long marks, because stone reads through aligned
+                 * repetition — strata, not speckle (design/Art Bible.md §6). */
+                mark = fog_lerp(fb, 0x6e, 0x6c, 0x7a, rev); nmark = 4; mw = 6;
             } else if (terr == TERRAIN_LEDGE) {
-                mark = fog_lerp(fb, 0xa2, 0x92, 0x72, rev); nmark = 3; mw = 7;
+                mark = fog_lerp(fb, 0xa8, 0x90, 0x60, rev); nmark = 3; mw = 7;
             } else if (terr == TERRAIN_WATER) {
-                mark = fog_lerp(fb, 0x58, 0x92, 0xc4, rev); nmark = 3; mw = 5;
+                mark = fog_lerp(fb, 0x5a, 0xa0, 0xa8, rev); nmark = 3; mw = 5;
             } else if (terr == TERRAIN_DARK) {
-                mark = fog_lerp(fb, 0x64, 0x54, 0x88, rev); nmark = 2; mw = 2;
+                mark = fog_lerp(fb, 0x58, 0x4c, 0x74, rev); nmark = 2; mw = 2;
             } else {
-                mark = fog_lerp(fb, 0x74, 0xc6, 0x6e, rev); nmark = 6; mw = 2;
+                mark = fog_lerp(fb, 0x55, 0x7a, 0x45, rev); nmark = 6; mw = 2;
             }
             tile_detail(fb, ax, ay, h, hash, mark, nmark, mw);
             /* Grass gets a second, darker scatter. One shade of speckle reads
-             * as dirt on a flat field; two read as depth in the grass. */
+             * as dirt on a flat field; two read as depth in the grass. Both
+             * shades now come from the grass ramp rather than being invented,
+             * so the tufts sit in the same family as the ground. */
             if (terr == TERRAIN_NORMAL)
                 tile_detail(fb, ax, ay, h, hash * 2654435761u,
-                            fog_lerp(fb, 0x3a, 0x78, 0x40, rev), 5, 2);
+                            fog_lerp(fb, 0x2c, 0x44, 0x29, rev), 5, 2);
         }
 
         /* Second sub-pass over the SAME band: props. It has to be separate from
