@@ -72,11 +72,11 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 | | |
 |---|---|
-| **`build\wayfarer.exe`** | **690,688 bytes** — 749,312 under the ship target |
-| `build\wayfarer-selftest.exe` | 717,312 bytes — **not a deliverable**, never shipped |
-| `src\main.c` | ~4,830 lines, single translation unit |
+| **`build\wayfarer.exe`** | **691,200 bytes** — 748,800 under the ship target |
+| `build\wayfarer-selftest.exe` | 726,528 bytes — **not a deliverable**, never shipped |
+| `src\main.c` | ~5,400 lines, single translation unit |
 | Warnings | zero, under `-Wall -Wextra` |
-| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–02 done; Phase 03 (font + tuning overlay) code-complete, awaiting one human check** — see [[Phase Roadmap]]. Audio, save and UI are all still untouched |
+| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–05 all done** — see [[Phase Roadmap]]. Phase 06 (water and bridges) is next. Audio, save and UI are all still untouched |
 
 ### What actually works right now
 
@@ -129,9 +129,6 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 - **Buildings do not respond to restoration.** The ruin→whole rebuild is designed but not built
 - **No rivers, no bridges, no waterfalls.** Water is currently ocean only, with no inland flow
 - **No worn paths between buildings.** The village reads as buildings-in-a-field, not as inhabited
-- **No `--land-test` or `--fog-test`.** Both the island generator and the fog rewrite shipped without
-  a checker of their own, which breaks this project's own "every checker needs a negative control"
-  rule. This is tracked as rule debt, not forgotten — [[Phase Roadmap]] Phase 05
 - Idle sway/breathe for Found Souls
 - Audio-layer-per-restore (the hook is wired; the layers are not)
 
@@ -140,14 +137,14 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 Remote: **`https://github.com/Nishmam12/matha-noshto-game`** — private, branch `main`.
 
 ```
+4847bf5  Phase 05: --land-test and --fog-test, paying down three sessions of rule debt
+b4bf446  Houses: put the roof back on the box, and the windows back on the wall
+037936c  docs: the rescale and Phase 04, plus the traps both cost
 dd8cfef  Phase 04: screen-aligned input, and an eased follow camera
 e03138d  Rescale the world: TILE 32 -> 24, and make TILE an honest knob
 60b4e3a  Bitmap font and a live fog-tuning overlay, both at +0 shipping bytes
 a2e87a4  Handover rewrite, and a phase-by-phase roadmap for the next chat
 e5c8942  Roof face shading, and rewrite the fog so distance reads as haze
-5ffdb38  Island landform, clustered villages, and rounded foliage
-545598f  Handover rewritten for the isometric build, plus devlog and INDEX catch-up
-d622ed0  docs: record the isometric decision and supersede the flat-geometry notes
 ```
 
 **Everything is committed.** Nothing is pushed to the remote yet — check before assuming.
@@ -211,6 +208,8 @@ $e = ".\build\wayfarer-selftest.exe"
 
 & $e --iso-test                             # rasteriser exactness, seams, depth, upscale
 & $e --font-test --shot charset.bmp         # glyph table vs render, + stride negative control
+& $e --land-test  --seeds 30 --seed 1       # island coverage, connectivity, buildable ground
+& $e --fog-test                             # value hierarchy + shade separability through fog_lerp
 & $e --village-test --seeds 30 --seed 1     # building placement invariants
 & $e --rng-test    --seed 1                 # PRNG: reproducibility, stream independence, bias
 & $e --move-test   --seeds 20 --seed 1      # collision, no drift, determinism, diagonal speed
@@ -228,6 +227,9 @@ $e = ".\build\wayfarer-selftest.exe"
 **All currently pass.** Last full run, 2026-08-05, after the Phase 03 work:
 
 ```
+land    : PASS  100 seeds; both controls (drowned map, shattered island) fire
+fog     : PASS  0 collapsed ramps; 45 colours x 5 reveals, 0 inversions,
+                3 collapses; control (contrast-crushing blend) caught
 font    : PASS  2,316 lit px expected from the glyph table and 2,316 rendered;
                 negative control caught the off-by-one stride (2,448 vs 2,316)
 iso     : PASS  0 px owned by the wrong tile under elevation; upscale x1/x2/x3 exact
@@ -243,10 +245,10 @@ audio   : worst case 0.122 ms of a 21.333 ms deadline; 0 partial writes, 0 NaN, 
 perf    : render 0.749–0.844 ms, present ~1.3–1.4 ms, ~72,445 calls/frame, ~59.2–60.4 fps
 ```
 
-**Rule debt, stated plainly:** the island generator (Phase 01) and the fog rewrite (Phase 02) both
-shipped without a checker of their own — `--land-test` and `--fog-test` do not exist. Everything
-above passing means those changes didn't *break* anything the existing suite watches; it does not
-mean the new systems have their own verified invariants yet. See [[Phase Roadmap]] Phase 05.
+**The rule debt is paid.** `--land-test` and `--fog-test` landed in [[Phase 05 - Verification
+Debt]] (`4847bf5`), each with its own negative control, so every generator and render contract in
+the project now has a checker that is known to be able to fail. What they still do **not** cover is
+whether any of it *looks good* — see §8.
 
 ### The game itself
 
@@ -413,6 +415,17 @@ New decisions from the rescale + traversal session (2026-08-05):
 29. **When you rotate a control signal, rotate the decision, not the measurement.** Applying the
     autopilot's deadband *after* rotating its world deltas livelocked every playthrough — see §7.
     Thresholds are judgements about the space the target lives in.
+30. **A detached islet across open water is scenery, not a generator defect.** `--land-test`
+    therefore asserts the size of the component the **player spawns in**, not that the map is one
+    piece — the single-component assertion fails on 3 of 100 seeds, all of which still play to
+    completion because ocean is never walkable and entities only go in reachable regions. See
+    [[Phase 05 - Verification Debt]] for the full reasoning; do not "fix" the generator over this
+    without re-reading it.
+31. **`iso_tile` takes `ax` as the diamond's CENTRE**, not its left edge — it does
+    `x0 = ax - ISO_HW` internally, and its top vertex is at `ay`. So a tile's visual centre is
+    `(ax, ay + ISO_HH)`, which is exactly what `world_to_iso` returns for the tile's centre point.
+    **Projection and rasteriser already agree**, which is why props, entities and the player need
+    no correction anywhere. Anything that adds one is wrong — that was the roof bug.
 
 ---
 
@@ -496,6 +509,19 @@ true and are not repeated in full here — see git history at `545598f` for verb
   `VILLAGE_SPACING`, `VILLAGE_SITES` and `BUILDING_TARGET` all had to be re-derived by hand when
   `TILE` changed, because `PX()` scales *pixels* and these are *tile counts*. Nothing warns about
   this; the sight radius silently shrinks and the villages silently thin out.
+- **Do not assume a rasteriser's anchor — read it.** Chasing the askew roof, `iso_tile`'s `ax` was
+  assumed to be the diamond's left edge and a compensating `+ISO_HW` was added; it is the *centre*
+  (decision 31), so that doubled the error in the other direction. One screenshot caught it, but
+  reading the six lines of `iso_tile` first would have been faster than the round trip.
+- **A visual constant tuned against a buggy reference bakes the bug in.** The building facade was
+  positioned relative to `cy - wall + ISO_HH`, a value that only made sense alongside the roof's own
+  `ISO_HH` error. Fixing the roof moved the windows onto it. **When a defect is found in a
+  reference point, re-derive everything measured from it** rather than nudging the dependants back.
+- **Setting a test's threshold to make it pass is the failure this project keeps warning about.**
+  `--land-test`'s connectivity bound failed 3 of 100 seeds; the fix was to go and *look* at those
+  seeds, discover the assertion was asking the wrong question, and re-aim it at the property that
+  actually matters — not to loosen the number until it went green. If a bound has to move, the
+  justification belongs in the phase file.
 
 ---
 
@@ -535,6 +561,13 @@ controls; audio callback timing; render cost). New this session:
   world-aligned mapping and is rejected 4 of 4.
 - **The rescale cost −512 bytes and no render time** (0.824 ms, unchanged) despite 37% more draw
   calls, because it is the same screen area drawn as finer tiles.
+- **`fog_lerp` preserves the value hierarchy.** 45 real palette colours × 5 reveal levels: zero
+  inversions, zero collapsed palette ramps at reveal 0. The Phase 02 claim that `FOG_KEEP` keeps a
+  four-shade canopy separable is now measured rather than argued, and the negative control proves
+  the checker can fail (14 collapsed ramps, 206 collapsed pairs against a crushing blend).
+- **The island generator's coverage and connectivity hold over 100 seeds**, with both negative
+  controls firing. Includes an assumption `place_buildings` had always made silently: that some
+  buildable ground exists at all.
 
 ### NOT verified — be honest about these
 
@@ -552,11 +585,14 @@ controls; audio callback timing; render cost). New this session:
   it would drift on a machine that cannot hold it. Known simplification, not an oversight.
 - **Whether it is fun beyond one early, positive, informal reaction.** One playtest is not QA.
 - **Whether the fog and palette values are actually *right***, as opposed to "no longer obviously
-  wrong." They were tuned by eye, by one person, in three iterative passes, with no measurement of
-  shade separability under fog. `--fog-test` does not exist. See Phase 05.
-- **Whether the island generator produces a good *distribution* of coastline shapes, island sizes,
-  or rock coverage across many seeds** — `--land-test` does not exist, so this has only been checked
-  on the 2–3 seeds that got screenshotted, not swept.
+  wrong." `--fog-test` now proves the value *hierarchy* survives the blend; it has no opinion on
+  whether the haze is the right colour. That is an F3 judgement and still unmade.
+- **Whether the island generator produces *attractive* coastlines.** `--land-test` bounds coverage
+  and connectivity across 100 seeds; it says nothing about shape. Still only judged on the handful
+  of seeds that got screenshotted.
+- **`--fog-test` reports 3 "collapses"** — colour pairs that tie under rounding at some reveal.
+  Reported rather than failed, because a tie loses information without lying about the ordering.
+  Nobody has looked at whether 3 is visible.
 - **Whether the village clustering produces villages that read as villages across many seeds** — the
   clustering logic has a structural test (via `--village-test`, which checks *validity*) but no test
   of *how it looks*, which is the actual goal.
@@ -660,18 +696,19 @@ This handover intentionally does **not** duplicate the forward plan. `design/pha
 per phase — what it is, why it's sequenced where it is, its definition of done, exactly which
 functions and lines it touches, and its verification gate. The index is [[Phase Roadmap]].
 
-**Current position, in one paragraph:** Phases 00–04 are **done**. 00–02 (memory + skill policy +
-Art Bible; island landform + village clustering; roof shading + the fog rewrite) as `5ffdb38` and
-`e5c8942`; **Phase 03** (bitmap font + F3 fog-tuning overlay, +0 shipping bytes) as `60b4e3a`, its
+**Current position, in one paragraph:** **Phases 00–05 are all done.** 00–02 (memory + skill policy
++ Art Bible; island landform + village clustering; roof shading + the fog rewrite) as `5ffdb38` and
+`e5c8942`; **Phase 03** (bitmap font + F3 fog-tuning overlay, +0 bytes) as `60b4e3a`, its
 human-usability gate discharged the same day; **Phase 04** (screen-aligned input + eased camera) as
-`dd8cfef`. Between 03 and 04 the world was **rescaled** (`e03138d`) — `TILE` 32→24 with every
-authored dimension routed through `PX()`, and the grid grown to 108×60 so the island keeps its
-extent and gains resolution. **Phase 05** (the missing `--land-test` and `--fog-test`, now three
-sessions of rule debt) is next, and it is the cheapest it will ever be to write. After that: water
-features, the asset bake pipeline, save/load, the remaining placeholder art, and motion (Phases
-06–10) — all timeboxed, with a **hard stop on 2026-08-14** before the ship-critical remainder
-(Phase 11: audio, font-dependent HUD, QA, submission) takes over regardless of how much of the art
-work is finished.
+`dd8cfef`; **Phase 05** (`--land-test`, `--fog-test`, both with negative controls, +0 bytes) as
+`4847bf5`. Two unplanned pieces landed alongside them, both from the user looking at the screen:
+the world was **rescaled** (`e03138d`, `TILE` 32→24 with every authored dimension routed through
+`PX()`, grid grown to 108×60), and the **houses were fixed** (`b4bf446` — the roof had been drawn
+half a tile off its own walls since buildings landed, which put the windows on the roof). **Phase
+06 (water and bridges)** is next. After that: the asset bake pipeline, save/load, the remaining
+placeholder art, and motion (Phases 07–10) — all timeboxed, with a **hard stop on 2026-08-14**
+before the ship-critical remainder (Phase 11: audio, font-dependent HUD, QA, submission) takes over
+regardless of how much of the art work is finished.
 
 **Schedule reality, unchanged in substance from the last handover:** today is 2026-08-05; the
 deadline is 2026-09-04. Audio (a softsynth from zero) and the rest of Week 5 (save/load, HUD, win

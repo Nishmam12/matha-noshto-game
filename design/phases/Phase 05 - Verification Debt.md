@@ -1,13 +1,13 @@
 ---
 tags: [design, phase, wayfarer]
 phase: 5
-status: planned
-updated: 2026-08-04
+status: done
+updated: 2026-08-05
 ---
 
 # Phase 05 — Verification Debt
 
-**Status:** Planned.
+**Status:** DONE — `4847bf5`, +0 shipping bytes.
 **Depends on:** [[Phase 01 - Landform]], [[Phase 02 - Roof And Fog]] (both systems already exist and
 are stable; this phase writes the tests that should have shipped alongside them).
 **Blocks:** [[Phase 06 - Water And Bridges]] — rivers and bridges extend both the landform generator
@@ -30,23 +30,16 @@ zero automated protection against a regression a screenshot-based session might 
 
 ## Definition of done
 
-- [ ] `--land-test --seeds N` exists and asserts, across many seeds: the walkable landmass is a
-      single connected region before the region graph fragments it further (or a bounded, justified
-      number of components); ocean forms a contiguous body reachable from the map edge, not isolated
-      lakes with no path to open water; rock coverage stays within a sane range (bounding the
-      "quarry" failure mode from Phase 01's tuning); every seed produces *some* buildable flat
-      ground (an implicit precondition `place_buildings` currently assumes but nothing checks).
-- [ ] `--land-test` has a negative control: a seed or a parameter deliberately pushed to produce a
-      broken world (e.g., `LAND_SEA` pushed to a value that drowns the entire map) must be *rejected*
-      by the checker, proving it can fail, not just always pass.
-- [ ] `--fog-test` exists and asserts: for a representative set of source colours (grass, foliage
-      shades, stone, water), the luminance ordering among them is preserved after `fog_lerp` at
-      reveal 0.0, 0.25, 0.5, 0.75, 1.0 — i.e., a lighter shade stays lighter than a darker one at
-      every reveal level, which is the property Phase 02 needed and never measured.
-- [ ] `--fog-test` has a negative control: a deliberately broken blend (e.g., one that clamps toward
-      a single flat value regardless of input) must be caught and reported as a failure.
-- [ ] Both new tests are added to the standard verification routine listed in [[Handover]] §4 and
-      run as part of every subsequent phase's gate.
+- [x] `--land-test --seeds N` exists and asserts, across many seeds: **the bounded-and-justified
+      option was taken**, and the justification is in Evidence — the assertion is about the
+      component the player *spawns in*, not about the map being one piece. Ocean is a contiguous
+      body touching the map border; rock stays under 40%; buildable ground exists at all.
+- [x] `--land-test` has a negative control — two, in fact: a drowned map and a shattered one.
+- [x] `--fog-test` exists and asserts luminance ordering across reveal 0.0/0.25/0.5/0.75/1.0, plus a
+      second property the phase file did not ask for but Phase 02 actually needed: **shade
+      separability within a palette ramp at reveal 0**.
+- [x] `--fog-test` has a negative control: a contrast-crushing blend, caught by both checks.
+- [x] Both added to [[Handover]] §4's command block, and its "rule debt" callout removed.
 
 ## Concrete tasks
 
@@ -95,4 +88,54 @@ trusted as gates for later phases.
 
 ## Evidence
 
-Not yet started.
+Built 2026-08-05, session 02 — `4847bf5`, **691,200 bytes, +0**. Both checkers live entirely
+inside `#if WAYFARER_SELFTEST`.
+
+```
+land : PASS over 100 seeds; both negative controls fire
+fog  : separability 0 collapsed ramps; ordering 45 colours x 5 reveals,
+       0 inversions, 3 collapses; negative control caught with
+       14 collapsed ramps and 206 collapsed pairs
+```
+
+### The finding, and why `--land-test` asserts what it does
+
+The obvious assertion — *the walkable landmass is a single connected component* — **fails on 3 of
+100 seeds** (16, 85, 100). That number is the whole reason this phase was worth doing, and the
+interesting part is what it turned out to mean.
+
+Inspecting those seeds shows the generator producing a **detached lobe across open water**. That is
+not a defect:
+
+- ocean is `solid` and never walkable, so a lobe across it is unreachable by construction;
+- `place_entities` only ever places into regions reachable from the spawn, so no content is
+  stranded there;
+- all three seeds still play to completion — `--play-test` is 50/50 throughout.
+
+An unreachable islet on the horizon is a *feature* of an island game, not a bug. What would
+genuinely be broken is the player spawning on a small lobe with most of the world across water.
+
+So the assertion measures **the component the player actually spawns in, as a fraction of the whole
+map** — absolute, per [[Handover]] §7's warning that relative assertions compare counts to counts.
+Seed 16 is the worst case at 56% of open ground and 17.8% of the map, and it passes **on merit**,
+not because a bound was moved to let it through. A second, looser bound (the player must reach at
+least half the walkable ground) catches genuine shattering.
+
+### Why the negative control shatters the map into four, not two
+
+A two-way split leaves the player reaching ~50% of open ground — exactly on the fragmentation
+bound. **A control that only just fires is a control that stops firing the first time somebody
+nudges a threshold.** At four quarters the player reaches ~25% and it fires with room to spare.
+
+### What this phase did NOT verify
+
+- **`--fog-test` reports 3 "collapses"** — pairs of colours that become equal under rounding at
+  some reveal level. They are reported rather than failed, on the grounds that a tie is a loss of
+  information but not a *lie* about the value hierarchy the way an inversion is. Whether 3 is
+  acceptable has not been judged by eye.
+- **Neither test says anything about whether the result looks good.** `--land-test` bounds coverage
+  and connectivity; it has no opinion on whether a coastline is attractive. `--fog-test` bounds the
+  value hierarchy; it cannot tell you the haze is the right colour. Those remain screenshot-and-F3
+  judgements.
+- **The 40% rock bound and the 12.5%/87.5% land bounds are chosen, not derived.** They bound the
+  failure modes Phase 01 actually hit; they are not claims about the ideal range.
