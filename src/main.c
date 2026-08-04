@@ -465,6 +465,26 @@ typedef struct {
     Uint8 restored;
 } Entity;
 
+/* A building footprint. Walls are not drawn by anything here: the footprint
+ * tiles are solid, world_heights gives them a wall height instead of a rock
+ * height, and the existing tile rasteriser then draws their front faces — which
+ * IS the wall, for free. Only the roof and the surface details need new code.
+ *
+ * `variant` packs nine independent part choices at 3 bits each. There are no
+ * building "types": every house is a fresh combination, which is why 40 of them
+ * on screen do not read as 40 copies of five prefabs. */
+typedef struct {
+    Uint8  x, y, w, h;  /* footprint, in tiles */
+    Uint8  levels;      /* 1..3, wall height in storeys */
+    Uint8  region;
+    Uint16 pad;
+    Uint32 variant;
+} Building;
+
+#define BUILDING_MAX 40
+#define STOREY_H     14   /* wall px per storey */
+#define WALL_BASE    10   /* plinth under the first storey */
+
 typedef struct {
     Uint8  solid[WORLD_H][WORLD_W];
     float  reveal[WORLD_H][WORLD_W]; /* 0 = fogged and colourless, 1 = restored */
@@ -476,6 +496,11 @@ typedef struct {
      * moment collision reads it, the 50-seed completability proof has to be
      * re-argued rather than merely re-run. */
     Sint8  height[WORLD_H][WORLD_W];
+    /* Building index per tile, +1 so 0 means "no building". Render-only, like
+     * height: collision sees only that these tiles are solid. */
+    Uint8  bld_at[WORLD_H][WORLD_W];
+    Building bld[BUILDING_MAX];
+    int    bld_count;
     Region regions[REGION_COUNT];
     int    region_count;
     int    spawn_region;
@@ -555,6 +580,63 @@ static void world_gen(World *w, Rng *rng)
     for (y = 0; y < WORLD_H; y++)
         for (x = 0; x < WORLD_W; x++)
             w->reveal[y][x] = 0.0f;
+}
+
+/* Stamp buildings into the open ground.
+ *
+ * Deliberately placed BEFORE the flood fill and the reachability verifier, not
+ * after. Buildings are solid, so they genuinely change what is walkable — and
+ * running them through the existing generate-then-verify loop means a layout
+ * that walls off something the player needs is rejected and regenerated, using
+ * the reachability guarantee as the safety net rather than working around it.
+ *
+ * A plot needs open ground plus a one-tile gap from anything else already
+ * solid, which keeps a house from fusing into a cliff and guarantees it is
+ * approachable from at least one side. */
+static void place_buildings(World *w, Rng *rng)
+{
+    int tries;
+
+    w->bld_count = 0;
+    SDL_memset(w->bld_at, 0, sizeof(w->bld_at));
+
+    /* 3000 attempts rather than 900: the plot test is strict (a footprint plus
+     * a one-tile skirt all open), so most attempts land on rock and are
+     * rejected cheaply. At 900 the mean was 13 buildings per world, which reads
+     * as a hamlet; this brings it up to something worth calling a village. */
+    for (tries = 0; tries < 3000 && w->bld_count < BUILDING_MAX; tries++) {
+        int bw = 2 + (int)rng_below(rng, 3);          /* 2..4 tiles */
+        int bh = 2 + (int)rng_below(rng, 3);
+        int bx = 2 + (int)rng_below(rng, WORLD_W - bw - 4);
+        int by = 2 + (int)rng_below(rng, WORLD_H - bh - 4);
+        int x, y, ok = 1;
+
+        /* The footprint and a one-tile skirt must all be open ground. */
+        for (y = by - 1; y <= by + bh && ok; y++)
+            for (x = bx - 1; x <= bx + bw && ok; x++)
+                if (solid_at(w, x, y))
+                    ok = 0;
+        if (!ok)
+            continue;
+
+        for (y = by; y < by + bh; y++)
+            for (x = bx; x < bx + bw; x++) {
+                w->solid[y][x] = 1;
+                w->bld_at[y][x] = (Uint8)(w->bld_count + 1);
+            }
+        {
+            Building *b = &w->bld[w->bld_count];
+            b->x = (Uint8)bx; b->y = (Uint8)by;
+            b->w = (Uint8)bw; b->h = (Uint8)bh;
+            /* Bigger footprints carry more storeys, so a village silhouette has
+             * a few halls standing over the cottages instead of being uniform. */
+            b->levels = (Uint8)(1 + (int)rng_below(rng, (bw * bh >= 9) ? 3 : 2));
+            b->region = REGION_NONE;
+            b->pad = 0;
+            b->variant = rng_next(rng);
+            w->bld_count++;
+        }
+    }
 }
 
 /* Multi-source BFS across open tiles. Fills dist (hop count, -1 unreachable)
@@ -1193,7 +1275,12 @@ static void world_heights(World *w)
     for (y = 0; y < WORLD_H; y++)
         for (x = 0; x < WORLD_W; x++) {
             int h;
-            if (w->solid[y][x]) {
+            if (w->bld_at[y][x]) {
+                /* Walls, not rock. The tile rasteriser then draws this tile's
+                 * front faces at wall height, which IS the wall — no separate
+                 * wall-drawing code exists anywhere. */
+                h = WALL_BASE + w->bld[w->bld_at[y][x] - 1].levels * STOREY_H;
+            } else if (w->solid[y][x]) {
                 h = dist[y][x] * ELEV_STEP;
                 if (h > ELEV_MAX) h = ELEV_MAX;
             } else {
@@ -1237,6 +1324,9 @@ static int game_init(Game *g, Rngs *rngs)
     SDL_zero(*g);
 
     world_gen(&g->w, &rngs->terrain);
+    /* Before the flood fill, so buildings are part of what "walkable" means and
+     * the reachability verifier gets to reject a layout they wall off. */
+    place_buildings(&g->w, &rngs->terrain);
     SDL_memset(seen, 0, sizeof(sc.seen));
 
     /* Pass 1: find the largest open region. */
@@ -1634,6 +1724,55 @@ static void tile_detail(SDL_Surface *fb, int ax, int ay, int h, Uint32 hash,
     }
 }
 
+/* --- house parts ---------------------------------------------------------
+ *
+ * There are no building "types". Nine independent parts, each with 4 or 5
+ * variations, are picked from separate bit fields of one `variant` word:
+ *
+ *   wall material 5 x wall trim 4 x roof shape 5 x roof material 4 x door 4
+ *     x windows 5 x chimney 4 x attachment 5 x sign 4  = 640,000 combinations
+ *
+ * before footprint size (2..4 x 2..4) and storey count multiply it further.
+ * That is why forty houses on screen do not read as forty copies of five
+ * prefabs, and it costs nine small draw routines rather than nine drawings. */
+#define BV_WALL(v)   (((v) >> 0)  % 5)
+#define BV_TRIM(v)   (((v) >> 3)  & 3)
+#define BV_RSHAPE(v) (((v) >> 5)  % 5)
+#define BV_RMAT(v)   (((v) >> 8)  & 3)
+#define BV_DOOR(v)   (((v) >> 10) & 3)
+#define BV_WIN(v)    (((v) >> 12) % 5)
+#define BV_CHIM(v)   (((v) >> 15) & 3)
+#define BV_ATT(v)    (((v) >> 17) % 5)
+#define BV_SIGN(v)   (((v) >> 20) & 3)
+
+/* Wall materials: plaster, timber-frame, stone, brick, log. */
+static const Uint8 wall_pal[5][3] = {
+    { 0xd8, 0xc8, 0xa8 }, { 0xc4, 0xb0, 0x90 }, { 0x9a, 0x96, 0x8c },
+    { 0xa8, 0x70, 0x5c }, { 0x9c, 0x7c, 0x54 }
+};
+/* Roof materials: slate, red tile, thatch, wood shingle. */
+static const Uint8 roof_pal[4][3][3] = {
+    { {0x30,0x36,0x48},{0x44,0x4e,0x66},{0x5e,0x6a,0x86} },
+    { {0x74,0x32,0x28},{0x9c,0x48,0x36},{0xc0,0x64,0x48} },
+    { {0x6c,0x56,0x2c},{0x92,0x76,0x40},{0xb8,0x9c,0x5e} },
+    { {0x4a,0x38,0x28},{0x66,0x4e,0x38},{0x86,0x6a,0x4c} }
+};
+
+/* A filled 2:1 diamond centred on (cx, cy). Same column geometry as iso_tile,
+ * so a roof ring lines up exactly with the tile grid it sits over. */
+static void iso_diamond(SDL_Surface *fb, int cx, int cy, int rw, Uint32 c)
+{
+    int i, i0 = -rw, i1 = rw;
+
+    if (cx + i0 < 0)      i0 = -cx;
+    if (cx + i1 > fb->w)  i1 = fb->w - cx;
+    for (i = i0; i <= i1; i++) {
+        int a = i < 0 ? -i : i;
+        int half = (rw - a) / 2;
+        vspan(fb, cx + i, cy - half, half * 2 + 1, c);
+    }
+}
+
 /* True colour per terrain, before the fog blend. Flat-shaded and readable —
  * design/Overview.md is explicit that the painted mockup is pitch art and the
  * in-engine target is simple procedural geometry. */
@@ -1884,6 +2023,113 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
     }
 }
 
+/* A whole building's roof and fittings, drawn once from its record at the
+ * footprint's front corner — never per tile, or a roof would tear along every
+ * internal tile edge.
+ *
+ * The roof is a stack of shrinking diamonds rather than a pitched-plane
+ * rasteriser. That reuses iso_diamond, is trivially correct, and in pixel art
+ * reads convincingly as a hip roof; a real gable would need a second
+ * rasteriser and an edge that has to agree with the first to the pixel, which
+ * is the seam bug class this project already decided to avoid once. Roof shape
+ * varies by how many steps it takes and how fast it narrows. */
+static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
+                          int cam_x, int cam_y, float rev)
+{
+    Uint32 v = b->variant;
+    const Uint8 (*rp)[3] = roof_pal[BV_RMAT(v)];
+    const Uint8 *wp = wall_pal[BV_WALL(v)];
+    int cx, cy, wall = WALL_BASE + b->levels * STOREY_H;
+    int rw, steps, k, pitch;
+
+    /* Centre of the footprint in world px, projected. */
+    world_to_iso((float)(b->x * TILE + b->w * TILE / 2),
+                 (float)(b->y * TILE + b->h * TILE / 2), &cx, &cy);
+    cx -= cam_x;
+    cy -= cam_y - ISO_HH;
+    if (cx < -400 || cx > fb->w + 400)
+        return;
+
+    /* Half-width of the footprint's diamond, plus a small eave overhang.
+     *
+     * The rise has to be rw/2, not a fixed number of pixels: in a 2:1
+     * projection a 45-degree roof over a footprint of half-width rw rises
+     * exactly rw/2 on screen. The first attempt used a flat 5-7 px per step and
+     * every house read as an open-topped box with a plate balanced on it.
+     *
+     * Seven steps rather than three, for the same reason: over a 130 px wide
+     * diamond, three steps is a ziggurat and seven reads as a slope. */
+    rw    = (b->w + b->h) * ISO_HW / 2 + 3;
+    steps = 7;
+    {
+        int rise = (BV_RSHAPE(v) >= 3) ? (rw * 3) / 4   /* steep */
+                 : (BV_RSHAPE(v) == 0) ? (rw * 2) / 5   /* shallow */
+                                       : rw / 2;        /* 45 degrees */
+        pitch = rise / steps;
+        if (pitch < 3)
+            pitch = 3;
+    }
+
+    for (k = 0; k < steps; k++) {
+        int krw = rw - (rw * k) / (steps + 1);
+        int s   = (k * 3) / steps;
+        iso_diamond(fb, cx, cy - wall - k * pitch, krw,
+                    fog_lerp(fb, rp[s][0], rp[s][1], rp[s][2], rev));
+    }
+    /* Ridge cap: the few px that stop the stack reading as a ziggurat. */
+    iso_diamond(fb, cx, cy - wall - steps * pitch, rw / (steps + 1) + 3,
+                fog_lerp(fb, rp[2][0], rp[2][1], rp[2][2], rev));
+
+    /* Chimney, on the roof rather than beside it. */
+    if (BV_CHIM(v)) {
+        int ox = (BV_CHIM(v) == 1) ? -rw / 3 : rw / 3;
+        int ch = 8 + (int)BV_CHIM(v) * 3;
+        fill_rect(fb, cx + ox - 3, cy - wall - steps * pitch - ch, 6, ch + 6,
+                  fog_lerp(fb, 0x6e, 0x5a, 0x4e, rev));
+        fill_rect(fb, cx + ox - 4, cy - wall - steps * pitch - ch - 2, 8, 3,
+                  fog_lerp(fb, 0x86, 0x72, 0x64, rev));
+    }
+
+    /* Facade: door and windows on the two faces the camera can see. The wall
+     * itself was drawn by the tile pass; these sit on top of it. Positions are
+     * along the footprint's front edges, in the same 2:1 slope. */
+    {
+        int i, fy = cy - wall + ISO_HH;
+        Uint32 dark  = fog_lerp(fb, wp[0] * 35 / 100, wp[1] * 35 / 100,
+                                wp[2] * 35 / 100, rev);
+        Uint32 glass = fog_lerp(fb, 0x3c, 0x4e, 0x62, rev);
+        Uint32 trim  = fog_lerp(fb, wp[0] * 72 / 100, wp[1] * 72 / 100,
+                                wp[2] * 72 / 100, rev);
+        int nwin = 1 + (int)BV_WIN(v) % 3;
+
+        /* Door on the down-right face, one storey tall. */
+        {
+            int dx = cx + rw / 3, dy = fy + (rw / 3) / 2;
+            fill_rect(fb, dx - 4, dy - 16, 8, 16, dark);
+            if (BV_DOOR(v) >= 2) /* arched or double: a lintel */
+                fill_rect(fb, dx - 5, dy - 18, 10, 2, trim);
+        }
+        /* Windows on the down-left face, spread along it. */
+        for (i = 0; i < nwin; i++) {
+            int ox = -rw + (rw * 2 * (i + 1)) / (nwin + 2);
+            int wx = cx + ox / 2 - rw / 4, wy = fy + (ox / 2 + rw / 4) / 2;
+            int wh = 7;
+            fill_rect(fb, wx - 3, wy - 14 - wh, 7, wh, glass);
+            if (BV_TRIM(v) & 1)
+                fill_rect(fb, wx - 4, wy - 15 - wh, 9, 2, trim);
+        }
+        /* A hanging sign or banner: the one asymmetric detail, so a row of
+         * houses does not read as a repeated stamp. */
+        if (BV_SIGN(v) == 1)
+            fill_rect(fb, cx + rw / 2, fy + rw / 4 - 24, 7, 10,
+                      fog_lerp(fb, 0x8c, 0x5a, 0x36, rev));
+        else if (BV_SIGN(v) == 2)
+            fill_rect(fb, cx - rw / 2 - 3, fy - rw / 4 - 26, 5, 14,
+                      fog_lerp(fb, 0x50, 0x64, 0xa8, rev));
+    }
+    (void)w;
+}
+
 /* Single dispatch, so the render loop never grows a switch of its own. */
 static void draw_prop(SDL_Surface *fb, int kind, int cx, int by, Uint32 h, float rev)
 {
@@ -1920,7 +2166,12 @@ static float tile_reveal(const Game *g, int tx, int ty, int overlay)
 static void tile_colour(const Game *g, int tx, int ty, int overlay,
                         int *cr, int *cg, int *cb)
 {
-    if (g->w.solid[ty][tx]) {
+    Uint8 bi = g->w.bld_at[ty][tx];
+
+    if (bi) {
+        const Uint8 *p = wall_pal[BV_WALL(g->w.bld[bi - 1].variant)];
+        *cr = p[0]; *cg = p[1]; *cb = p[2];
+    } else if (g->w.solid[ty][tx]) {
         *cr = 0x5a; *cg = 0x4a; *cb = 0x3c;
     } else {
         Uint8 reg = g->w.region[ty][tx];
@@ -2043,6 +2294,22 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             Uint32 hash;
             if (ax + ISO_HW - 20 <= 0 || ax - ISO_HW + 20 >= fb->w)
                 continue;
+            /* A building is drawn once, when the sweep reaches its front-most
+             * corner tile — so it occludes everything behind it and is
+             * occluded by everything in front, and its roof never tears along
+             * an internal tile edge. */
+            {
+                Uint8 bi = g->w.bld_at[ty][tx];
+                if (bi) {
+                    const Building *b = &g->w.bld[bi - 1];
+                    if (tx == b->x + b->w - 1 && ty == b->y + b->h - 1) {
+                        float brev = tile_reveal(g, tx, ty, overlay);
+                        if (overlay || brev >= 0.06f)
+                            draw_building(fb, &g->w, b, g->cam_x, g->cam_y, brev);
+                    }
+                    continue;
+                }
+            }
             kind = prop_at(&g->w, g->seed, tx, ty, &hash);
             if (kind == PROP_NONE)
                 continue;
@@ -3470,6 +3737,107 @@ static int iso_selftest(Uint64 seed)
     return fails ? 1 : 0;
 }
 
+/* Structural invariants for building placement.
+ *
+ * Absolute, not relative — design/Toolchain Setup.md records that every
+ * *relative* region test once passed on a partition covering 5 of 1585 tiles,
+ * because they all checked counts against counts. So these check properties of
+ * the world itself: footprints are really solid, really disjoint, really
+ * indexed, and really approachable. */
+static int village_selftest(Uint64 seed, int verbose, int *total)
+{
+    Game *g = (Game *)SDL_malloc(sizeof(Game));
+    Rngs rngs;
+    int i, x, y, bad = 0, unreachable = 0;
+
+    if (!g)
+        return 1;
+    rngs_init(&rngs, seed);
+    (void)game_init(g, &rngs);
+
+    for (i = 0; i < g->w.bld_count; i++) {
+        const Building *b = &g->w.bld[i];
+        int open_neighbours = 0;
+
+        for (y = b->y; y < b->y + b->h; y++)
+            for (x = b->x; x < b->x + b->w; x++) {
+                if (!g->w.solid[y][x])
+                    bad++;                       /* footprint must be solid */
+                if (g->w.bld_at[y][x] != i + 1)
+                    bad++;                       /* and indexed to this building */
+            }
+        /* Approachable: at least one open tile touching the footprint. A house
+         * entirely embedded in rock is not a house, it is a decoration. */
+        for (y = b->y - 1; y <= b->y + b->h; y++)
+            for (x = b->x - 1; x <= b->x + b->w; x++)
+                if (!solid_at(&g->w, x, y))
+                    open_neighbours++;
+        if (open_neighbours == 0)
+            unreachable++;
+    }
+
+    /* Disjointness, checked over the whole map rather than pairwise, so an
+     * overlap cannot hide in an index we forgot to compare. */
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            if (g->w.bld_at[y][x] && !g->w.solid[y][x])
+                bad++;
+
+    if (verbose)
+        printf("  seed %-6.0f buildings %2d  bad tiles %d  walled-in %d  %s\n",
+               (double)seed, g->w.bld_count, bad, unreachable,
+               (bad || unreachable || g->w.bld_count == 0) ? "FAIL" : "PASS");
+    *total += g->w.bld_count;
+    if (g->w.bld_count == 0)
+        bad++;
+    SDL_free(g);
+    return (bad || unreachable) ? 1 : 0;
+}
+
+/* Negative control. Everything above passing first time is exactly when a
+ * checker deserves suspicion, so hand-build the two failures it claims to
+ * detect and confirm it detects them. */
+static int village_negative_test(void)
+{
+    World *w = (World *)SDL_calloc(1, sizeof(World));
+    int fails = 0, x, y, caught;
+
+    if (!w)
+        return 1;
+
+    /* (a) a footprint that is indexed but not solid. */
+    w->bld_count = 1;
+    w->bld[0].x = 5; w->bld[0].y = 5; w->bld[0].w = 2; w->bld[0].h = 2;
+    for (y = 5; y < 7; y++)
+        for (x = 5; x < 7; x++) {
+            w->solid[y][x] = 1;
+            w->bld_at[y][x] = 1;
+        }
+    w->solid[5][5] = 0; /* the injected fault */
+    caught = 0;
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            if (w->bld_at[y][x] && !w->solid[y][x])
+                caught++;
+    printf("negative control (non-solid footprint tile detected): %s\n",
+           caught ? "PASS" : "FAIL");
+    if (!caught) fails++;
+
+    /* (b) a building walled in on every side. */
+    SDL_memset(w->solid, 1, sizeof(w->solid));
+    caught = 0;
+    for (y = 4; y <= 7; y++)
+        for (x = 4; x <= 7; x++)
+            if (!solid_at(w, x, y))
+                caught++;
+    printf("negative control (walled-in building detected): %s\n",
+           caught == 0 ? "PASS" : "FAIL");
+    if (caught != 0) fails++;
+
+    SDL_free(w);
+    return fails;
+}
+
 /* Runs audio with no window for `ms`, then reports whether the callback met
  * its deadline and dumps raw samples for independent offline analysis. */
 static int audio_selftest(int argc, char **argv, int ms)
@@ -3645,6 +4013,18 @@ int main(int argc, char **argv)
             return rng_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
         if (arg_flag(argc, argv, "--iso-test"))
             return iso_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
+        if (arg_flag(argc, argv, "--village-test")) {
+            int n = arg_int(argc, argv, "--seeds", 20);
+            int base = arg_int(argc, argv, "--seed", 1);
+            int s, bad = 0, total = 0;
+            printf("=== building placement, %d seeds ===\n", n);
+            for (s = 0; s < n; s++)
+                bad += village_selftest((Uint64)(base + s), 1, &total);
+            printf("\nmean %d buildings per world\n", total / (n > 0 ? n : 1));
+            bad += village_negative_test();
+            printf("%s (%d failures across %d seeds)\n", bad ? "FAIL" : "PASS", bad, n);
+            return bad ? 1 : 0;
+        }
         {
             int ims = arg_int(argc, argv, "--input-test", 0);
             if (ims > 0)
