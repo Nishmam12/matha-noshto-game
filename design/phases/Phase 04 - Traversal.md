@@ -1,13 +1,14 @@
 ---
 tags: [design, phase, wayfarer]
 phase: 4
-status: planned
-updated: 2026-08-04
+status: done
+updated: 2026-08-05
 ---
 
 # Phase 04 — Traversal
 
-**Status:** Planned.
+**Status:** DONE — `dd8cfef`, +512 bytes. One item left to a human: whether the camera easing
+*feels* right (see Evidence).
 **Depends on:** [[Phase 03 - Legibility Tools]] (not a hard technical dependency, but sequenced
 after it so the tuning overlay is available if camera-feel constants need iterating the way fog
 constants did in Phase 02).
@@ -37,20 +38,20 @@ change.
 
 ## Definition of done
 
-- [ ] Pressing `W` moves the player up on screen; `D` moves right; diagonals compose correctly.
-- [ ] Collision behaviour (swept AABB, wall sliding via independent-axis resolution) is unchanged —
-      only the mapping from input to world-space velocity changes, not how movement resolves once
-      that velocity is known.
-- [ ] `--move-test`'s diagonal-speed assertion still holds (both straight and diagonal movement at
-      220.00 px/60 ticks) — the assertion itself may need updating to reflect which *input* now
-      counts as diagonal, but the underlying physical invariant (direction-independent speed) must
-      still be true and still be tested.
-- [ ] `--input-test` and the autopilot steering in `--play-test`/`--autoplay` are updated to the new
-      mapping, not deleted or skipped.
-- [ ] `--play-test --seeds 50` is still 50/50 after the change.
-- [ ] The camera has some form of easing/deadzone and no longer produces a visible snap on every
-      simulation step; this part is render-only and can be verified by eye plus a perf check that it
-      didn't add meaningful render cost.
+- [x] Pressing `W` moves the player up on screen; `D` moves right; diagonals compose correctly.
+      Asserted per direction by `speed_selftest`, all 8 "screen dir correct".
+- [x] Collision behaviour (swept AABB, wall sliding via independent-axis resolution) is unchanged —
+      `move_axis` was not touched at all; only the input→velocity mapping rotated.
+- [x] The direction-independent-speed invariant still holds and is still tested — **strengthened**
+      from 2 directions to all 8, at 165.00 px/60 ticks each (220 scaled by the TILE 32→24 rescale).
+      The old assertion measured world-x displacement and could not survive a basis change; the new
+      one measures travel *distance* and is basis-independent.
+- [x] The autopilot steering in `--play-test`/`--autoplay` is updated to the new mapping, not
+      deleted or skipped — and doing it naively livelocked, see Evidence.
+- [x] `--play-test --seeds 50` is still 50/50 after the change.
+- [x] The camera has a deadzone plus an exponential ease and no longer re-centres every frame.
+- [ ] **Whether the easing feels right has not been judged by a human.** The constants are first
+      guesses. Same shape of gate as Phase 03's overlay.
 
 ## Concrete tasks
 
@@ -101,4 +102,56 @@ perf check via `--frames 400 --perf` showing no meaningful regression.
 
 ## Evidence
 
-Not yet started.
+Built 2026-08-05, session 02 — `dd8cfef`. Full write-up in [[2026-08-05-session-01]] §Session 02.
+
+**Size: 690,688 bytes, +512.** Render 0.97 ms mean (was 0.824 ms), measured over three runs so it
+is real rather than noise — but pixel and call counts are *identical*, so it is code layout, not
+added work. 5.9% of the 16.67 ms budget.
+
+**The rotation.** Screen-right is world (+1,−1), screen-down is world (+1,+1), so
+`wx = sx + sy`, `wy = sy − sx`, normalised by the vector's actual length (√2 for a screen axis, 2
+for a screen diagonal). The old code special-cased 0.7071 on diagonals only, which is why the new
+version is direction-independent across all 8 directions rather than the 2 it happened to cover.
+
+### The livelock — the thing this phase actually cost
+
+The phase file's trap section predicted the autopilot would need rotating too. It did. What it did
+**not** predict is that rotating it the obvious way deadlocks the playthrough:
+
+> Rotating the raw world deltas and thresholding afterwards means `ddx=+0.5, ddy=−0.5` — inside the
+> rest zone on *both* world axes — rotates to `sdx=1.0`, which clears the 0.6 threshold. The
+> autopilot twitches where it used to sit still, overshoots by a full 2.75 px step, and oscillates
+> between two tiles forever.
+
+3 of 3 seeds hit the 200,000-step cap having restored 0–4 of 19. **Fixed by applying the deadband
+first, in world space, and rotating only the resulting −1/0/+1 intent** — the rest condition is then
+identical to before the phase. Steps per seed: 200,000 (capped) → 2,676–3,441.
+
+Worth generalising: **when you rotate a control signal, rotate the decision, not the measurement.**
+A threshold is a judgement about the space the target lives in.
+
+### Verification
+
+`speed_selftest` rewritten and given a negative control it did not previously have:
+
+```
+right/left/down/up/4 diagonals : 165.00 px in 60 ticks each, screen dir correct
+direction-independent speed, all 8 directions: yes
+negative control (world-aligned input rejected): PASS  [4 of 4 caught]
+```
+
+The negative control replays the *old* world-aligned mapping and requires the direction check to
+reject it. Without it, "screen dir correct" would prove only that the checker agrees with the code.
+
+Full suite re-run because this is a simulation change: play 50/50, reach 50 + control, gating 30,
+region 30, village 30, move 20, iso, rng, font — all PASS.
+
+### Deviations and gaps, stated plainly
+
+- **Task 1 asked for input and camera as separate commits; they landed as one** (`dd8cfef`). The
+  livelock diagnosis needed both in the tree, and re-verifying separately costs two more full
+  50-seed playthrough runs against the 2026-08-14 hard stop. Recorded rather than left implicit.
+- **The camera's feel is unjudged.** `CAM_DEADZONE` / `CAM_EASE` are first guesses.
+- **The ease runs per frame, not per tick.** With the frame rate capped at `FRAME_HZ` the time
+  constant is stable in practice, but it would drift on a machine that cannot hold the cap. Known
+  simplification, not an oversight.

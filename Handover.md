@@ -81,8 +81,11 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 ### What actually works right now
 
 - Procedural **island**, not a cave: coastline, ocean with a stepped sea floor, inland rock
-  outcrops, 80×45 tiles at 32 px, seeded, regenerable in-game with **R**. See [[Phase Roadmap]]
+  outcrops, **108×60 tiles at 24 px**, seeded, regenerable in-game with **R**. See [[Phase Roadmap]]
   Phase 01
+- **Screen-aligned input** — `W` moves up on screen, verified per direction, with a negative control
+  that rejects the old world-aligned mapping. See [[Phase 04 - Traversal]]
+- **An eased follow camera** with a deadzone, replacing the per-frame hard snap
 - **Isometric 2.5D renderer**: 2:1 diamonds, elevation with cliff faces, band-sweep depth sort
 - **Procedural scenery**: layered trees with round `fill_ellipse` canopies (not the earlier
   axis-aligned lollipops), bushes, rocks, reeds, flowers, crystals, stumps — all from a per-tile
@@ -121,10 +124,8 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
   the +0-byte property true by construction rather than by remembering
 - **Save/load**
 - **Any animation at all.** Nothing sways, shimmers, bobs or smokes. The world is static
-- **The player is still a 24×24 orange square.** No layered character, no walk cycle, no facing
-- **Input is still world-aligned.** `W` travels up-*right* on screen, not up. See [[Phase Roadmap]]
-  Phase 04
-- **The camera still snaps to the player with no easing or deadzone.**
+- **The player is still an orange square** (18×18 at the current tile size). No layered character,
+  no walk cycle, no facing
 - **Buildings do not respond to restoration.** The ruin→whole rebuild is designed but not built
 - **No rivers, no bridges, no waterfalls.** Water is currently ocean only, with no inland flow
 - **No worn paths between buildings.** The village reads as buildings-in-a-field, not as inhabited
@@ -139,14 +140,14 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 Remote: **`https://github.com/Nishmam12/matha-noshto-game`** — private, branch `main`.
 
 ```
+dd8cfef  Phase 04: screen-aligned input, and an eased follow camera
+e03138d  Rescale the world: TILE 32 -> 24, and make TILE an honest knob
+60b4e3a  Bitmap font and a live fog-tuning overlay, both at +0 shipping bytes
+a2e87a4  Handover rewrite, and a phase-by-phase roadmap for the next chat
 e5c8942  Roof face shading, and rewrite the fog so distance reads as haze
 5ffdb38  Island landform, clustered villages, and rounded foliage
 545598f  Handover rewritten for the isometric build, plus devlog and INDEX catch-up
 d622ed0  docs: record the isometric decision and supersede the flat-geometry notes
-f96de1b  Buildings: mix-and-match houses, verified by the existing reachability proof
-297b390  Remaining props, and an isometric interact ring
-b63a4ec  devlog: session 01 of the isometric pivot, and INDEX size history
-5f664c3  Layered procedural trees and bushes, and a real depth sort
 ```
 
 **Everything is committed.** Nothing is pushed to the remote yet — check before assuming.
@@ -262,15 +263,16 @@ then exits 0. `--scale N` forces the window scale.
 `-`/`=` adjust it. `--tune` starts with it already shown, the same way `--overlay` starts with F1
 held, so it can be screenshotted without a human at the keyboard.
 
-> **`W` moves up-*right*, not up.** Input is still world-aligned. Known, not a bug — [[Phase Roadmap]]
-> Phase 04.
+> **`W` now moves up on screen.** Input was world-aligned until 2026-08-05; if any older note still
+> says `W` travels up-right, that note is stale — see decision 28.
 
 ---
 
 ## 5. Code map — `src/main.c`, in order
 
-Line numbers below are current as of the Phase 03 work (2026-08-05). They will drift with every edit
-— trust the grep, not the memory of this table, on your next session.
+Line numbers below were current as of the Phase 03 work and have **drifted by roughly +20 to +250**
+since the rescale and Phase 04. Treat them as a map of the file's *order*, not as addresses —
+trust the grep, not this table.
 
 | Line | Section | What lives there |
 |---|---|---|
@@ -305,10 +307,13 @@ Line numbers below are current as of the Phase 03 work (2026-08-05). They will d
 
 | Constant | Value | Notes |
 |---|---|---|
-| `TILE` | 32 | Diamonds are 64×32. Changing it is free — the projection identity holds at any size |
-| `WORLD_W` × `WORLD_H` | 80 × 45 | = 2560×1440 world px, 4000×2000 in iso screen space |
+| `TILE` | **24** (was 32) | Diamonds are 48×24. **Changing it now really is free**: every authored dimension goes through `PX()`, so the whole visual scale follows. It did not before — see decision 26 |
+| `PX(n)` / `PXF(n)` | — | "n px, as authored at a 32 px tile" (`TILE_REF`). Wrap **every** new hand-authored pixel dimension in it, or that art stops scaling with `TILE` and re-creates the "everything is too big" bug |
+| `WORLD_W` × `WORLD_H` | **108 × 60** (was 80×45) | = 2592×1440 world px. Grown so the island keeps its extent while being sampled 1.8× more finely |
 | `LOGICAL_W` × `LOGICAL_H` | 960 × 540 | Rasterised size; window is this × an integer scale |
-| `PLAYER_SPEED` / `PLAYER_SIZE` | 220 / 24 | Unchanged. Both scaled with `TILE`; collision is scale-invariant |
+| `PLAYER_SPEED` / `PLAYER_SIZE` | `PXF(220)` / `PX(24)` = 165 / 18 | Both scale with `TILE`; collision is scale-invariant because `player_blocked` divides by `TILE` |
+| `REVEAL_TILES` | **7** (was 5) | In *tiles*, so it does not scale with tile size — raised by hand to keep the sight circle ~160 world px |
+| `CAM_DEADZONE` / `CAM_EASE` | `PX(30)` / 0.16 | Follow-camera feel. **First guesses, never judged by a human.** Y deadzone is halved because the projection compresses screen y 2:1 |
 | `SIGHT_MAX` | **0.50** (was 0.42) | Raised alongside the fog rewrite so walked ground keeps more colour |
 | `FOG_TINT_R/G/B` | **60 / 70 / 86** | Was (44, 52, 68) — a *dark* blue-grey. Now a light cool haze. Took three tuning passes; **tune these with the F3 overlay in a self-test build, never by rebuild-and-screenshot again** |
 | `FOG_KEEP` | **0.50** | Fraction of a colour's own luminance contrast preserved at reveal 0. Replaces a flat 0.55 luminance scale + 0.45 tint-pull that crushed contrast. Also F3-adjustable |
@@ -320,8 +325,8 @@ Line numbers below are current as of the Phase 03 work (2026-08-05). They will d
 | `LAND_SEA` | **0.24 (new)** | Height-field threshold below which a tile is ocean. Lower = bigger island |
 | `LAND_ROUGH` | **0.55 (new)** | How far coastline noise pushes the shore in and out |
 | `LAND_ROCK_T` | **0.74 (new)** | Outcrop threshold. Raised once already — 0.68 covered ~40% of frame in rock |
-| `VILLAGE_SITES` / `VILLAGE_RADIUS` / `VILLAGE_SPACING` | **3 / 9 / 22 (new)** | Up to 3 village clusters, 9-tile plot radius, kept 22 tiles apart |
-| `BUILDING_TARGET` / `BUILDING_MAX` | **15 (new)** / 40 | Placement now aims for 15, not "as many as fit"; `BUILDING_MAX` stays the array bound |
+| `VILLAGE_SITES` / `VILLAGE_RADIUS` / `VILLAGE_SPACING` | **4 / 12 / 29** | All in *tiles*, so all re-derived by hand for `TILE` 24. Radius/spacing × 32/24 keeps a village the same physical size; sites raised because 3 in a 1.8× larger world read as an empty island |
+| `BUILDING_TARGET` / `BUILDING_MAX` | **22** / 40 | Raised with the world size; mean is 21 per world. `BUILDING_MAX` stays the array bound |
 | `STOREY_H` / `WALL_BASE` | 14 / 10 | Unchanged |
 | `LOBES` | 6 | Unchanged, but lobes are now `fill_ellipse` calls, not `fill_rect` |
 | `REGION_COUNT` | 16 | **Hard cap 32** — adjacency is a `Uint32` bitmask |
@@ -389,6 +394,26 @@ New decisions from the Phase 03 session (2026-08-05):
     straight back to the literals otherwise, which is what makes the +0-byte claim structural rather
     than something to re-measure.
 
+New decisions from the rescale + traversal session (2026-08-05):
+
+26. **All hand-authored pixel dimensions go through `PX(n)`, referenced to a 32 px tile.** Before
+    this, `TILE` was a lie: the projection identity held at any size, but props were authored in
+    absolute pixels, so shrinking `TILE` shrank the ground and left the trees alone. **Any new art
+    code must wrap its dimensions in `PX()`** or it silently opts out of the scale system and
+    re-creates "everything is too big".
+27. **The world grew to 108×60 as tiles shrank to 24, so the island keeps its size and gains
+    resolution rather than shrinking.** Safe because `land_noise` reads normalised coordinates over
+    fixed lattices — the island's *shape* is resolution-independent. Constants denominated in
+    *tiles* (`REVEAL_TILES`, `VILLAGE_*`) do **not** follow `TILE` and had to be re-derived by hand;
+    that asymmetry is the easy thing to forget here.
+28. **Input is screen-aligned; `move_axis` is not involved.** `sim_step` rotates screen intent into
+    a world velocity through the inverse of the projection basis and normalises by its true length.
+    `move_axis` still resolves a world velocity into collision-respecting motion and has no opinion
+    about its origin — which is precisely why collision needed re-*running*, not re-*arguing*.
+29. **When you rotate a control signal, rotate the decision, not the measurement.** Applying the
+    autopilot's deadband *after* rotating its world deltas livelocked every playthrough — see §7.
+    Thresholds are judgements about the space the target lives in.
+
 ---
 
 ## 7. Traps — each of these already cost time once
@@ -449,6 +474,29 @@ true and are not repeated in full here — see git history at `545598f` for verb
   is 2 and every font pixel is a 2×2 block. The checker was right and the expectation was wrong.
   When a count is off by a suspiciously round factor, suspect the units before the code.
 
+**New in the rescale + traversal session (2026-08-05):**
+
+- **Rotating a control signal and thresholding it afterwards livelocks.** The autopilot's deadband
+  was applied to the *rotated* deltas: `ddx=+0.5, ddy=−0.5` is inside the rest zone on both world
+  axes, but rotates to `sdx=1.0`, which clears the 0.6 threshold. The autopilot twitched where it
+  used to rest, overshot by a full step, and oscillated between two tiles forever — 3 of 3 seeds hit
+  the 200,000-step cap. **Apply the deadband in the space the target lives in, then rotate only the
+  resulting discrete intent.** This cost the most time of anything this session.
+- **A livelock in `--play-test` presents as a hang, not a failure.** 200,000 steps × two BFS passes
+  over 6,480 tiles is minutes per seed, so `--play-test --seeds 50` just stopped returning and the
+  command hit its timeout with no output. **`Select-Object -Last N` hides all progress until the
+  command completes**, so the output file was empty and looked like nothing had run. Re-run with a
+  small `--seeds` count and *no* output filter to turn "something is slow" into a diagnosis.
+- **A test can encode the very assumption the change is removing.** `speed_selftest` measured world-x
+  displacement under `in.right` — fine while input was world-aligned, but a *correct* screen-aligned
+  simulation now reports 0.707 of the speed and "fails". The fix was not to retune the number: it was
+  to notice the invariant was never about axes (travel *distance* is direction-independent) and
+  assert the basis-independent thing instead, so the next orientation change doesn't rewrite it again.
+- **Growing the world does not scale constants denominated in tiles.** `REVEAL_TILES`, `VILLAGE_RADIUS`,
+  `VILLAGE_SPACING`, `VILLAGE_SITES` and `BUILDING_TARGET` all had to be re-derived by hand when
+  `TILE` changed, because `PX()` scales *pixels* and these are *tile counts*. Nothing warns about
+  this; the sight radius silently shrinks and the villages silently thin out.
+
 ---
 
 ## 8. Verified vs NOT verified
@@ -479,15 +527,29 @@ controls; audio callback timing; render cost). New this session:
   negative control fires, so the checker is known to have teeth.
 - **The full suite still passes with `fog_lerp` modified** — re-*run*, not re-argued: iso, village
   (30), rng, move (20), region (30), reach (50 + control), gating (30), play (50/50), audio.
+- **The tile rescale and the input rotation did not weaken the completability proof.** `move_axis`
+  and the collision inputs were untouched by both; the full suite including 50/50 playthroughs was
+  re-*run* after each, on a world with 1.8× the tiles.
+- **`W` moves up on screen, per direction, with a negative control.** All 8 directions travel
+  165.00 px in 60 ticks and land in the right screen direction; the control replays the old
+  world-aligned mapping and is rejected 4 of 4.
+- **The rescale cost −512 bytes and no render time** (0.824 ms, unchanged) despite 37% more draw
+  calls, because it is the same screen area drawn as finer tiles.
 
 ### NOT verified — be honest about these
 
-- **Nobody has used the tuning overlay.** [[Phase 03 - Legibility Tools]]'s gate says a person must,
-  once, before the phase closes — it is explicitly a tool for humans. Screenshots prove it renders
-  and stays legible over fogged terrain at `--scale 1`; they prove nothing about whether `TAB`/`-`/`=`
-  feel right in the hand. **This is the one item blocking Phase 03 from being marked done.**
+- **Nobody has played at the new scale, or driven the new camera.** The screenshots say the world is
+  denser and better-proportioned; whether 24 px tiles are *nice to walk around* is a different
+  question. `CAM_DEADZONE`/`CAM_EASE` are first guesses and "does the easing feel right" cannot be
+  claimed from here.
+- **Rock outcrops read as scattered pale blocks under fog at the new scale.** More, smaller outcrops
+  are visible at once and stone is still the lightest large surface, so they pop out of the haze as
+  floating cubes. Same value-hierarchy fight [[Art Bible]] describes and Session 03 already had once
+  — and now exactly what the F3 overlay exists to settle.
 - **The overlay's liveness is proven by construction, not by a scripted keypress.** `fog_lerp` reads
   the struct the keys write, but no automated run presses a key and diffs two frames.
+- **The camera ease runs per frame, not per simulation tick.** Stable while the frame cap holds;
+  it would drift on a machine that cannot hold it. Known simplification, not an oversight.
 - **Whether it is fun beyond one early, positive, informal reaction.** One playtest is not QA.
 - **Whether the fog and palette values are actually *right***, as opposed to "no longer obviously
   wrong." They were tuned by eye, by one person, in three iterative passes, with no measurement of
@@ -521,9 +583,10 @@ controls; audio callback timing; render cost). New this session:
 | Building placement pattern | **RESOLVED, this session** — clustered village sites, not uniform scatter. See decision 17 |
 | Fog destination colour | **RESOLVED, this session, but tuned by eye and unmeasured** — light haze, `FOG_KEEP` contrast preservation. See decision 19 and Phase 05 |
 | Asset pipeline for team-authored art | **RESOLVED, this session** — build-time bake to a compiled-in header, never runtime load. See decision 20, [[Art Bible]] §8, Phase 07 |
-| **Input orientation** | **STILL OPEN, and it still matters.** `W` travels up-right. This is a *simulation* change — it rewrites every trajectory and invalidates `--move-test`'s diagonal assertion, `--input-test`, and the autopilot's steering. Scheduled as [[Phase Roadmap]] Phase 04, deliberately kept isolated from any render-only change |
-| Camera easing | **STILL OPEN.** Currently a hard snap to player-centred with axis clamping only. Scheduled alongside or just after input, Phase 04 |
-| Landmass size / region count | **Provisional 16 regions.** Pacing needs measuring against the *new* island shape, not just re-measuring against the old cave's numbers |
+| **Input orientation** | **RESOLVED, 2026-08-05** — screen-aligned, `dd8cfef`. See decision 28 |
+| Camera easing | **RESOLVED in mechanism, OPEN in feel** — deadzone + exponential ease shipped, but `CAM_DEADZONE`/`CAM_EASE` are first guesses nobody has driven by hand |
+| **Art scale** | **RESOLVED, 2026-08-05** — `TILE` 24 with everything authored through `PX()`. Whether 24 is the *right* number is still a judgement call; it is now a one-line change to try another |
+| Landmass size / region count | **Provisional 16 regions over a now 1.8× larger tile grid.** Pacing still unmeasured, and the regions are now bigger in tiles than anything was measured against |
 | Fragment + Found Soul counts | **Provisional 14 + 5.** Unchanged, still awaiting sign-off |
 | Kindle: passive radius vs active ping | **Open.** Unchanged |
 | Inventory/tool icons from mockup | **Open, and now explicitly addressed in [[Art Bible]] §7**: out of scope per [[Save and UI]]'s "no HUD clutter," reinstating any of it is its own flagged decision |
@@ -597,17 +660,18 @@ This handover intentionally does **not** duplicate the forward plan. `design/pha
 per phase — what it is, why it's sequenced where it is, its definition of done, exactly which
 functions and lines it touches, and its verification gate. The index is [[Phase Roadmap]].
 
-**Current position, in one paragraph:** Phases 00–02 (memory + skill policy + provisional Art Bible;
-island landform + village clustering + a first palette/foliage pass; roof face shading + the fog
-rewrite) are **done** and committed as `5ffdb38` and `e5c8942`. **Phase 03 (bitmap font + live fog
-tuning overlay) is code-complete at +0 shipping bytes, with one gate item outstanding: a human has
-to use the overlay once and say whether it is usable.** Do that before marking it done — it is
-explicitly a tool for humans, and screenshots cannot discharge it. **Phase 04** (screen-aligned
-input, its own isolated simulation slice) is next. After that: the two missing test checkers
-(Phase 05), then water features, the asset bake pipeline, save/load, the remaining placeholder art,
-and motion (Phases 06–10) — all timeboxed, with a **hard stop on 2026-08-14** before the
-ship-critical remainder (Phase 11: audio, font-dependent HUD, QA, submission) takes over regardless
-of how much of the art work is finished.
+**Current position, in one paragraph:** Phases 00–04 are **done**. 00–02 (memory + skill policy +
+Art Bible; island landform + village clustering; roof shading + the fog rewrite) as `5ffdb38` and
+`e5c8942`; **Phase 03** (bitmap font + F3 fog-tuning overlay, +0 shipping bytes) as `60b4e3a`, its
+human-usability gate discharged the same day; **Phase 04** (screen-aligned input + eased camera) as
+`dd8cfef`. Between 03 and 04 the world was **rescaled** (`e03138d`) — `TILE` 32→24 with every
+authored dimension routed through `PX()`, and the grid grown to 108×60 so the island keeps its
+extent and gains resolution. **Phase 05** (the missing `--land-test` and `--fog-test`, now three
+sessions of rule debt) is next, and it is the cheapest it will ever be to write. After that: water
+features, the asset bake pipeline, save/load, the remaining placeholder art, and motion (Phases
+06–10) — all timeboxed, with a **hard stop on 2026-08-14** before the ship-critical remainder
+(Phase 11: audio, font-dependent HUD, QA, submission) takes over regardless of how much of the art
+work is finished.
 
 **Schedule reality, unchanged in substance from the last handover:** today is 2026-08-05; the
 deadline is 2026-09-04. Audio (a softsynth from zero) and the rest of Week 5 (save/load, HUD, win

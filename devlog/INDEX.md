@@ -8,15 +8,28 @@ See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prom
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
 **Current `.exe` size:** 690,688 bytes
-**Current status:** verified — island landform, clustered villages, rounded foliage, roof face
-shading, the fog rewrite, and now a bitmap font plus a live fog-tuning overlay (both self-test-only,
-+0 shipping bytes). **The game has now been played by a human once** and read as "slightly
-enjoyable". No animation, no character, no audio; input is still world-aligned.
-**Forward plan:** see [[Phase Roadmap]] — Phases 00–02 done, Phase 03 code-complete and awaiting one
-human usability check, Phase 04 (screen-aligned input) next
+**Current status:** verified — island landform, clustered villages, a bitmap font and F3 fog-tuning
+overlay (self-test-only, +0 shipping bytes), the whole world **rescaled to 24 px tiles on a 108×60
+grid** with all art routed through `PX()`, **screen-aligned input** (`W` finally moves up) and an
+eased follow camera. No animation, no character, no audio.
+**Forward plan:** see [[Phase Roadmap]] — Phases 00–04 done, Phase 05 (the missing `--land-test`
+and `--fog-test`, three sessions of rule debt) next
 **Headroom:** 749,312 bytes under the 1,440,000 ship target
 
 ## Sessions
+
+- [[2026-08-05-session-01]] *(Session 02)* — **The world was too big, and `W` finally points up.**
+  Diagnosed "everything seems too big" to its actual cause: every prop was authored in absolute
+  pixels against `TILE == 32`, so `TILE` scaled the ground but not the art. New `PX()` makes `TILE`
+  one honest knob for the whole visual scale; `TILE` 32→24 and the world 80×45→108×60 so the island
+  keeps its extent and gains resolution (safe because `land_noise` is normalised). **−512 bytes, and
+  render unchanged despite 37% more draw calls.** Then [[Phase 04 - Traversal]]: input rotated
+  through the inverse projection basis, `move_axis` untouched. **Rotating the autopilot's deadband
+  naively livelocked every playthrough** — 3 of 3 seeds capped at 200,000 steps, presenting as a
+  hang rather than a failure; fixed by thresholding in world space and rotating only the discrete
+  intent. `speed_selftest` rewritten to assert a basis-*independent* invariant (travel distance, all
+  8 directions) and given the negative control it never had. Camera got a deadzone + exponential
+  ease. Suite green throughout, play 50/50.
 
 - [[2026-08-05-session-01]] — **[[Phase 03 - Legibility Tools]]: a bitmap font, and the live tuning
   overlay built on it.** 5×7 bit-packed glyphs (`0x20`–`0x5F`), `draw_text` / `draw_text_shadow`, and
@@ -105,7 +118,9 @@ human usability check, Phase 04 (screen-aligned input) next
 | 08-04 | 689,152 | +2,560 | procedural buildings, mix-and-match house parts, `--village-test` |
 | 08-04 | 690,176 | +1,024 | island landform, village clustering, `fill_ellipse`, palette pass |
 | 08-04 | 690,688 | +512 | roof face split (`iso_diamond_lr`), fog rewrite |
-| 08-05 | **690,688** | +0 | bitmap font, `--font-test`, F3 tuning overlay — all self-test-only |
+| 08-05 | 690,688 | +0 | bitmap font, `--font-test`, F3 tuning overlay — all self-test-only |
+| 08-05 | 690,176 | −512 | world rescale: `PX()`, `TILE` 32→24, grid 108×60 — *saved* bytes |
+| 08-05 | **690,688** | +512 | screen-aligned input, eased camera, 8-direction speed test + control |
 
 Self-test builds (`wayfarer-selftest.exe`) are not deliverables and are deliberately excluded
 from this table and from the budget gate.
@@ -129,9 +144,13 @@ from this table and from the budget gate.
   orange square with no facing or walk cycle. A static isometric scene reads as a diorama.
 - **Buildings do not respond to restoration yet.** The ruin→whole rebuild is designed but not
   built, and it is what would make the game's own hook literally visible.
-- **Input is still world-aligned:** `W` travels up-right on screen. Changing it is a *simulation*
-  change and needs its own verified slice.
-- **Pacing has not been re-measured** since the tile size doubled and buildings started blocking
-  routes. The 30–82 s figure predates both.
+- **Pacing has not been re-measured** and is now further out of date: the tile size has changed
+  twice (16→32→24) and the grid is 1.8× larger in tiles than anything measured. The 30–82 s figure
+  predates all of it.
+- **The new camera and the new art scale have never been judged by a human.** `CAM_DEADZONE`,
+  `CAM_EASE` and `TILE` itself are all defensible numbers nobody has actually played with.
+- **Rock outcrops read as pale scattered blocks under fog** at the new scale — stone is still the
+  lightest large surface, so more, smaller outcrops pop out of the haze. A palette job for the F3
+  overlay, not a renderer bug.
 - Render cost is measured on one machine with the window unoccluded. `present` is an OS blit whose
   cost depends on the compositor and window state.
