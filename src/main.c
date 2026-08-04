@@ -559,8 +559,15 @@ typedef struct {
 #define VILLAGE_RADIUS  12  /* tiles from a site centre to its outermost plot */
 #define VILLAGE_SPACING 29  /* minimum tiles between two site centres */
 #define BUILDING_TARGET 22
-#define STOREY_H     PX(14)   /* wall px per storey */
-#define WALL_BASE    PX(10)   /* plinth under the first storey */
+/* Wall height per storey, and the plinth under the first one.
+ *
+ * Both were roughly doubled after the roof-alignment fix made the real
+ * proportions visible: a 3x3 footprint draws a 152 px roof, and over a 30 px
+ * wall that reads as a tent pitched on a kerb, not a building. A storey now
+ * comes to about one tile-depth (DIA_H) of screen height, which is the unit the
+ * eye already uses to judge scale everywhere else in the scene. */
+#define STOREY_H     PX(28)   /* wall px per storey */
+#define WALL_BASE    PX(14)   /* plinth under the first storey */
 
 /* What a tile is made of. `solid` stays the single collision truth — both ROCK
  * and OCEAN are solid and neither is walkable — and this only records WHICH kind
@@ -2530,11 +2537,22 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
     int cx, cy, wall = WALL_BASE + b->levels * STOREY_H;
     int rw, steps, k, pitch;
 
-    /* Centre of the footprint in world px, projected. */
+    /* Centre of the footprint in world px, projected.
+     *
+     * iso_tile takes `ax` as the diamond's CENTRE — it does `x0 = ax - ISO_HW`
+     * internally — and its top vertex is at `ay`, so a tile's visual centre is
+     * (ax, ay + ISO_HH). That is exactly what world_to_iso returns for the
+     * tile's centre point, which is why props, entities and the player need no
+     * correction anywhere: the projection and the rasteriser already agree.
+     *
+     * The roof did NOT agree. It carried a spurious `+ ISO_HH` on y, pushing
+     * every roof half a tile DOWN the screen from its own walls — which is why
+     * the wall's pale top face showed as a band along the up-left edges and the
+     * house read as a roof that had slid off its box. */
     world_to_iso((float)(b->x * TILE + b->w * TILE / 2),
                  (float)(b->y * TILE + b->h * TILE / 2), &cx, &cy);
     cx -= cam_x;
-    cy -= cam_y - ISO_HH;
+    cy -= cam_y;
     if (cx < -400 || cx > fb->w + 400)
         return;
 
@@ -2595,41 +2613,90 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
     }
 
     /* Facade: door and windows on the two faces the camera can see. The wall
-     * itself was drawn by the tile pass; these sit on top of it. Positions are
-     * along the footprint's front edges, in the same 2:1 slope. */
+     * itself was drawn by the tile pass; these sit on top of it.
+     *
+     * Derived from the wall-top diamond rather than tuned by eye. `fw` is the
+     * footprint's half-width WITHOUT the roof's eave — using `rw` here is what
+     * used to push details past the wall's corners. The wall-top diamond is
+     * centred (cx, ftop) with half-height fw/2, so at a horizontal offset `ox`
+     * from centre the top of the wall is at
+     *
+     *     ftop + (fw - ox) / 2
+     *
+     * on BOTH front faces (ox = 0 is the near vertex, ox = fw is a side
+     * vertex), and the wall runs `wall` px straight down from there. Every
+     * facade element hangs off that one line.
+     *
+     * The previous version placed everything relative to `cy - wall + ISO_HH`,
+     * a constant that only made sense alongside the roof's own ISO_HH error —
+     * which is why the windows were being drawn on the ROOF rather than on the
+     * wall, in every screenshot going back to when buildings landed. */
     {
-        int i, fy = cy - wall + ISO_HH;
+        int fw   = (b->w + b->h) * ISO_HW / 2;
+        int ftop = cy - wall;
+        int nwin = 1 + (int)BV_WIN(v) % 3;
+        int lv   = b->levels;
         Uint32 dark  = fog_lerp(fb, wp[0] * 35 / 100, wp[1] * 35 / 100,
                                 wp[2] * 35 / 100, rev);
         Uint32 glass = fog_lerp(fb, 0x3c, 0x4e, 0x62, rev);
         Uint32 trim  = fog_lerp(fb, wp[0] * 72 / 100, wp[1] * 72 / 100,
                                 wp[2] * 72 / 100, rev);
-        int nwin = 1 + (int)BV_WIN(v) % 3;
+        int i, s, ww = PX(8), wh = PX(10), dw = PX(10), dh = PX(20);
 
-        /* Door on the down-right face, one storey tall. */
-        {
-            int dx = cx + rw / 3, dy = fy + (rw / 3) / 2;
-            fill_rect(fb, dx - PX(4), dy - PX(16), PX(8), PX(16), dark);
+        if (dh > wall - PX(4))
+            dh = wall - PX(4);
+
+        /* One row of windows per storey, on both visible faces. A single row
+         * on a three-storey wall read as a warehouse with one porthole. */
+        for (s = 0; s < lv; s++) {
+            /* Storeys counted DOWN from the eaves, so the ground floor is the
+             * last one and is where the door goes. */
+            int band = WALL_BASE + s * STOREY_H;   /* px below the wall top */
+            int ground = (s == lv - 1);
+            for (i = 0; i < nwin; i++) {
+                int ox = fw * (i + 1) / (nwin + 1);
+                int ey = ftop + (fw - ox) / 2 + band;
+                /* down-left face */
+                fill_rect(fb, cx - ox - ww / 2, ey, ww, wh, glass);
+                if (BV_TRIM(v) & 1)
+                    fill_rect(fb, cx - ox - ww / 2 - PX(1), ey - PX(2),
+                              ww + PX(2), PX(2), trim);
+                /* down-right face — skipped on the ground floor, where the
+                 * door lives, so the two never overlap. */
+                if (!ground) {
+                    fill_rect(fb, cx + ox - ww / 2, ey, ww, wh, glass);
+                    if (BV_TRIM(v) & 1)
+                        fill_rect(fb, cx + ox - ww / 2 - PX(1), ey - PX(2),
+                                  ww + PX(2), PX(2), trim);
+                }
+            }
+        }
+
+        /* Door on the down-right face, standing ON the ground rather than
+         * floating: its base is the bottom of the wall at that offset. */
+        if (dh > 0) {
+            int ox = fw * 45 / 100;
+            int ey = ftop + (fw - ox) / 2 + wall; /* ground line at that ox */
+            fill_rect(fb, cx + ox - dw / 2, ey - dh, dw, dh, dark);
             if (BV_DOOR(v) >= 2) /* arched or double: a lintel */
-                fill_rect(fb, dx - PX(5), dy - PX(18), PX(10), PX(2), trim);
+                fill_rect(fb, cx + ox - dw / 2 - PX(1), ey - dh - PX(2),
+                          dw + PX(2), PX(2), trim);
         }
-        /* Windows on the down-left face, spread along it. */
-        for (i = 0; i < nwin; i++) {
-            int ox = -rw + (rw * 2 * (i + 1)) / (nwin + 2);
-            int wx = cx + ox / 2 - rw / 4, wy = fy + (ox / 2 + rw / 4) / 2;
-            int wh = PX(7);
-            fill_rect(fb, wx - PX(3), wy - PX(14) - wh, PX(7), wh, glass);
-            if (BV_TRIM(v) & 1)
-                fill_rect(fb, wx - PX(4), wy - PX(15) - wh, PX(9), PX(2), trim);
-        }
+
         /* A hanging sign or banner: the one asymmetric detail, so a row of
-         * houses does not read as a repeated stamp. */
-        if (BV_SIGN(v) == 1)
-            fill_rect(fb, cx + rw / 2, fy + rw / 4 - PX(24), PX(7), PX(10),
+         * houses does not read as a repeated stamp. Hung just under the eaves
+         * on whichever face it picks. */
+        if (BV_SIGN(v) == 1) {
+            int ox = fw * 78 / 100;
+            int ey = ftop + (fw - ox) / 2 + WALL_BASE;
+            fill_rect(fb, cx + ox - PX(3), ey, PX(7), PX(10),
                       fog_lerp(fb, 0x8c, 0x5a, 0x36, rev));
-        else if (BV_SIGN(v) == 2)
-            fill_rect(fb, cx - rw / 2 - PX(3), fy - rw / 4 - PX(26), PX(5), PX(14),
+        } else if (BV_SIGN(v) == 2) {
+            int ox = fw * 78 / 100;
+            int ey = ftop + (fw - ox) / 2 + WALL_BASE;
+            fill_rect(fb, cx - ox - PX(2), ey, PX(5), PX(14),
                       fog_lerp(fb, 0x50, 0x64, 0xa8, rev));
+        }
     }
     (void)w;
 }
