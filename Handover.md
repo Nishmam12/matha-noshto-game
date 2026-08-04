@@ -1,6 +1,6 @@
 ---
 tags: [process, handover, wayfarer]
-updated: 2026-08-04
+updated: 2026-08-05
 exe_size_bytes: 690688
 ---
 
@@ -74,9 +74,9 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 |---|---|
 | **`build\wayfarer.exe`** | **690,688 bytes** — 749,312 under the ship target |
 | `build\wayfarer-selftest.exe` | 717,312 bytes — **not a deliverable**, never shipped |
-| `src\main.c` | 4,229 lines, single translation unit |
+| `src\main.c` | ~4,830 lines, single translation unit |
 | Warnings | zero, under `-Wall -Wextra` |
-| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Two art/traversal sessions landed on top of it** — see [[Phase Roadmap]] for what's done and what's next. Audio, font, save and UI are all still untouched |
+| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–02 done; Phase 03 (font + tuning overlay) code-complete, awaiting one human check** — see [[Phase Roadmap]]. Audio, save and UI are all still untouched |
 
 ### What actually works right now
 
@@ -106,14 +106,19 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 - Restoration loop, Found Soul states, win condition, 4-stage world-growth read
 - Restore confirm beat (audio), real-time safe: 0.141 ms worst case against a 21.333 ms deadline
 - Debug overlay, 12-seed grid view, title-bar stats, render instrumentation
+- **A 5×7 bitmap font** (`draw_text`, `draw_text_shadow`) and an **F3 live tuning overlay** for the
+  fog constants — `TAB` cycles rows, `-`/`=` adjust. **Both are self-test-only and cost the shipping
+  build 0 bytes**; `fog_lerp` reads `FOG_*_V` macros that expand back to the literals in a release
+  build. See [[Phase 03 - Legibility Tools]]
 - **The game has been played by a human being, once**, and read as "slightly enjoyable" — see §8
 
 ### What does NOT exist yet
 
 - **Any music.** The layered synth is still ahead. Only the confirm beat exists
-- **Any text on screen.** No bitmap font — including Found Soul restoration lines. This is now the
-  top of the queue: see [[Phase Roadmap]] Phase 03, which frames the font as unblocking a live
-  tuning overlay, not just as UI
+- **Any text in the shipping build.** The font exists but is gated behind `WAYFARER_SELFTEST`,
+  because nothing in the release build calls it yet — Found Soul restoration lines and a HUD are
+  Phase 09/11. Un-gating is a one-line change once a real caller exists, and the gate is what keeps
+  the +0-byte property true by construction rather than by remembering
 - **Save/load**
 - **Any animation at all.** Nothing sways, shimmers, bobs or smokes. The world is static
 - **The player is still a 24×24 orange square.** No layered character, no walk cycle, no facing
@@ -204,6 +209,7 @@ earlier from the same source.
 $e = ".\build\wayfarer-selftest.exe"
 
 & $e --iso-test                             # rasteriser exactness, seams, depth, upscale
+& $e --font-test --shot charset.bmp         # glyph table vs render, + stride negative control
 & $e --village-test --seeds 30 --seed 1     # building placement invariants
 & $e --rng-test    --seed 1                 # PRNG: reproducibility, stream independence, bias
 & $e --move-test   --seeds 20 --seed 1      # collision, no drift, determinism, diagonal speed
@@ -218,9 +224,11 @@ $e = ".\build\wayfarer-selftest.exe"
 & $e --frames 60 --seed 4 --overlay --shot out.bmp   # scripted screenshot — see the recipe in §10
 ```
 
-**All currently pass.** Last full run, 2026-08-04, after commit `e5c8942`:
+**All currently pass.** Last full run, 2026-08-05, after the Phase 03 work:
 
 ```
+font    : PASS  2,316 lit px expected from the glyph table and 2,316 rendered;
+                negative control caught the off-by-one stride (2,448 vs 2,316)
 iso     : PASS  0 px owned by the wrong tile under elevation; upscale x1/x2/x3 exact
 village : PASS (0 failures across 30 seeds), mean 12 buildings per world (clustered, not
                 scattered — see Phase 01). Both negative controls fire
@@ -230,8 +238,8 @@ region  : PASS (0 failures across 30 seeds)
 reach   : PASS (0 failures across 50 seeds); negative control PASS; gating relaxed on 0/50
 gating  : PASS (0 failures across 30 seeds)
 play    : PASS (0 seeds could not be completed) — still 50/50 after the landform rewrite
-audio   : worst case 0.141 ms of a 21.333 ms deadline; 0 partial writes, 0 NaN, 0 out of range
-perf    : render 0.749–0.844 ms, present ~1.3–1.4 ms, ~72,445 calls/frame, ~59.6–60.4 fps
+audio   : worst case 0.122 ms of a 21.333 ms deadline; 0 partial writes, 0 NaN, 0 out of range
+perf    : render 0.749–0.844 ms, present ~1.3–1.4 ms, ~72,445 calls/frame, ~59.2–60.4 fps
 ```
 
 **Rule debt, stated plainly:** the island generator (Phase 01) and the fog rewrite (Phase 02) both
@@ -247,8 +255,12 @@ mean the new systems have their own verified invariants yet. See [[Phase Roadmap
 
 `WASD`/arrows move · `E`/`Space` restore · `F1` region overlay · `F2` 12-seed grid ·
 **`F11` borderless fullscreen** · `R` regenerate with next seed · `ESC` quit. Stats are in the
-**window title** (there is no font yet). `--frames N` runs exactly N frames then exits 0.
-`--scale N` forces the window scale.
+**window title** (nothing in the release build draws text yet). `--frames N` runs exactly N frames
+then exits 0. `--scale N` forces the window scale.
+
+**Self-test binary only:** `F3` toggles the live fog-tuning overlay, `TAB` cycles the selected row,
+`-`/`=` adjust it. `--tune` starts with it already shown, the same way `--overlay` starts with F1
+held, so it can be screenshotted without a human at the keyboard.
 
 > **`W` moves up-*right*, not up.** Input is still world-aligned. Known, not a bug — [[Phase Roadmap]]
 > Phase 04.
@@ -257,34 +269,37 @@ mean the new systems have their own verified invariants yet. See [[Phase Roadmap
 
 ## 5. Code map — `src/main.c`, in order
 
-Line numbers below are current as of `e5c8942` (2026-08-04). They will drift with every edit —
-trust the grep, not the memory of this table, on your next session.
+Line numbers below are current as of the Phase 03 work (2026-08-05). They will drift with every edit
+— trust the grep, not the memory of this table, on your next session.
 
 | Line | Section | What lives there |
 |---|---|---|
 | 23 | Tunables | All `#define`s. Everything designers would touch is here |
 | ~85 | **Isometric projection** | `ISO_*`, `ELEV_*`, `FACE_*`, `ROOF_L`, void colour |
-| 181 | RNG | PCG32, three independent streams (terrain / entities / audio) |
-| 262 | Audio | Callback, device open, restore confirm beat |
-| 393 | Args | `arg_int`, `arg_flag`, `arg_val` |
-| 435 | World | Region/World/Scratch/**Building**/**SURF_\*** structs, terrain enums |
-| 576 | **Island generation** | `solid_at`, `land_lattice`, `land_noise`, `world_gen` — the island height field, new this session's predecessor |
-| 718 | **Building placement** | `place_buildings` — village-site clustering, runs *before* the reachability verifier |
-| 813 | Regions | `bfs_open`, `regions_build`, `regions_depth`, `regions_assign_terrain` |
-| 985 | Reachability | `regions_reachable`, `world_solvable`, entity placement, generate-then-verify |
-| 1156 | Movement | `tile_blocked`, `player_blocked`, `move_axis`, `sim_step` (1328) |
-| 1247 | Input | `input_poll` — **world-aligned, see Phase 04** |
-| 1260 | Restoration | `entity_in_reach`, `try_restore`, `game_complete`, `world_stage` |
-| 1415 | **Heights** | `world_heights` (derived elevation, now island- and rock-aware), `height_at` (1497) |
-| 1508 | World init | `game_init` — wipe, generate, place, flood-fill spawn, verify, derive heights |
-| 1619 | **Perf** | `Perf`, counters, `perf_report`. All behind `WAYFARER_PERF` |
-| 1675 | Graphics | `fill_rect`, `vspan`, `iso_tile`, `iso_diamond`, **`iso_diamond_lr`** (new), `iso_ring`, `fill_ellipse` (new), `blit_scale`, `tile_hash`, `fog_lerp` (rewritten), `tile_detail` |
-| 1950 | **House parts** | `BV_*` variant accessors, wall/roof palettes; `draw_building` (2304, roof now face-split) |
-| 2068 | **Props** | palettes (canopy palette pruned to 8 live, non-dead-reading entries), `draw_tree`/`bush`/`rock`/`reed`/`flower`/`crystal`/`stump` (all with contact shadows), `prop_at` (2260), `draw_prop` |
-| 2436 | Render | `tile_reveal`, `tile_colour`, `render` — the band sweep (2496); `render_grid` (2716), `camera_follow` (2788, **still unsmoothed**) |
-| 2816 | Window | `pick_scale`, `backbuffer_new`, `present` |
-| 2883 | Self-test | Everything under `#if WAYFARER_SELFTEST` — compiled out of the shipping build |
-| 4286 | `main` | Fixed-timestep loop, input, debug keys, frame cap |
+| 186 | RNG | PCG32, three independent streams (terrain / entities / audio) |
+| 279 | Audio | Callback, device open, restore confirm beat |
+| 410 | Args | `arg_int`, `arg_flag`, `arg_val` |
+| 436 | World | Region/World/Scratch/**Building**/**SURF_\*** structs, terrain enums |
+| ~95 | **Fog** | `FOG_TINT_*`, `FOG_KEEP`, and the **`FOG_*_V` / `FogTune` indirection** that makes them F3-adjustable in self-test builds and literal in the shipping one |
+| 595 | **Island generation** | `solid_at`, `land_lattice`, `land_noise`, `world_gen` (678) — the island height field |
+| 737 | **Building placement** | `place_buildings` — village-site clustering, runs *before* the reachability verifier |
+| 832 | Regions | `bfs_open`, `regions_build`, `regions_depth`, `regions_assign_terrain` |
+| 1004 | Reachability | `regions_reachable`, `world_solvable`, entity placement, generate-then-verify |
+| 1175 | Movement | `tile_blocked`, `player_blocked`, `move_axis`, `sim_step` |
+| 1266 | Input | `input_poll` — **world-aligned, see Phase 04** |
+| 1279 | Restoration | `entity_in_reach`, `try_restore`, `game_complete`, `world_stage` |
+| 1434 | **Heights** | `world_heights` (derived elevation, island- and rock-aware), `height_at` |
+| 1527 | World init | `game_init` — wipe, generate, place, flood-fill spawn, verify, derive heights |
+| 1623 | **Perf** | `Perf`, counters, `perf_report`. All behind `WAYFARER_PERF` |
+| 1689 | Graphics | `fill_rect` (1694), `vspan`, `iso_tile`, `iso_diamond`, `iso_diamond_lr` (2136), `iso_ring`, `fill_ellipse`, `blit_scale` (1854), `tile_hash`, `fog_lerp` (2015), `tile_detail` |
+| 1737 | **Bitmap font** (new) | `FONT_*` constants, the flat `FONT_5X7` table (1747), `draw_glyph` (1808), `draw_text` (1825), `draw_text_shadow` (1837). All inside `#if WAYFARER_SELFTEST` |
+| 2075 | **House parts** | `BV_*` variant accessors, wall/roof palettes; `draw_building` (2451, roof face-split) |
+| 2189 | **Props** | palettes (canopy pruned to 8 live entries), `draw_tree`/`bush`/`rock`/`reed`/`flower`/`crystal`/`stump` (all with contact shadows), `prop_at`, `draw_prop` |
+| 2583 | Render | `tile_reveal`, `tile_colour`, `render` (2643) — the band sweep; `render_grid` (2863), `camera_follow` (2935, **still unsmoothed**) |
+| 2949 | Window | `pick_scale`, `backbuffer_new`, `present` |
+| 3024 | **Tuning overlay** (new) | `tune_adjust` (3047), `tune_draw` (3065) — F3/TAB/`-`/`=`, fog constants only. Self-test-only |
+| 3099 | Self-test | Everything else under `#if WAYFARER_SELFTEST` — `font_selftest` at 4288 |
+| 4609 | `main` | Fixed-timestep loop, input, debug keys, frame cap |
 
 ### Tunables worth knowing — current values, several changed this session
 
@@ -295,8 +310,9 @@ trust the grep, not the memory of this table, on your next session.
 | `LOGICAL_W` × `LOGICAL_H` | 960 × 540 | Rasterised size; window is this × an integer scale |
 | `PLAYER_SPEED` / `PLAYER_SIZE` | 220 / 24 | Unchanged. Both scaled with `TILE`; collision is scale-invariant |
 | `SIGHT_MAX` | **0.50** (was 0.42) | Raised alongside the fog rewrite so walked ground keeps more colour |
-| `FOG_TINT_R/G/B` | **60 / 70 / 86** | Was (44, 52, 68) — a *dark* blue-grey. Now a light cool haze. Took three tuning passes; see [[Phase Roadmap]] Phase 02 and Phase 03 for why this shouldn't be tuned by rebuild-and-screenshot again |
-| `FOG_KEEP` | **0.50** (new) | Fraction of a colour's own luminance contrast preserved at reveal 0. Replaces a flat 0.55 luminance scale + 0.45 tint-pull that crushed contrast |
+| `FOG_TINT_R/G/B` | **60 / 70 / 86** | Was (44, 52, 68) — a *dark* blue-grey. Now a light cool haze. Took three tuning passes; **tune these with the F3 overlay in a self-test build, never by rebuild-and-screenshot again** |
+| `FOG_KEEP` | **0.50** | Fraction of a colour's own luminance contrast preserved at reveal 0. Replaces a flat 0.55 luminance scale + 0.45 tint-pull that crushed contrast. Also F3-adjustable |
+| `FONT_W` / `FONT_H` / `FONT_SCALE` | **5 / 7 / 2 (new)** | Glyph cell and its logical-pixel magnification. Charset is `0x20`–`0x5F`: uppercase, digits, punctuation. No lowercase |
 | `FACE_L` / `FACE_R` | 58 / 76 | Unchanged — terrain side-face shading, per cent |
 | `ROOF_L` | **64 (new)** | Roof down-left slope shading, per cent of true colour. New this session — see Phase 02 |
 | `ELEV_STEP` / `ELEV_MAX` | 12 / 48 | Unchanged |
@@ -354,6 +370,25 @@ needed verbatim. New decisions from this session:
     subagents died mid-task on a monthly spend limit, and this codebase is one file with one
     Handover — a cold subagent re-derives context that direct reading already has. See §10.
 
+New decisions from the Phase 03 session (2026-08-05):
+
+23. **The bitmap font is hand-rolled, bit-packed, and its array is deliberately FLAT** — indexed
+    `idx * stride + row` with the stride passed in, rather than declared `[glyph][row]`. That exposes
+    the stride as a seam **so `--font-test`'s negative control can corrupt it**; a 2D array would
+    make the off-by-one impossible to express, and an inexpressible fault is one the checker never
+    proves it can catch.
+24. **The tuning overlay controls render-only constants and nothing else.** `FOG_TINT_*` and
+    `FOG_KEEP` live in `fog_lerp` alone, so a keypress shows on the next frame with no regeneration
+    and no stale state. `SIGHT_MAX` was excluded because reveal only ever *grows* (lowering it live
+    leaves walked ground stale); `LAND_ROCK_T` and `VILLAGE_*` were excluded because they feed
+    `world_gen` and would re-run `game_init` — and the reachability verifier — on every keypress.
+    **This was put to the user and decided explicitly**, not defaulted into. Widening it later is a
+    real design change, not a small extension.
+25. **Both the font and the overlay stay behind `WAYFARER_SELFTEST` until a real caller exists.**
+    `fog_lerp` reads `FOG_*_V` macros that expand to `FogTune` struct fields in a self-test build and
+    straight back to the literals otherwise, which is what makes the +0-byte claim structural rather
+    than something to re-measure.
+
 ---
 
 ## 7. Traps — each of these already cost time once
@@ -397,6 +432,23 @@ true and are not repeated in full here — see git history at `545598f` for verb
   against a design target. If a density number matters, it needs its own assertion, not an eyeball
   of the printed mean.
 
+**New in the Phase 03 session (2026-08-05):**
+
+- **A checker that derives its reference from the same table it is checking cannot catch a wrong
+  table.** `--font-test` counts lit pixels against `FONT_5X7` itself. Two glyphs (`=` and `>`) were
+  entirely blank in the table, so they were blank in the reference too, the counts matched perfectly,
+  and the test passed while the overlay rendered its own help line as `TAB ROW  -  ADJUST` with an
+  invisible row cursor. **Found by screenshot, not by test** — the same lesson as the lollipop trees
+  and the ziggurat roofs. This is not a fixable flaw in that checker; it is the boundary of what
+  pixel-counting can prove, and it is why every visual slice still gets looked at.
+  (The flip side is genuinely good and worth keeping: because the reference is derived, adding those
+  glyphs moved the expected count 2,236 → 2,316 with **no test edit**. A hardcoded number is how a
+  checker quietly stops checking.)
+- **Scaled rendering makes pixel-count expectations wrong by a clean multiple, which looks like a
+  real bug.** `--font-test`'s first run expected 559 and got 2,236 — exactly 4×, because `FONT_SCALE`
+  is 2 and every font pixel is a 2×2 block. The checker was right and the expectation was wrong.
+  When a count is off by a suspiciously round factor, suspect the units before the code.
+
 ---
 
 ## 8. Verified vs NOT verified
@@ -420,9 +472,22 @@ controls; audio callback timing; render cost). New this session:
   tests, was re-run (not re-argued) after the generator was replaced and stayed green.
 - **Render cost did not regress from adding `fill_ellipse` and the roof/fog changes.** Measured
   0.749–0.844 ms across runs, against the previous session's 0.859 ms baseline — if anything, faster.
+- **The font and tuning overlay cost the shipping build exactly 0 bytes.** 690,688 before and after,
+  re-confirmed *after* `fog_lerp` was rewritten to read `FOG_*_V` — that was the change that could
+  actually have broken it, and checking only after adding the font would have proven the easy half.
+- **`--font-test` rejects an off-by-one glyph stride**, 2,448 px against an expected 2,316. The
+  negative control fires, so the checker is known to have teeth.
+- **The full suite still passes with `fog_lerp` modified** — re-*run*, not re-argued: iso, village
+  (30), rng, move (20), region (30), reach (50 + control), gating (30), play (50/50), audio.
 
 ### NOT verified — be honest about these
 
+- **Nobody has used the tuning overlay.** [[Phase 03 - Legibility Tools]]'s gate says a person must,
+  once, before the phase closes — it is explicitly a tool for humans. Screenshots prove it renders
+  and stays legible over fogged terrain at `--scale 1`; they prove nothing about whether `TAB`/`-`/`=`
+  feel right in the hand. **This is the one item blocking Phase 03 from being marked done.**
+- **The overlay's liveness is proven by construction, not by a scripted keypress.** `fog_lerp` reads
+  the struct the keys write, but no automated run presses a key and diffs two frames.
 - **Whether it is fun beyond one early, positive, informal reaction.** One playtest is not QA.
 - **Whether the fog and palette values are actually *right***, as opposed to "no longer obviously
   wrong." They were tuned by eye, by one person, in three iterative passes, with no measurement of
@@ -534,16 +599,17 @@ functions and lines it touches, and its verification gate. The index is [[Phase 
 
 **Current position, in one paragraph:** Phases 00–02 (memory + skill policy + provisional Art Bible;
 island landform + village clustering + a first palette/foliage pass; roof face shading + the fog
-rewrite) are **done** and committed as `5ffdb38` and `e5c8942`. Phase 03 (bitmap font, then a live
-tuning overlay behind it) is **next**, chosen specifically because the last two sessions' colour work
-was tuned by slow rebuild-and-screenshot cycles and that needs to stop before more art judgement calls
-get made. After that: screen-aligned input as its own isolated simulation slice (Phase 04), the two
-missing test checkers (Phase 05), then water features, the asset bake pipeline, save/load, the
-remaining placeholder art, and motion (Phases 06–10) — all timeboxed, with a **hard stop on
-2026-08-14** before the ship-critical remainder (Phase 11: audio, font-dependent HUD, QA, submission)
-takes over regardless of how much of the art work is finished.
+rewrite) are **done** and committed as `5ffdb38` and `e5c8942`. **Phase 03 (bitmap font + live fog
+tuning overlay) is code-complete at +0 shipping bytes, with one gate item outstanding: a human has
+to use the overlay once and say whether it is usable.** Do that before marking it done — it is
+explicitly a tool for humans, and screenshots cannot discharge it. **Phase 04** (screen-aligned
+input, its own isolated simulation slice) is next. After that: the two missing test checkers
+(Phase 05), then water features, the asset bake pipeline, save/load, the remaining placeholder art,
+and motion (Phases 06–10) — all timeboxed, with a **hard stop on 2026-08-14** before the
+ship-critical remainder (Phase 11: audio, font-dependent HUD, QA, submission) takes over regardless
+of how much of the art work is finished.
 
-**Schedule reality, unchanged in substance from the last handover:** today is 2026-08-04; the
+**Schedule reality, unchanged in substance from the last handover:** today is 2026-08-05; the
 deadline is 2026-09-04. Audio (a softsynth from zero) and the rest of Week 5 (save/load, HUD, win
 state, game-feel pass) are both completely untouched. **Judging order is finished → under size →
 fun.** If something has to give, take it from [[Cut List]] — the most likely candidate remains

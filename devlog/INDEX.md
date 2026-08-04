@@ -9,13 +9,26 @@ session-logging rules. Picking this up cold? Start with [[Handover]].
 
 **Current `.exe` size:** 690,688 bytes
 **Current status:** verified — island landform, clustered villages, rounded foliage, roof face
-shading and the fog rewrite. **The game has now been played by a human once** and read as "slightly
-enjoyable". No animation, no character, no audio, no font; input is still world-aligned.
-**Forward plan:** see [[Phase Roadmap]] — Phases 00–02 done, Phase 03 (bitmap font + live tuning
-overlay) next
+shading, the fog rewrite, and now a bitmap font plus a live fog-tuning overlay (both self-test-only,
++0 shipping bytes). **The game has now been played by a human once** and read as "slightly
+enjoyable". No animation, no character, no audio; input is still world-aligned.
+**Forward plan:** see [[Phase Roadmap]] — Phases 00–02 done, Phase 03 code-complete and awaiting one
+human usability check, Phase 04 (screen-aligned input) next
 **Headroom:** 749,312 bytes under the 1,440,000 ship target
 
 ## Sessions
+
+- [[2026-08-05-session-01]] — **[[Phase 03 - Legibility Tools]]: a bitmap font, and the live tuning
+  overlay built on it.** 5×7 bit-packed glyphs (`0x20`–`0x5F`), `draw_text` / `draw_text_shadow`, and
+  an F3 overlay (`TAB` row, `-`/`=` adjust) that tunes `FOG_TINT_*` and `FOG_KEEP` live — replacing
+  the three-pass edit-rebuild-screenshot loop that settled those same constants last session. Overlay
+  scope was **narrowed to render-only constants by an explicit decision**; the generation constants
+  would need a full `game_init` per keypress and are excluded on the record. New `--font-test` with an
+  off-by-one-stride negative control, its reference count derived from the glyph table so it tracks
+  edits automatically. **Shipping delta +0 bytes**, re-confirmed after `fog_lerp` was rewritten. Whole
+  suite re-run, all PASS. Two glyphs (`=`, `>`) were missing while every test stayed green — found by
+  screenshot, which is the same lesson as the lollipop trees. Phase is code-complete, **not closed**:
+  its gate requires a human to actually use the overlay once.
 
 - [[2026-08-04-session-01]] *(Session 04)* — **Handover rewrite, and a phase-by-phase roadmap.**
   Documentation only, ahead of a fresh chat. [[Handover]] rewritten against a fresh build and a
@@ -89,16 +102,20 @@ overlay) next
 | 08-04 | 683,008 | +512 | per-tile hash, ground grain, per-terrain surface marks |
 | 08-04 | 684,544 | +1,536 | layered trees and bushes, two-sub-pass depth sort |
 | 08-04 | 686,592 | +2,048 | rock/reed/flower/crystal/stump props, isometric interact ring |
-| 08-04 | **689,152** | +2,560 | procedural buildings, mix-and-match house parts, `--village-test` |
+| 08-04 | 689,152 | +2,560 | procedural buildings, mix-and-match house parts, `--village-test` |
+| 08-04 | 690,176 | +1,024 | island landform, village clustering, `fill_ellipse`, palette pass |
+| 08-04 | 690,688 | +512 | roof face split (`iso_diamond_lr`), fog rewrite |
+| 08-05 | **690,688** | +0 | bitmap font, `--font-test`, F3 tuning overlay — all self-test-only |
 
 Self-test builds (`wayfarer-selftest.exe`) are not deliverables and are deliberately excluded
 from this table and from the budget gate.
 
 ## Standing risks
 
-- **Nobody has played it by hand.** Every playthrough so far was driven by the autopilot. The
-  interact affordance, reach radius, movement speed and confirm beat have never been judged by a
-  human, and none of that can be verified from here.
+- **One playtest is not QA.** The game has been played by hand exactly once (2026-08-04, "slightly
+  enjoyable"), by the person who wrote the design. The interact affordance, reach radius, movement
+  speed and confirm beat have had one informal look and no more. [[QA Checklist]]'s "runs clean on a
+  machine without dev tools" is a *different* item and is still unchecked.
 - **Pacing may be short.** A shortest-path full clear is 30–82 seconds of walking. Real play with
   fog will be longer by an unknown multiplier. Feeds the region-count question in
   [[Open Decisions]].

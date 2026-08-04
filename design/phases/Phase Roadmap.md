@@ -11,7 +11,7 @@ sits where it does in the sequence, what "done" means, exactly which functions a
 and how it gets verified. Read the phase file before starting its work — don't re-derive the plan
 from memory each session.
 
-**Deadline: 2026-09-04.** Today: 2026-08-04. **Hard stop on art/backbone work: 2026-08-14** — Phase
+**Deadline: 2026-09-04.** Today: 2026-08-05. **Hard stop on art/backbone work: 2026-08-14** — Phase
 11 (ship-critical) begins on that date regardless of how much of Phases 03–10 is finished, because
 [[Overview]] and [[Handover]] both name the judging order as **finished → under size → fun**, and a
 beautiful, unfinished game scores worse than a plain, complete one.
@@ -23,8 +23,8 @@ beautiful, unfinished game scores worse than a plain, complete one.
 | 00 | [[Phase 00 - Foundations]] | **DONE** — `5ffdb38` | — | Memory, skill policy and a provisional Art Bible had to exist before any art judgement call could be made consistently |
 | 01 | [[Phase 01 - Landform]] | **DONE** — `5ffdb38` | 00 | The world's *shape* was cave noise; every later visual decision was being made on top of a landform that couldn't be fixed by shading alone |
 | 02 | [[Phase 02 - Roof And Fog]] | **DONE** — `e5c8942` | 01 | The two defects that most directly caused the user's original complaints ("models are a mess" → roofs; "traversal feels suffocating" → fog), fixed once the ground they sit on was coherent |
-| 03 | [[Phase 03 - Legibility Tools]] | **NEXT** | 02 | Phase 02's colour tuning took three guess-rebuild-screenshot passes. That loop does not scale to the remaining art work and must be replaced before more of it happens |
-| 04 | [[Phase 04 - Traversal]] | Planned | 03 | Screen-aligned input is a simulation change and needs isolation from every render-only phase around it, per [[Agent Prompt]]'s rule on flagging architectural changes |
+| 03 | [[Phase 03 - Legibility Tools]] | **CODE-COMPLETE** — awaiting one human check | 02 | Phase 02's colour tuning took three guess-rebuild-screenshot passes. That loop does not scale to the remaining art work and must be replaced before more of it happens |
+| 04 | [[Phase 04 - Traversal]] | **NEXT** | 03 | Screen-aligned input is a simulation change and needs isolation from every render-only phase around it, per [[Agent Prompt]]'s rule on flagging architectural changes |
 | 05 | [[Phase 05 - Verification Debt]] | Planned | 01, 02 | `--land-test` and `--fog-test` don't exist yet. Cheapest to write while the systems they test are still fresh, and before more is built on top of them |
 | 06 | [[Phase 06 - Water And Bridges]] | Planned | 01, 05 | Needs the island's water body to exist (01) and needs its own reachability extension tested (05's discipline) before rivers can cut through walkable ground |
 | 07 | [[Phase 07 - Asset Seam]] | Planned | 03 | The bake pipeline's output needs to be *judged* against something, which means the tuning overlay (03) should exist first |

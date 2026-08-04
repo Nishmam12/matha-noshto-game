@@ -92,6 +92,25 @@
 #define FOG_TINT_B 86.0f
 #define FOG_KEEP   0.50f /* fraction of luminance contrast surviving at reveal 0 */
 
+/* The F3 tuning overlay adjusts these live, so fog_lerp reads FOG_*_V rather
+ * than the literals directly. In the shipping build FOG_*_V expands straight
+ * back to the constants above and the generated code is byte-identical to
+ * having no overlay at all — the same structural guarantee WAYFARER_PERF
+ * gets, and the reason the +0-byte claim holds without re-deriving it. */
+#if WAYFARER_SELFTEST
+typedef struct { float tint_r, tint_g, tint_b, keep; } FogTune;
+static FogTune fog_tune = { FOG_TINT_R, FOG_TINT_G, FOG_TINT_B, FOG_KEEP };
+#define FOG_R_V fog_tune.tint_r
+#define FOG_G_V fog_tune.tint_g
+#define FOG_B_V fog_tune.tint_b
+#define FOG_K_V fog_tune.keep
+#else
+#define FOG_R_V FOG_TINT_R
+#define FOG_G_V FOG_TINT_G
+#define FOG_B_V FOG_TINT_B
+#define FOG_K_V FOG_KEEP
+#endif
+
 /* --- Isometric projection ------------------------------------------------
  *
  * A 2:1 diamond. Picking ISO_HW == TILE and ISO_HH == TILE/2 is the whole
@@ -1694,6 +1713,134 @@ static void fill_rect(SDL_Surface *s, int x, int y, int w, int h, Uint32 colour)
     }
 }
 
+#if WAYFARER_SELFTEST
+/* ---- Bitmap font ---------------------------------------------------------
+ *
+ * 5x7, hand-rolled and bit-packed rather than a sprite (decision 3, Handover
+ * §6: no SDL_ttf, ever). Covers uppercase, digits and the punctuation a
+ * restoration line or a tuning HUD is likely to need — see design/phases/
+ * Phase 03 - Legibility Tools.md, task 1.
+ *
+ * Gated behind WAYFARER_SELFTEST for now, the same way WAYFARER_PERF is
+ * (Handover §6 decision 8): nothing in the shipping build calls draw_text
+ * yet — wiring it into a real restoration line or HUD is Phase 09/11's job,
+ * not this phase's. This phase only has to prove the tool itself works, via
+ * --font-test and the tuning overlay built on top of it next. Un-gating is a
+ * one-line change once a real caller exists; leaving it gated until then
+ * keeps "the shipping build carries none of this" true by construction
+ * rather than by remembering not to call it.
+ *
+ * FONT_5X7 is FLAT and indexed with an explicit stride rather than declared
+ * as [glyph][row], on purpose: font_selftest's negative control corrupts
+ * that stride to prove its pixel-count checker actually rejects a misread
+ * glyph, not just one nobody looked at closely. */
+#define FONT_W      5
+#define FONT_H      7
+#define FONT_SCALE  2      /* logical px per font px; legible at --scale 1 */
+#define FONT_FIRST  0x20   /* space */
+#define FONT_LAST   0x5F   /* underscore; covers digits, A-Z, punctuation */
+#define FONT_GLYPHS (FONT_LAST - FONT_FIRST + 1)
+#define FONT_STRIDE FONT_H /* rows per glyph in FONT_5X7 — see note above */
+
+#define GR(a,b,c,d,e) (Uint8)(((a)<<4)|((b)<<3)|((c)<<2)|((d)<<1)|(e))
+
+static const Uint8 FONT_5X7[FONT_GLYPHS * FONT_H] = {
+    /* 0x20 ' ' */ 0,0,0,0,0,0,0,
+    /* 0x21 '!' */ GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), 0, GR(0,0,1,0,0),
+    /* 0x22-0x26 unused */ 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0,
+    /* 0x27 apostrophe */ GR(0,0,1,0,0), GR(0,0,1,0,0), 0,0,0,0,0,
+    /* 0x28-0x2B unused */ 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0,
+    /* 0x2C ',' */ 0,0,0,0,0, GR(0,0,1,0,0), GR(0,1,0,0,0),
+    /* 0x2D '-' */ 0,0,0, GR(0,1,1,1,0), 0,0,0,
+    /* 0x2E '.' */ 0,0,0,0,0,0, GR(0,0,1,0,0),
+    /* 0x2F unused */ 0,0,0,0,0,0,0,
+    /* 0x30 '0' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x31 '1' */ GR(0,0,1,0,0), GR(0,1,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,1,1,1,0),
+    /* 0x32 '2' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(0,0,0,0,1), GR(0,0,0,1,0), GR(0,0,1,0,0), GR(0,1,0,0,0), GR(1,1,1,1,1),
+    /* 0x33 '3' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(0,0,0,0,1), GR(0,0,1,1,0), GR(0,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x34 '4' */ GR(0,0,0,1,0), GR(0,0,1,1,0), GR(0,1,0,1,0), GR(1,0,0,1,0), GR(1,1,1,1,1), GR(0,0,0,1,0), GR(0,0,0,1,0),
+    /* 0x35 '5' */ GR(1,1,1,1,1), GR(1,0,0,0,0), GR(1,1,1,1,0), GR(0,0,0,0,1), GR(0,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x36 '6' */ GR(0,0,1,1,0), GR(0,1,0,0,0), GR(1,0,0,0,0), GR(1,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x37 '7' */ GR(1,1,1,1,1), GR(0,0,0,0,1), GR(0,0,0,1,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0),
+    /* 0x38 '8' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x39 '9' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,1), GR(0,0,0,0,1), GR(0,0,0,1,0), GR(0,1,1,0,0),
+    /* 0x3A ':' */ 0,0, GR(0,0,1,0,0), 0, GR(0,0,1,0,0), 0,0,
+    /* 0x3B unused */ 0,0,0,0,0,0,0,
+    /* 0x3C '<' */ 0, GR(0,0,0,1,0), GR(0,0,1,0,0), GR(0,1,0,0,0), GR(0,0,1,0,0), GR(0,0,0,1,0), 0,
+    /* 0x3D '=' */ 0,0, GR(1,1,1,1,1), 0, GR(1,1,1,1,1), 0,0,
+    /* 0x3E '>' */ 0, GR(0,1,0,0,0), GR(0,0,1,0,0), GR(0,0,0,1,0), GR(0,0,1,0,0), GR(0,1,0,0,0), 0,
+    /* 0x3F '?' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(0,0,0,0,1), GR(0,0,0,1,0), GR(0,0,1,0,0), 0, GR(0,0,1,0,0),
+    /* 0x40 unused */ 0,0,0,0,0,0,0,
+    /* 0x41 'A' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,1,1,1,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1),
+    /* 0x42 'B' */ GR(1,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,1,1,1,0),
+    /* 0x43 'C' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x44 'D' */ GR(1,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,1,1,1,0),
+    /* 0x45 'E' */ GR(1,1,1,1,1), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,1,1,1,0), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,1,1,1,1),
+    /* 0x46 'F' */ GR(1,1,1,1,1), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,1,1,1,0), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,0),
+    /* 0x47 'G' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,0), GR(1,0,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x48 'H' */ GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,1,1,1,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1),
+    /* 0x49 'I' */ GR(0,1,1,1,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,1,1,1,0),
+    /* 0x4A 'J' */ GR(0,0,1,1,1), GR(0,0,0,1,0), GR(0,0,0,1,0), GR(0,0,0,1,0), GR(0,0,0,1,0), GR(1,0,0,1,0), GR(0,1,1,0,0),
+    /* 0x4B 'K' */ GR(1,0,0,0,1), GR(1,0,0,1,0), GR(1,0,1,0,0), GR(1,1,0,0,0), GR(1,0,1,0,0), GR(1,0,0,1,0), GR(1,0,0,0,1),
+    /* 0x4C 'L' */ GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,1,1,1,1),
+    /* 0x4D 'M' */ GR(1,0,0,0,1), GR(1,1,0,1,1), GR(1,0,1,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1),
+    /* 0x4E 'N' */ GR(1,0,0,0,1), GR(1,1,0,0,1), GR(1,0,1,0,1), GR(1,0,0,1,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1),
+    /* 0x4F 'O' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x50 'P' */ GR(1,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,1,1,1,0), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,0),
+    /* 0x51 'Q' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,1,0,1), GR(1,0,0,1,0), GR(0,1,1,0,1),
+    /* 0x52 'R' */ GR(1,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,1,1,1,0), GR(1,0,1,0,0), GR(1,0,0,1,0), GR(1,0,0,0,1),
+    /* 0x53 'S' */ GR(0,1,1,1,1), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(0,1,1,1,0), GR(0,0,0,0,1), GR(0,0,0,0,1), GR(1,1,1,1,0),
+    /* 0x54 'T' */ GR(1,1,1,1,1), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0),
+    /* 0x55 'U' */ GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x56 'V' */ GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,0,1,0), GR(0,0,1,0,0),
+    /* 0x57 'W' */ GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,1,0,1), GR(1,0,1,0,1), GR(1,1,0,1,1), GR(1,0,0,0,1),
+    /* 0x58 'X' */ GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,0,1,0), GR(0,0,1,0,0), GR(0,1,0,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1),
+    /* 0x59 'Y' */ GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,0,1,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0),
+    /* 0x5A 'Z' */ GR(1,1,1,1,1), GR(0,0,0,0,1), GR(0,0,0,1,0), GR(0,0,1,0,0), GR(0,1,0,0,0), GR(1,0,0,0,0), GR(1,1,1,1,1),
+    /* 0x5B-0x5F unused */ 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0,
+};
+
+#undef GR
+
+/* idx*stride+row is the deliberately-exposed seam: every caller outside
+ * font_selftest passes FONT_STRIDE; the test corrupts it to prove the
+ * pixel-count checker actually notices. */
+static void draw_glyph(SDL_Surface *fb, int x, int y, int ch, Uint32 colour,
+                       int stride)
+{
+    int idx = ch - FONT_FIRST;
+    int row, col;
+
+    if (idx < 0 || idx >= FONT_GLYPHS)
+        return;
+    for (row = 0; row < FONT_H; row++) {
+        Uint8 bits = FONT_5X7[idx * stride + row];
+        for (col = 0; col < FONT_W; col++)
+            if (bits & (1u << (FONT_W - 1 - col)))
+                fill_rect(fb, x + col * FONT_SCALE, y + row * FONT_SCALE,
+                          FONT_SCALE, FONT_SCALE, colour);
+    }
+}
+
+static void draw_text(SDL_Surface *fb, int x, int y, const char *str, Uint32 colour)
+{
+    int cx = x;
+    for (; *str; str++) {
+        if (*str == '\n') { cx = x; y += (FONT_H + 1) * FONT_SCALE; continue; }
+        draw_glyph(fb, cx, y, (unsigned char)*str, colour, FONT_STRIDE);
+        cx += (FONT_W + 1) * FONT_SCALE;
+    }
+}
+
+/* One font px down-right in solid black, then the real colour on top —
+ * legible over arbitrary terrain without needing a backing panel. */
+static void draw_text_shadow(SDL_Surface *fb, int x, int y, const char *str, Uint32 colour)
+{
+    draw_text(fb, x + FONT_SCALE, y + FONT_SCALE, str, 0);
+    draw_text(fb, x, y, str, colour);
+}
+#endif /* WAYFARER_SELFTEST */
+
 /* Integer nearest-neighbour upscale, logical -> window, centred with the
  * leftover margin cleared. Nearest-neighbour and integer-only on purpose:
  * anything smoother would undo the hard pixel edges this exists to produce.
@@ -1873,9 +2020,9 @@ static Uint32 fog_lerp(SDL_Surface *s, int r, int gr, int b, float reveal)
      * a canopy is four shades and a cliff has two faces, so a blend that
      * flattened luminance would turn every prop into a silhouette. */
     float lum = 0.299f * r + 0.587f * gr + 0.114f * b;
-    float fr = FOG_TINT_R + (lum - FOG_TINT_R) * FOG_KEEP;
-    float fg = FOG_TINT_G + (lum - FOG_TINT_G) * FOG_KEEP;
-    float fb = FOG_TINT_B + (lum - FOG_TINT_B) * FOG_KEEP;
+    float fr = FOG_R_V + (lum - FOG_R_V) * FOG_K_V;
+    float fg = FOG_G_V + (lum - FOG_G_V) * FOG_K_V;
+    float fb = FOG_B_V + (lum - FOG_B_V) * FOG_K_V;
 
     if (reveal < 0.0f) reveal = 0.0f;
     if (reveal > 1.0f) reveal = 1.0f;
@@ -2873,6 +3020,80 @@ static void present(SDL_Window *win, SDL_Surface *fb, SDL_Surface *back)
     }
     SDL_UpdateWindowSurface(win);
 }
+
+#if WAYFARER_SELFTEST
+/* ---- Live tuning overlay (F3) --------------------------------------------
+ *
+ * Exists because Phase 02's fog rewrite took three edit-rebuild-screenshot
+ * passes to settle two constants, and pass 3 only found the real problem
+ * (stone had drifted too light in an earlier commit) because two values were
+ * finally seen side by side. See design/phases/Phase 03 - Legibility Tools.md.
+ *
+ * Scope is render-only by decision, not by omission: every value here feeds
+ * fog_lerp and nothing else, so a keypress shows on the next frame with no
+ * regeneration and no stale state. LAND_ROCK_T and VILLAGE_* were considered
+ * and deliberately left out — they feed world_gen, so adjusting them live
+ * would have to re-run game_init (and with it the reachability verifier) on
+ * every keypress, which is a different tool from this one.
+ *
+ * TAB/-/= rather than arrows because arrows are movement: the whole point is
+ * to tune while walking around, so the overlay must not steal the keys that
+ * put you in front of the thing you are judging. */
+#define TUNE_ROWS 4
+
+static int tune_show;
+static int tune_row;
+
+static void tune_adjust(int dir)
+{
+    switch (tune_row) {
+    case 0:  fog_tune.tint_r += 2.0f * dir; break;
+    case 1:  fog_tune.tint_g += 2.0f * dir; break;
+    case 2:  fog_tune.tint_b += 2.0f * dir; break;
+    default: fog_tune.keep   += 0.02f * dir; break;
+    }
+    if (fog_tune.tint_r <   0.0f) fog_tune.tint_r =   0.0f;
+    if (fog_tune.tint_r > 255.0f) fog_tune.tint_r = 255.0f;
+    if (fog_tune.tint_g <   0.0f) fog_tune.tint_g =   0.0f;
+    if (fog_tune.tint_g > 255.0f) fog_tune.tint_g = 255.0f;
+    if (fog_tune.tint_b <   0.0f) fog_tune.tint_b =   0.0f;
+    if (fog_tune.tint_b > 255.0f) fog_tune.tint_b = 255.0f;
+    if (fog_tune.keep   <   0.0f) fog_tune.keep   =   0.0f;
+    if (fog_tune.keep   >   1.0f) fog_tune.keep   =   1.0f;
+}
+
+static void tune_draw(SDL_Surface *fb)
+{
+    static const char *const label[TUNE_ROWS] = {
+        "FOG TINT R", "FOG TINT G", "FOG TINT B", "FOG KEEP"
+    };
+    const int line_h = (FONT_H + 3) * FONT_SCALE;
+    const int col_x  = 8 + 14 * (FONT_W + 1) * FONT_SCALE;
+    float val[TUNE_ROWS];
+    char buf[32];
+    Uint32 white = SDL_MapRGB(fb->format, 0xff, 0xff, 0xff);
+    Uint32 pick  = SDL_MapRGB(fb->format, 0xff, 0xd0, 0x60);
+    int i, y = 8;
+
+    val[0] = fog_tune.tint_r;
+    val[1] = fog_tune.tint_g;
+    val[2] = fog_tune.tint_b;
+    val[3] = fog_tune.keep;
+
+    draw_text_shadow(fb, 8, y, "TUNE  TAB ROW  - = ADJUST  F3 HIDE", white);
+    y += line_h + FONT_SCALE * 2;
+
+    for (i = 0; i < TUNE_ROWS; i++) {
+        Uint32 c = (i == tune_row) ? pick : white;
+        if (i == tune_row)
+            draw_text_shadow(fb, 8, y, ">", c);
+        draw_text_shadow(fb, 8 + 2 * (FONT_W + 1) * FONT_SCALE, y, label[i], c);
+        SDL_snprintf(buf, sizeof(buf), "%.2f", val[i]);
+        draw_text_shadow(fb, col_x, y, buf, c);
+        y += line_h;
+    }
+}
+#endif /* WAYFARER_SELFTEST */
 
 /* ------------------------------------------------------------- selftest -- */
 #if WAYFARER_SELFTEST
@@ -4049,6 +4270,108 @@ static int iso_selftest(Uint64 seed)
     return fails ? 1 : 0;
 }
 
+static int popcount5(Uint8 bits)
+{
+    int n = 0, i;
+    for (i = 0; i < FONT_W; i++)
+        if (bits & (1u << i))
+            n++;
+    return n;
+}
+
+/* Renders the whole supported charset with the real stride into one canvas
+ * and with an off-by-one stride into a second, then compares each against a
+ * pixel count taken straight from FONT_5X7 — not an eyeball, per Phase 03's
+ * DoD. The negative control passes when the corrupted render's count does
+ * NOT match: that's the proof the checker has teeth, not just a second look
+ * at the path that was already going to pass. */
+static int font_selftest(const char *shot_path)
+{
+    const int cols = 16;
+    const int rows = (FONT_GLYPHS + cols - 1) / cols;
+    const int glyph_w = (FONT_W + 1) * FONT_SCALE;
+    const int glyph_h = (FONT_H + 1) * FONT_SCALE;
+    const int cw = cols * glyph_w;
+    const int ch = rows * glyph_h;
+    char text[FONT_GLYPHS + FONT_GLYPHS / cols + 1];
+    Uint32 *px  = (Uint32 *)SDL_calloc((size_t)cw * ch, sizeof(Uint32));
+    Uint32 *bad = (Uint32 *)SDL_calloc((size_t)cw * ch, sizeof(Uint32));
+    SDL_Surface *s, *sb;
+    Uint32 white;
+    int i, r, n = 0, expect = 0, actual = 0, actual_bad = 0, fails = 0;
+
+    if (!px || !bad) {
+        printf("FAIL  out of memory\n");
+        SDL_free(px); SDL_free(bad);
+        return 1;
+    }
+    s  = SDL_CreateRGBSurfaceWithFormatFrom(px,  cw, ch, 32, cw * 4, SDL_PIXELFORMAT_RGB888);
+    sb = SDL_CreateRGBSurfaceWithFormatFrom(bad, cw, ch, 32, cw * 4, SDL_PIXELFORMAT_RGB888);
+    if (!s || !sb) {
+        printf("FAIL  SDL_CreateRGBSurfaceWithFormatFrom\n");
+        if (s) SDL_FreeSurface(s);
+        if (sb) SDL_FreeSurface(sb);
+        SDL_free(px); SDL_free(bad);
+        return 1;
+    }
+    white = SDL_MapRGB(s->format, 0xff, 0xff, 0xff);
+
+    printf("=== bitmap font, %d glyphs, %dx%d canvas ===\n", FONT_GLYPHS, cw, ch);
+
+    /* Good render goes through the real public API (draw_text_shadow), not
+     * draw_glyph directly — this is the path a HUD would actually call.
+     * The reference count comes straight from FONT_5X7, independent of any
+     * drawing code. */
+    for (i = 0; i < FONT_GLYPHS; i++) {
+        if (i && i % cols == 0)
+            text[n++] = '\n';
+        text[n++] = (char)(FONT_FIRST + i);
+        for (r = 0; r < FONT_H; r++)
+            expect += popcount5(FONT_5X7[i * FONT_STRIDE + r]);
+    }
+    text[n] = '\0';
+    draw_text_shadow(s, 0, 0, text, white);
+
+    /* Same glyphs, same grid positions, but one row misaligned via a
+     * corrupted stride. draw_text has no stride knob, so this goes through
+     * draw_glyph directly, same as font_selftest's own comment above says. */
+    for (i = 0; i < FONT_GLYPHS; i++) {
+        int gx = (i % cols) * glyph_w;
+        int gy = (i / cols) * glyph_h;
+        draw_glyph(sb, gx, gy, FONT_FIRST + i, white, FONT_STRIDE - 1);
+    }
+
+    /* Each font px is a FONT_SCALE x FONT_SCALE block on the canvas. Counting
+     * exactly `white` rather than non-zero also keeps draw_text_shadow's black
+     * underlay out of the number — it is drawn first and only survives where
+     * the glyph does not cover it. */
+    expect *= FONT_SCALE * FONT_SCALE;
+    for (i = 0; i < cw * ch; i++) {
+        if (px[i]  == white) actual++;
+        if (bad[i] == white) actual_bad++;
+    }
+
+    printf("expected %d lit px from the glyph table, rendered %d: %s\n",
+           expect, actual, expect == actual ? "PASS" : "FAIL");
+    if (expect != actual) fails++;
+
+    printf("negative control (stride off by one): rendered %d instead of %d: %s\n",
+           actual_bad, expect, actual_bad != expect ? "PASS (caught)" : "FAIL (missed)");
+    if (actual_bad == expect) fails++;
+
+    if (shot_path) {
+        SDL_SaveBMP(s, shot_path);
+        printf("wrote %s\n", shot_path);
+    }
+
+    SDL_FreeSurface(s);
+    SDL_FreeSurface(sb);
+    SDL_free(px);
+    SDL_free(bad);
+    printf("%s\n", fails ? "FAIL" : "PASS");
+    return fails;
+}
+
 /* Structural invariants for building placement.
  *
  * Absolute, not relative — design/Toolchain Setup.md records that every
@@ -4314,6 +4637,9 @@ int main(int argc, char **argv)
     /* Start with F1 already held down, so a scripted screenshot can show
      * terrain and elevation without fog hiding most of it. */
     overlay = arg_flag(argc, argv, "--overlay");
+    /* Same idea for F3, so the tuning HUD can be screenshotted over real
+     * fogged terrain without a human at the keyboard. */
+    tune_show = arg_flag(argc, argv, "--tune");
 #endif
 
 #if WAYFARER_SELFTEST
@@ -4325,6 +4651,8 @@ int main(int argc, char **argv)
             return rng_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
         if (arg_flag(argc, argv, "--iso-test"))
             return iso_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
+        if (arg_flag(argc, argv, "--font-test"))
+            return font_selftest(arg_val(argc, argv, "--shot"));
         if (arg_flag(argc, argv, "--village-test")) {
             int n = arg_int(argc, argv, "--seeds", 20);
             int base = arg_int(argc, argv, "--seed", 1);
@@ -4483,6 +4811,23 @@ int main(int argc, char **argv)
                     grid = !grid;
                     dirty = 1;
                     break;
+#if WAYFARER_SELFTEST
+                case SDLK_F3: /* live tuning overlay */
+                    tune_show = !tune_show;
+                    break;
+                case SDLK_TAB:
+                    if (tune_show)
+                        tune_row = (tune_row + 1) % TUNE_ROWS;
+                    break;
+                case SDLK_MINUS:
+                    if (tune_show)
+                        tune_adjust(-1);
+                    break;
+                case SDLK_EQUALS:
+                    if (tune_show)
+                        tune_adjust(1);
+                    break;
+#endif
                 case SDLK_F11:
                     /* Borderless fullscreen. On a display that is tall enough
                      * for the doubled image but not for the window chrome as
@@ -4558,6 +4903,13 @@ int main(int argc, char **argv)
             camera_follow(&game, draw->w, draw->h);
             render(draw, &game, overlay);
         }
+#if WAYFARER_SELFTEST
+        /* After render, before present: the overlay reads as a HUD over the
+         * world, which is also the only honest test of whether the shadowed
+         * text stays legible over arbitrary terrain. */
+        if (tune_show)
+            tune_draw(draw);
+#endif
 #if WAYFARER_PERF
         t_b = SDL_GetPerformanceCounter();
 #endif
