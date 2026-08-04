@@ -1595,6 +1595,22 @@ static Uint32 fog_lerp(SDL_Surface *s, int r, int gr, int b, float reveal)
                       (Uint8)(fb + ((float)b - fb) * reveal));
 }
 
+/* A diamond outline lying flat on the ground plane, in the same 2:1 ratio as
+ * the tiles. An axis-aligned box read as a rectangle floating in the air; a
+ * diamond reads as painted on the floor, which is what a reach indicator is. */
+static void iso_ring(SDL_Surface *fb, int cx, int cy, int rx, Uint32 c)
+{
+    int i;
+
+    for (i = 0; i <= rx; i++) {
+        int dy = i / 2; /* the 2:1 slope, matching ISO_HH/ISO_HW exactly */
+        fill_rect(fb, cx - rx + i, cy - dy, 1, 2, c);
+        fill_rect(fb, cx + rx - i, cy - dy, 1, 2, c);
+        fill_rect(fb, cx - rx + i, cy + dy, 1, 2, c);
+        fill_rect(fb, cx + rx - i, cy + dy, 1, 2, c);
+    }
+}
+
 /* Scatter a few marks across a tile's top face — grass tufts, pebbles, cracks,
  * strata. This is what stops a field of one terrain reading as a single flat
  * colour, and it is the cheapest detail in the renderer by a wide margin.
@@ -1680,7 +1696,22 @@ static const Uint8 trunk_pal[4][3][3] = {
 static const Uint8 lobe_w[LOBES] = { 56, 80, 95, 100, 86, 60 };
 static const Uint8 lobe_s[LOBES] = { 3, 3, 2, 2, 1, 0 };
 
-enum { PROP_NONE = 0, PROP_TREE, PROP_BUSH };
+/* Rock, crystal and reed palettes. Three shades each is the minimum that reads
+ * as a lit form rather than a silhouette, and the maximum worth spending on
+ * something a few pixels across. */
+static const Uint8 rock_pal[3][3][3] = {
+    { {0x3e,0x38,0x32},{0x5c,0x54,0x4a},{0x7a,0x72,0x66} },
+    { {0x44,0x3c,0x36},{0x64,0x5a,0x50},{0x86,0x7c,0x70} },
+    { {0x38,0x36,0x36},{0x54,0x52,0x52},{0x72,0x70,0x70} }
+};
+static const Uint8 crystal_pal[3][3][3] = {
+    { {0x4a,0x2e,0x82},{0x7a,0x50,0xc0},{0xb4,0x8e,0xf0} },
+    { {0x2e,0x4a,0x82},{0x50,0x7a,0xc0},{0x8e,0xb4,0xf0} },
+    { {0x62,0x2e,0x70},{0x96,0x50,0xa8},{0xc8,0x8e,0xd8} }
+};
+
+enum { PROP_NONE = 0, PROP_TREE, PROP_BUSH, PROP_ROCK, PROP_REED,
+       PROP_FLOWER, PROP_CRYSTAL, PROP_STUMP };
 
 /* cx is the tile centre in screen x; by is the ground under it, already lifted
  * by the tile's height, so the tree stands ON the tile rather than through it. */
@@ -1730,8 +1761,95 @@ static void draw_bush(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
               fog_lerp(fb, cp[3][0], cp[3][1], cp[3][2], rev));
 }
 
-/* Which prop, if any, stands on this tile. Presence is decided before shape, so
- * changing a tree's jitter never moves a tree. */
+/* A boulder: three stacked slabs, widest at the base, lit from the same
+ * up-left direction as everything else. */
+static void draw_rock(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
+{
+    const Uint8 (*p)[3] = rock_pal[(h >> 13) % 3];
+    int rw = 12 + (int)((h >> 20) & 3) * 3;
+    int rh = 7 + (int)((h >> 22) & 3) * 2;
+
+    fill_rect(fb, cx - rw / 2, by - rh, rw, rh,
+              fog_lerp(fb, p[1][0], p[1][1], p[1][2], rev));
+    fill_rect(fb, cx - rw / 2, by - rh, rw / 2, rh,
+              fog_lerp(fb, p[0][0], p[0][1], p[0][2], rev));
+    fill_rect(fb, cx - rw / 4, by - rh - 3, rw * 2 / 3, 4,
+              fog_lerp(fb, p[2][0], p[2][1], p[2][2], rev));
+}
+
+/* Reeds: a few thin blades of differing height. Deliberately spindly — this is
+ * what tells you the blue tile is shallow water rather than a hole. */
+static void draw_reed(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
+{
+    Uint32 dark = fog_lerp(fb, 0x2c, 0x54, 0x38, rev);
+    Uint32 lit  = fog_lerp(fb, 0x54, 0x84, 0x50, rev);
+    int i;
+
+    for (i = 0; i < 5; i++) {
+        int ox = -8 + i * 4 + (int)((h >> (i * 3)) & 3);
+        int bh = 9 + (int)((h >> (i * 3 + 2)) & 7);
+        fill_rect(fb, cx + ox, by - bh, 1, bh, (i & 1) ? lit : dark);
+    }
+}
+
+/* A clump of blooms on stems. Four hue choices, so a meadow has colour without
+ * a fourth palette table. */
+static void draw_flower(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
+{
+    static const Uint8 bloom[4][3] = {
+        { 0xe8, 0xd8, 0x60 }, { 0xe0, 0x78, 0x90 },
+        { 0xd8, 0xe8, 0xf0 }, { 0xc8, 0x90, 0xe8 }
+    };
+    const Uint8 *b = bloom[(h >> 13) & 3];
+    Uint32 stem = fog_lerp(fb, 0x38, 0x70, 0x3c, rev);
+    Uint32 head = fog_lerp(fb, b[0], b[1], b[2], rev);
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        int ox = -5 + i * 5 + (int)((h >> (i * 4)) & 3);
+        int bh = 5 + (int)((h >> (i * 4 + 2)) & 3);
+        fill_rect(fb, cx + ox, by - bh, 1, bh, stem);
+        fill_rect(fb, cx + ox - 1, by - bh - 2, 3, 2, head);
+    }
+}
+
+/* A memory crystal: a tapering shard, brightest at the tip. The one prop in the
+ * set that is meant to look like it is emitting rather than reflecting. */
+static void draw_crystal(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
+{
+    const Uint8 (*p)[3] = crystal_pal[(h >> 13) % 3];
+    int ch = 14 + (int)((h >> 20) & 3) * 3;
+    int i, bands = 4;
+
+    for (i = 0; i < bands; i++) {
+        int w = 8 - i * 2;
+        int s = (i * 3) / bands;
+        if (w < 2) w = 2;
+        fill_rect(fb, cx - w / 2, by - (ch * (i + 1)) / bands,
+                  w, ch / bands + 1,
+                  fog_lerp(fb, p[s][0], p[s][1], p[s][2], rev));
+    }
+    fill_rect(fb, cx - 1, by - ch - 2, 2, 3,
+              fog_lerp(fb, 0xf0, 0xe8, 0xff, rev));
+}
+
+/* A cut stump with a pale ring, and the sawn face catching the light. */
+static void draw_stump(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
+{
+    const Uint8 (*tp)[3] = trunk_pal[(h >> 16) & 3];
+    int sw = 8 + (int)((h >> 20) & 3);
+    int sh = 5 + (int)((h >> 22) & 1) * 2;
+
+    fill_rect(fb, cx - sw / 2, by - sh, sw, sh,
+              fog_lerp(fb, tp[0][0], tp[0][1], tp[0][2], rev));
+    fill_rect(fb, cx - sw / 2, by - sh, sw / 2, sh,
+              fog_lerp(fb, tp[1][0], tp[1][1], tp[1][2], rev));
+    fill_rect(fb, cx - sw / 2, by - sh - 2, sw, 3,
+              fog_lerp(fb, tp[2][0], tp[2][1], tp[2][2], rev));
+}
+
+/* Which prop, if any, stands on this tile. Presence is decided from its own bit
+ * field, before shape, so retuning a tree's jitter never moves a tree. */
 static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
 {
     Uint32 h = tile_hash(seed, tx, ty);
@@ -1739,8 +1857,6 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
     int    roll = (int)((h >> 8) & 31);
 
     *hout = h;
-    if (w->solid[ty][tx])
-        return PROP_NONE;
 
     /* Never stand a tall prop where the tile in front is far higher: the band
      * sweep draws that neighbour afterwards, but the prop is tall enough to
@@ -1750,11 +1866,37 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
         height_at(w, tx, ty + 1) - height_at(w, tx, ty) >= 24)
         return PROP_NONE;
 
-    rg = w->region[ty][tx];
-    if (rg != REGION_NONE && w->regions[rg].terrain != TERRAIN_NORMAL)
-        return PROP_NONE; /* water, ledges and dark ground get their own props */
+    /* Boulders on the tops of cliffs, sparsely — enough to break the bare
+     * plateau silhouette without turning it into scree. */
+    if (w->solid[ty][tx])
+        return (roll < 3) ? PROP_ROCK : PROP_NONE;
 
-    return (roll < 7) ? PROP_TREE : (roll < 12) ? PROP_BUSH : PROP_NONE;
+    rg = w->region[ty][tx];
+    switch (rg == REGION_NONE ? TERRAIN_NORMAL : w->regions[rg].terrain) {
+    case TERRAIN_WATER:  return (roll < 6) ? PROP_REED    : PROP_NONE;
+    case TERRAIN_DARK:   return (roll < 7) ? PROP_CRYSTAL : PROP_NONE;
+    case TERRAIN_LEDGE:  return (roll < 4) ? PROP_ROCK    : PROP_NONE;
+    default:
+        return (roll <  7) ? PROP_TREE
+             : (roll < 12) ? PROP_BUSH
+             : (roll < 14) ? PROP_STUMP
+             : (roll < 19) ? PROP_FLOWER : PROP_NONE;
+    }
+}
+
+/* Single dispatch, so the render loop never grows a switch of its own. */
+static void draw_prop(SDL_Surface *fb, int kind, int cx, int by, Uint32 h, float rev)
+{
+    switch (kind) {
+    case PROP_TREE:    draw_tree(fb, cx, by, h, rev);    break;
+    case PROP_BUSH:    draw_bush(fb, cx, by, h, rev);    break;
+    case PROP_ROCK:    draw_rock(fb, cx, by, h, rev);    break;
+    case PROP_REED:    draw_reed(fb, cx, by, h, rev);    break;
+    case PROP_FLOWER:  draw_flower(fb, cx, by, h, rev);  break;
+    case PROP_CRYSTAL: draw_crystal(fb, cx, by, h, rev); break;
+    case PROP_STUMP:   draw_stump(fb, cx, by, h, rev);   break;
+    default: break;
+    }
 }
 
 /* How much of a tile's colour reaches the screen: sight shows shape,
@@ -1910,10 +2052,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             /* The tile centre projects to (ax, ay + ISO_HH); lifting by the
              * tile's height puts the prop's feet on the surface. */
             by = ay + ISO_HH - g->w.height[ty][tx];
-            if (kind == PROP_TREE)
-                draw_tree(fb, ax, by, hash, rev);
-            else
-                draw_bush(fb, ax, by, hash, rev);
+            draw_prop(fb, kind, ax, by, hash, rev);
         }
 
         /* Entities standing in this band. Scanned per band rather than per tile
@@ -1969,16 +2108,13 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             px -= g->cam_x;
             py -= g->cam_y;
 
-            /* A ring under the player when something is close enough to
-             * restore — the only affordance telling you the interact key will
-             * do anything. Still an axis-aligned box; a diamond is polish. */
-            if (entity_in_reach(g) >= 0) {
-                Uint32 c = SDL_MapRGB(fb->format, 0xff, 0xf0, 0xc0);
-                fill_rect(fb, px - 22, py - 26, 44, 4, c);
-                fill_rect(fb, px - 22, py + 22, 44, 4, c);
-                fill_rect(fb, px - 26, py - 22, 4, 44, c);
-                fill_rect(fb, px + 22, py - 22, 4, 44, c);
-            }
+            /* A ring on the ground under the player when something is close
+             * enough to restore — the only affordance telling you the interact
+             * key will do anything. Drawn at the feet, not the centre, so it
+             * reads as lying on the tile. */
+            if (entity_in_reach(g) >= 0)
+                iso_ring(fb, px, py + PLAYER_SIZE / 2, 26,
+                         SDL_MapRGB(fb->format, 0xff, 0xf0, 0xc0));
             /* The camera deliberately is NOT lifted by height: following the
              * visual height would jerk the whole view the instant you step onto
              * a ledge, where letting the player ride up within the frame reads
