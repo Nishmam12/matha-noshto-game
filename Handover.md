@@ -1,7 +1,7 @@
 ---
 tags: [process, handover, wayfarer]
 updated: 2026-08-04
-exe_size_bytes: 689152
+exe_size_bytes: 690688
 ---
 
 # Handover — Wayfarer
@@ -11,7 +11,9 @@ what exists, how to build it, what was decided and why, what is verified, and ev
 already cost time once.
 
 Hub: [[Wayfarer MOC]] · Rules of engagement: [[Agent Prompt]] · Game plan: [[Overview]] ·
-Build environment: [[Toolchain Setup]] · Renderer: [[Isometric Rendering]] · Running log: [[INDEX]]
+Visual identity (provisional): [[Art Bible]] · Build environment: [[Toolchain Setup]] ·
+Renderer: [[Isometric Rendering]] · **Forward roadmap, phase by phase:** [[Phase Roadmap]] ·
+Running log: [[INDEX]]
 
 ---
 
@@ -32,14 +34,37 @@ back that opens terrain you couldn't cross before → explore further.
 | Ship target (safety margin) | **≤ 1,440,000 bytes** |
 | Flag-and-stop threshold | 1,200,000 bytes |
 | Platform | Standalone Windows `.exe`. No installer, no runtime, no shipped DLLs beyond OS-provided |
-| Assets | **Zero external files.** No PNG/WAV/TTF/OGG/MP3/GLB. Everything procedural |
+| Assets | **Zero external files.** No PNG/WAV/TTF/OGG/MP3/GLB. Everything procedural, or baked into a compiled-in header — see [[Art Bible]] §8 |
 | Excluded libraries | SDL_image, SDL_ttf, SDL_mixer — rendering, fonts and audio are all hand-rolled |
 | Judging order | **finished → under size → fun** |
 
 "1.44 MB" has three definitions in common use. We build against the smallest.
 
-> **The size constraint is not the binding one, and has never been.** See §9. Plan against
-> *authoring effort*, which is the real limit, not bytes.
+> **The size constraint is not the binding one, and has never been.** The entire isometric pivot —
+> projection, elevation, upscaling, surface detail, seven kinds of procedural prop, mix-and-match
+> buildings, an island generator, village clustering, roof face shading and a fog rewrite — has cost
+> **21,536 bytes** against 785,408 free. All game logic ever written for this project is a rounding
+> error next to SDL2's ~664 KB. **Plan against *authoring effort*, and against *judgement* — the
+> renderer being byte-cheap does not make it look right on the first attempt, and it hasn't yet.**
+
+### The project's framing — read this before touching anything
+
+**This is a backbone build.** The user is building the playable foundation while teammates design
+the game in parallel; they will hand over a real map, characters and assets later. Current art is
+**provisional** — good enough to keep only if it turns out good enough. Two consequences that shape
+every decision below:
+
+1. **Art goes behind a swap seam**, not fused into the renderer, so a teammate's asset replaces a
+   named entry point rather than requiring a renderer rewrite. See [[Art Bible]] §8 and
+   [[Phase Roadmap]] Phase 07.
+2. **Zero external files still applies to the team's art.** They cannot hand over a PNG or a GLB and
+   have it load at runtime. It has to be baked into a compiled-in C header at build time. Tell them
+   this early — an untracked **`tree.glb`** (36 KB, binary glTF) has been sitting at the vault root
+   since before this framing was agreed, and it is exactly the mistake this note exists to prevent.
+   It can be a *bake input* if someone renders it to sprite frames first. It can never ship as-is.
+
+Full memory of this framing, plus which Claude skills apply to this project and which explicitly do
+not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\memory\` — see §10.
 
 ---
 
@@ -47,39 +72,60 @@ back that opens terrain you couldn't cross before → explore further.
 
 | | |
 |---|---|
-| **`build\wayfarer.exe`** | **689,152 bytes** — 750,848 under the ship target |
-| `build\wayfarer-selftest.exe` | 715,776 bytes — **not a deliverable**, never shipped |
-| `src\main.c` | 3,934 lines, single translation unit |
+| **`build\wayfarer.exe`** | **690,688 bytes** — 749,312 under the ship target |
+| `build\wayfarer-selftest.exe` | 717,312 bytes — **not a deliverable**, never shipped |
+| `src\main.c` | 4,229 lines, single translation unit |
 | Warnings | zero, under `-Wall -Wextra` |
-| Plan progress | Weeks 1–3 complete. **An isometric renderer pivot was inserted before Week 4.** Audio and UI are still untouched |
+| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Two art/traversal sessions landed on top of it** — see [[Phase Roadmap]] for what's done and what's next. Audio, font, save and UI are all still untouched |
 
 ### What actually works right now
 
-- Procedural world (80×45 tiles at 32 px), seeded, regenerable in-game with **R**
+- Procedural **island**, not a cave: coastline, ocean with a stepped sea floor, inland rock
+  outcrops, 80×45 tiles at 32 px, seeded, regenerable in-game with **R**. See [[Phase Roadmap]]
+  Phase 01
 - **Isometric 2.5D renderer**: 2:1 diamonds, elevation with cliff faces, band-sweep depth sort
-- **Procedural scenery**: layered trees (8,192 variants), bushes, rocks, reeds, flowers, crystals,
-  stumps — all from a per-tile hash, none stored
-- **Procedural buildings**: 22 per world on average, 640,000 mix-and-match combinations
+- **Procedural scenery**: layered trees with round `fill_ellipse` canopies (not the earlier
+  axis-aligned lollipops), bushes, rocks, reeds, flowers, crystals, stumps — all from a per-tile
+  hash, none stored. Every prop casts a ground-contact shadow
+- **Procedural buildings**: clustered into up to 3 village sites rather than scattered over every
+  open plot, mean ~12 per world, 640,000 mix-and-match combinations. Roofs now have a left/right
+  face split (`iso_diamond_lr`) so they read as pitched rather than as flat plates
+- **Fog rewrite**: unrevealed land resolves toward a light cool haze that keeps a fixed fraction of
+  its own luminance contrast, rather than crushing to a dark, cave-like grey. This — not the
+  camera — was the cause of "traversal feels suffocating"; see [[Fog and Reveal]]
+- **A first palette pass**: sage grass, a value-corrected stone ramp, a stepped water depth ramp,
+  and two dead-reading autumn tree palettes deleted. See [[Art Bible]] for the full provisional
+  system, most of which is not yet applied everywhere
 - 960×540 logical framebuffer, integer-scaled into the window; F11 borderless fullscreen
 - Region graph: 16 connected regions with terrain types and ability gates
 - Continuous movement, swept AABB tile collision, fixed 60 Hz simulation
 - Ability gating enforced in collision (Wade / Climb / Kindle)
-- Fog-to-colour reveal: sight shows shape, restoration returns colour permanently
-- 14 fragments + 5 Found Souls placed with a **proven** reachability guarantee
+- 14 fragments + 5 Found Souls placed with a **proven** reachability guarantee — re-*run*, not
+  re-argued, after every generation change so far, because collision only ever reads `solid` and
+  `regions[].terrain`
 - Restoration loop, Found Soul states, win condition, 4-stage world-growth read
-- Restore confirm beat (audio), real-time safe
+- Restore confirm beat (audio), real-time safe: 0.141 ms worst case against a 21.333 ms deadline
 - Debug overlay, 12-seed grid view, title-bar stats, render instrumentation
+- **The game has been played by a human being, once**, and read as "slightly enjoyable" — see §8
 
 ### What does NOT exist yet
 
-- **Any music.** The layered synth is Week 4. Only the confirm beat exists
-- **Any text on screen.** No bitmap font until Week 5 — including Found Soul restoration lines
-- **Save/load** — Week 5
+- **Any music.** The layered synth is still ahead. Only the confirm beat exists
+- **Any text on screen.** No bitmap font — including Found Soul restoration lines. This is now the
+  top of the queue: see [[Phase Roadmap]] Phase 03, which frames the font as unblocking a live
+  tuning overlay, not just as UI
+- **Save/load**
 - **Any animation at all.** Nothing sways, shimmers, bobs or smokes. The world is static
 - **The player is still a 24×24 orange square.** No layered character, no walk cycle, no facing
-- **Input is still world-aligned.** `W` travels up-*right* on screen, not up
-- **Buildings do not respond to restoration.** The ruin→whole rebuild is designed but not built,
-  and it is the single highest-value item remaining (see §11)
+- **Input is still world-aligned.** `W` travels up-*right* on screen, not up. See [[Phase Roadmap]]
+  Phase 04
+- **The camera still snaps to the player with no easing or deadzone.**
+- **Buildings do not respond to restoration.** The ruin→whole rebuild is designed but not built
+- **No rivers, no bridges, no waterfalls.** Water is currently ocean only, with no inland flow
+- **No worn paths between buildings.** The village reads as buildings-in-a-field, not as inhabited
+- **No `--land-test` or `--fog-test`.** Both the island generator and the fog rewrite shipped without
+  a checker of their own, which breaks this project's own "every checker needs a negative control"
+  rule. This is tracked as rule debt, not forgotten — [[Phase Roadmap]] Phase 05
 - Idle sway/breathe for Found Souls
 - Audio-layer-per-restore (the hook is wired; the layers are not)
 
@@ -88,31 +134,32 @@ back that opens terrain you couldn't cross before → explore further.
 Remote: **`https://github.com/Nishmam12/matha-noshto-game`** — private, branch `main`.
 
 ```
+e5c8942  Roof face shading, and rewrite the fog so distance reads as haze
+5ffdb38  Island landform, clustered villages, and rounded foliage
+545598f  Handover rewritten for the isometric build, plus devlog and INDEX catch-up
 d622ed0  docs: record the isometric decision and supersede the flat-geometry notes
 f96de1b  Buildings: mix-and-match houses, verified by the existing reachability proof
 297b390  Remaining props, and an isometric interact ring
 b63a4ec  devlog: session 01 of the isometric pivot, and INDEX size history
 5f664c3  Layered procedural trees and bushes, and a real depth sort
-1df01f7  Surface detail: per-tile hash, ground grain, terrain marks
-cf84716  Slice 3: 960x540 logical, integer-scaled into the window
-6f187e8  Slice 2: elevation -- cliff faces, terraces, sunken water
-af1f928  Slice 1: 32px tiles and the isometric projection
-18c7c49  Slice 0: render instrumentation, and the baseline it produced
-22a4108  v0.3.0: Region graph, reachability invariant, restoration loop
 ```
 
 **Everything is committed.** Nothing is pushed to the remote yet — check before assuming.
 
 **Do not add `Co-Authored-By` trailers to commits.** This was asked for explicitly and one had to
-be stripped and force-pushed.
+be stripped and force-pushed once already. It is recorded in persistent memory (§10) so it should
+never need saying again.
 
 `build/` and `.obsidian/` are gitignored. `wayfarer.exe` is therefore not in the repo — attach it
 to a GitHub Release if a playable download is wanted.
 
-> Two files at the vault root that nobody in the build created: an empty `devlog.md`, and an
-> untracked **`tree.glb`** (a binary glTF 3D model). The `.glb` in particular is worth raising —
-> **no external asset file can ship**, so if someone is planning to load it, that plan needs to
-> change. Both left alone rather than deleted without asking.
+> Two files at the vault root that nobody in any build session created: an empty `devlog.md`, and an
+> untracked **`tree.glb`**. See §1 above — the `.glb` is not a hypothetical risk, it is the exact
+> shape of mistake the asset-bake decision exists to prevent. Both left alone rather than deleted
+> without asking.
+
+> `.claude/` also appears untracked in `git status`. That is this session's own harness state
+> (plugin/skill config), not project content — leave it alone; it is not part of the game.
 
 ---
 
@@ -142,6 +189,12 @@ free. Full setup commands are in [`README.md`](README.md).
 `build.ps1` **exits non-zero if the binary goes over budget** — the size limit is enforced by the
 build, not by remembering to check. Self-test builds are excluded from budget tracking.
 
+**New trap this session, worth its own line even though §7 also has it:** if `wayfarer.exe` is
+running (someone is playing it), `build.ps1`'s link step fails with `Permission denied` — not a
+build error, a file lock. `Get-Process -Name wayfarer` tells you. Close the game, rebuild. Do not
+assume a failed release link means the code is wrong if the self-test build succeeded moments
+earlier from the same source.
+
 ---
 
 ## 4. The test suite — run this before believing anything
@@ -150,8 +203,8 @@ build, not by remembering to check. Self-test builds are excluded from budget tr
 .\build.ps1 -SelfTest
 $e = ".\build\wayfarer-selftest.exe"
 
-& $e --iso-test                             # NEW: rasteriser exactness, seams, depth, upscale
-& $e --village-test --seeds 30 --seed 1     # NEW: building placement invariants
+& $e --iso-test                             # rasteriser exactness, seams, depth, upscale
+& $e --village-test --seeds 30 --seed 1     # building placement invariants
 & $e --rng-test    --seed 1                 # PRNG: reproducibility, stream independence, bias
 & $e --move-test   --seeds 20 --seed 1      # collision, no drift, determinism, diagonal speed
 & $e --region-test --seeds 30 --seed 1      # region graph structure + coverage
@@ -161,29 +214,30 @@ $e = ".\build\wayfarer-selftest.exe"
 & $e --audio-test 3000 --sfx                # callback timing under restore-beat load
 & $e --autoplay 20000 --seed 3              # windowed autopilot; watch restoration happen
 & $e --input-test 4000 --seed 5             # real keyboard path, reports position delta
-& $e --frames 400 --perf --seed 4           # NEW: render/present/sleep ms, px and calls per frame
-& $e --frames 60 --seed 4 --overlay --shot out.bmp   # NEW: scripted screenshot
+& $e --frames 400 --perf --seed 4           # render/present/sleep ms, px and calls per frame
+& $e --frames 60 --seed 4 --overlay --shot out.bmp   # scripted screenshot — see the recipe in §10
 ```
 
-**All currently pass.** Last full run, 2026-08-04:
+**All currently pass.** Last full run, 2026-08-04, after commit `e5c8942`:
 
 ```
-iso     : PASS  exact tiling (65536 == 65536), 0 seam px, 0 mis-owned px,
-                upscale x1/x2/x3 exact with margins cleared
-          negative control (1px tile offset rejected): PASS  [63800 vs 65536]
-village : PASS (0 failures across 30 seeds), mean 22 buildings per world
-          negative controls (non-solid footprint, walled-in building): both PASS
+iso     : PASS  0 px owned by the wrong tile under elevation; upscale x1/x2/x3 exact
+village : PASS (0 failures across 30 seeds), mean 12 buildings per world (clustered, not
+                scattered — see Phase 01). Both negative controls fire
 rng     : PASS (0 checks failed)
-move    : PASS (0 failures across 20 seeds); straight and diagonal both 220.00 px/60 ticks
+move    : PASS (0 failures across 20 seeds); direction-independent speed confirmed
 region  : PASS (0 failures across 30 seeds)
-reach   : PASS (0 failures across 50 seeds)
-          negative control (verifier rejects unwinnable worlds): PASS
-          gating relaxed on 0 of 50 seeds
+reach   : PASS (0 failures across 50 seeds); negative control PASS; gating relaxed on 0/50
 gating  : PASS (0 failures across 30 seeds)
-play    : PASS (0 seeds could not be completed)
-audio   : worst case 0.141 ms   partial writes 0   NaN 0   out of range 0
-perf    : render 0.859 ms  present 1.259 ms  3.27 M px/frame  74,835 calls/frame
+play    : PASS (0 seeds could not be completed) — still 50/50 after the landform rewrite
+audio   : worst case 0.141 ms of a 21.333 ms deadline; 0 partial writes, 0 NaN, 0 out of range
+perf    : render 0.749–0.844 ms, present ~1.3–1.4 ms, ~72,445 calls/frame, ~59.6–60.4 fps
 ```
+
+**Rule debt, stated plainly:** the island generator (Phase 01) and the fog rewrite (Phase 02) both
+shipped without a checker of their own — `--land-test` and `--fog-test` do not exist. Everything
+above passing means those changes didn't *break* anything the existing suite watches; it does not
+mean the new systems have their own verified invariants yet. See [[Phase Roadmap]] Phase 05.
 
 ### The game itself
 
@@ -196,171 +250,152 @@ perf    : render 0.859 ms  present 1.259 ms  3.27 M px/frame  74,835 calls/frame
 **window title** (there is no font yet). `--frames N` runs exactly N frames then exits 0.
 `--scale N` forces the window scale.
 
-> **`W` moves up-*right*, not up.** Input is still world-aligned. This is a known open decision,
-> not a bug — see §9.
+> **`W` moves up-*right*, not up.** Input is still world-aligned. Known, not a bug — [[Phase Roadmap]]
+> Phase 04.
 
 ---
 
 ## 5. Code map — `src/main.c`, in order
 
+Line numbers below are current as of `e5c8942` (2026-08-04). They will drift with every edit —
+trust the grep, not the memory of this table, on your next session.
+
 | Line | Section | What lives there |
 |---|---|---|
 | 23 | Tunables | All `#define`s. Everything designers would touch is here |
-| 83 | **Isometric projection** | `ISO_*`, `ELEV_*`, `FACE_*`, void colour |
-| 150 | RNG | PCG32, three independent streams (terrain / entities / audio) |
-| 243 | Audio | Callback, device open, restore confirm beat |
-| 374 | Args | `arg_int`, `arg_flag`, `arg_val` |
-| 400 | World | Region/World/Scratch/**Building** structs, terrain enums |
-| 406 | Regions | World gen, flood fill, BFS partition, adjacency |
-| 596 | **Building placement** | `place_buildings` — runs *before* the reachability verifier |
-| 815 | Reachability | `regions_reachable`, `world_solvable`, entity placement, generate-then-verify |
-| 990 | Movement | `tile_blocked`, `player_blocked`, `move_axis`, `sim_step` (1162) |
-| 1094 | Restoration | `entity_in_reach`, `try_restore`, `game_complete`, `world_stage` |
-| 1249 | **Heights** | `world_heights` (derived elevation), `height_at` (1299) |
-| 1406 | **Perf** | `Perf`, counters, `perf_report`. All behind `WAYFARER_PERF` |
-| 1472 | Graphics | `fill_rect`, `vspan`, `iso_tile`, `iso_diamond`, `iso_ring`, `blit_scale`, `tile_hash`, `fog_lerp`, `tile_detail` |
-| 1727 | **House parts** | `BV_*` variant accessors, wall/roof palettes; `draw_building` (2036) |
-| 1857 | **Props** | palettes, `draw_tree`/`bush`/`rock`/`reed`/`flower`/`crystal`/`stump`, `prop_at` (1992), `draw_prop` |
-| 2188 | Render | `render` — the band sweep; `render_grid` (2404), `camera_follow` (2476) |
-| 2490 | Window | `pick_scale`, `backbuffer_new`, `present` |
-| 2565 | Self-test | Everything under `#if WAYFARER_SELFTEST` — compiled out of the shipping build |
-| 3972 | `main` | Fixed-timestep loop, input, debug keys, frame cap |
+| ~85 | **Isometric projection** | `ISO_*`, `ELEV_*`, `FACE_*`, `ROOF_L`, void colour |
+| 181 | RNG | PCG32, three independent streams (terrain / entities / audio) |
+| 262 | Audio | Callback, device open, restore confirm beat |
+| 393 | Args | `arg_int`, `arg_flag`, `arg_val` |
+| 435 | World | Region/World/Scratch/**Building**/**SURF_\*** structs, terrain enums |
+| 576 | **Island generation** | `solid_at`, `land_lattice`, `land_noise`, `world_gen` — the island height field, new this session's predecessor |
+| 718 | **Building placement** | `place_buildings` — village-site clustering, runs *before* the reachability verifier |
+| 813 | Regions | `bfs_open`, `regions_build`, `regions_depth`, `regions_assign_terrain` |
+| 985 | Reachability | `regions_reachable`, `world_solvable`, entity placement, generate-then-verify |
+| 1156 | Movement | `tile_blocked`, `player_blocked`, `move_axis`, `sim_step` (1328) |
+| 1247 | Input | `input_poll` — **world-aligned, see Phase 04** |
+| 1260 | Restoration | `entity_in_reach`, `try_restore`, `game_complete`, `world_stage` |
+| 1415 | **Heights** | `world_heights` (derived elevation, now island- and rock-aware), `height_at` (1497) |
+| 1508 | World init | `game_init` — wipe, generate, place, flood-fill spawn, verify, derive heights |
+| 1619 | **Perf** | `Perf`, counters, `perf_report`. All behind `WAYFARER_PERF` |
+| 1675 | Graphics | `fill_rect`, `vspan`, `iso_tile`, `iso_diamond`, **`iso_diamond_lr`** (new), `iso_ring`, `fill_ellipse` (new), `blit_scale`, `tile_hash`, `fog_lerp` (rewritten), `tile_detail` |
+| 1950 | **House parts** | `BV_*` variant accessors, wall/roof palettes; `draw_building` (2304, roof now face-split) |
+| 2068 | **Props** | palettes (canopy palette pruned to 8 live, non-dead-reading entries), `draw_tree`/`bush`/`rock`/`reed`/`flower`/`crystal`/`stump` (all with contact shadows), `prop_at` (2260), `draw_prop` |
+| 2436 | Render | `tile_reveal`, `tile_colour`, `render` — the band sweep (2496); `render_grid` (2716), `camera_follow` (2788, **still unsmoothed**) |
+| 2816 | Window | `pick_scale`, `backbuffer_new`, `present` |
+| 2883 | Self-test | Everything under `#if WAYFARER_SELFTEST` — compiled out of the shipping build |
+| 4286 | `main` | Fixed-timestep loop, input, debug keys, frame cap |
 
-### Tunables worth knowing
+### Tunables worth knowing — current values, several changed this session
 
 | Constant | Value | Notes |
 |---|---|---|
-| `TILE` | **32** | Diamonds are 64×32. Changing it is free — the projection identity holds at any size |
+| `TILE` | 32 | Diamonds are 64×32. Changing it is free — the projection identity holds at any size |
 | `WORLD_W` × `WORLD_H` | 80 × 45 | = 2560×1440 world px, 4000×2000 in iso screen space |
 | `LOGICAL_W` × `LOGICAL_H` | 960 × 540 | Rasterised size; window is this × an integer scale |
-| `WIN_SCALE_MAX` | 3 | Chosen at startup from SDL's *usable* display bounds |
-| `PLAYER_SPEED` / `PLAYER_SIZE` | 220 / 24 | Both scaled with `TILE`; collision is scale-invariant |
-| `INTERACT_RADIUS` | 44 px | Same fraction of a tile as before the scale change |
-| `ELEV_STEP` / `ELEV_MAX` | 12 / 48 | Rock terraces per ring of distance into a mass |
-| `ELEV_WATER` / `ELEV_LEDGE` | −6 / 16 | Water sinks, Climb terrain reads as a shelf |
-| `FACE_L` / `FACE_R` | 58 / 76 | Side-face brightness, per cent. **The entire lighting model** |
-| `STOREY_H` / `WALL_BASE` | 14 / 10 | Building wall height = `WALL_BASE + levels × STOREY_H` |
-| `BUILDING_MAX` | 40 | Placement makes ~22 per world from 3000 attempts |
-| `LOBES` | 6 | Tree canopy lobes. Was 5 and read as a stack of discs |
+| `PLAYER_SPEED` / `PLAYER_SIZE` | 220 / 24 | Unchanged. Both scaled with `TILE`; collision is scale-invariant |
+| `SIGHT_MAX` | **0.50** (was 0.42) | Raised alongside the fog rewrite so walked ground keeps more colour |
+| `FOG_TINT_R/G/B` | **60 / 70 / 86** | Was (44, 52, 68) — a *dark* blue-grey. Now a light cool haze. Took three tuning passes; see [[Phase Roadmap]] Phase 02 and Phase 03 for why this shouldn't be tuned by rebuild-and-screenshot again |
+| `FOG_KEEP` | **0.50** (new) | Fraction of a colour's own luminance contrast preserved at reveal 0. Replaces a flat 0.55 luminance scale + 0.45 tint-pull that crushed contrast |
+| `FACE_L` / `FACE_R` | 58 / 76 | Unchanged — terrain side-face shading, per cent |
+| `ROOF_L` | **64 (new)** | Roof down-left slope shading, per cent of true colour. New this session — see Phase 02 |
+| `ELEV_STEP` / `ELEV_MAX` | 12 / 48 | Unchanged |
+| `ELEV_WATER` / `ELEV_LEDGE` | −6 / 16 | Unchanged in value; `ELEV_WATER` now also drives a 4-step sea-floor ramp, see `world_heights` |
+| `LAND_SEA` | **0.24 (new)** | Height-field threshold below which a tile is ocean. Lower = bigger island |
+| `LAND_ROUGH` | **0.55 (new)** | How far coastline noise pushes the shore in and out |
+| `LAND_ROCK_T` | **0.74 (new)** | Outcrop threshold. Raised once already — 0.68 covered ~40% of frame in rock |
+| `VILLAGE_SITES` / `VILLAGE_RADIUS` / `VILLAGE_SPACING` | **3 / 9 / 22 (new)** | Up to 3 village clusters, 9-tile plot radius, kept 22 tiles apart |
+| `BUILDING_TARGET` / `BUILDING_MAX` | **15 (new)** / 40 | Placement now aims for 15, not "as many as fit"; `BUILDING_MAX` stays the array bound |
+| `STOREY_H` / `WALL_BASE` | 14 / 10 | Unchanged |
+| `LOBES` | 6 | Unchanged, but lobes are now `fill_ellipse` calls, not `fill_rect` |
 | `REGION_COUNT` | 16 | **Hard cap 32** — adjacency is a `Uint32` bitmask |
 | `FRAGMENT_COUNT` / `SOUL_COUNT` | 14 / 5 | Combined **must stay ≤ 32** — restored-mask is `Uint32` |
-| `SIGHT_MAX` | 0.42 | How far walking alone reveals. Restoration goes to 1.0 |
-| `REVEAL_TILES` / `REVEAL_RATE` | 5 / 2.5 | In tiles, so unaffected by the scale change |
-| `TICK_HZ` / `FRAME_HZ` | 60 / 60 | Simulation is fixed-step; render is capped separately |
+| `TICK_HZ` / `FRAME_HZ` | 60 / 60 | Unchanged |
 
 ---
 
 ## 6. Decisions already made — do not re-litigate without flagging
 
-1. **C + static SDL2, MinGW-w64.** Rationale in [[Agent Prompt]]. Chosen deliberately for byte
-   control, not by default.
-2. **We compile our own SDL2.** The official prebuilt `libSDL2.a` cost **1,656,876 bytes** for a
-   do-nothing window — over the hard limit before any game code existed. Our cut-down build took
-   the exe from 1,714,176 → 669,696.
-3. **No `SDL_Renderer`.** The entire render subsystem is compiled out. Drawing is direct pixel
-   writes into a surface. `SDL_CreateRGBSurfaceWithFormatFrom`, `SDL_GetDisplayUsableBounds`,
-   `SDL_SetWindowFullscreen` and `SDL_SaveBMP_RW` **do** survive the cut and are used.
-4. **No `-flto`.** w64devkit's GCC is built without LTO. If we outgrow one `.c`, use a **unity
-   build** rather than changing toolchain.
-5. **Continuous movement + tile collision**, fixed 60 Hz step. Settled 2026-08-02.
-6. **PCG32, not xorshift.** Terrain/entity/audio streams must be independent *by construction*.
-7. **Video and audio initialise separately.** `SDL_Init` fails if *any* subsystem fails. **Do not
-   merge these calls back together.**
-8. **Self-test lives in a separate binary**, not behind a runtime flag. `WAYFARER_PERF` defaults to
-   `WAYFARER_SELFTEST` for the same reason: "no debug code in the submission" is structural.
-9. **Fog has two contributions** — sight (shape, capped 0.42) and restoration (full colour,
-   permanent). An *interpretation* of [[Fog and Reveal]], flagged there.
-10. **Isometric 2.5D, decided 2026-08-04.** [[Agent Prompt]] names "switching rendering approach"
-    as the canonical change requiring a flagged decision. Three options were put; the largest was
-    chosen. Full rationale in [[Isometric Rendering]].
-11. **Per-column span rasterisation, not scanline diamonds.** Chosen for *correctness*: the column
-    spans are the exact preimage of the tile under the inverse projection, so the tiling is
-    provably gap-free. A scanline diamond needs a second parallelogram routine whose edge must
-    agree with the first to the pixel — the seam bug class.
-12. **`height`, `bld_at` and all decoration are render-only.** Collision reads `solid` and
-    `regions[].terrain` and nothing else. This is what let the 50-seed completability proof be
-    re-*run* rather than re-*argued* after every visual change. **Keep it that way.**
-13. **Buildings are placed before the reachability verifier**, not after — so a layout that walls
-    something off is rejected and regenerated. The guarantee is the safety net, not something
-    worked around. This is why the village work did not invalidate anything.
-14. **Decoration draws from a stateless hash, never from the RNG streams.** So it cannot perturb a
-    single fragment placement, and seed-based results stay valid by construction.
-15. **Roofs are stacked shrinking diamonds**, not a pitched-plane rasteriser — same seam argument
-    as (11). In a 2:1 projection a 45° roof over half-width `rw` rises exactly `rw/2` on screen.
+Items 1–15 are unchanged from the previous handover (C + static SDL2; our own cut-down SDL2 build;
+no `SDL_Renderer`; no `-flto`; continuous movement; PCG32; separate audio/video init; self-test in a
+separate binary; the two-contribution fog split; isometric 2.5D; per-column span rasterisation;
+render-only decoration; buildings placed before the verifier; decoration from a stateless hash;
+stacked-diamond roofs). Full text for those is in git history (`545598f`) if the reasoning is
+needed verbatim. New decisions from this session:
+
+16. **The world is generated from a radial height field with layered value noise, not a
+    cellular-automaton cave.** The cave gave the *landform itself* — not just decoration — the shape
+    of cave noise, which read as random brown lumps with no coastline. Ocean and rock are both
+    `solid`; which kind a tile is lives in a new render-only `surf[][]` field. **Collision still
+    reads only `solid` and `regions[].terrain`** — this did not weaken decision 12, it extended it
+    to a new generator. See [[Phase Roadmap]] Phase 01.
+17. **Buildings cluster into village sites rather than scattering over every open plot.** Uniform
+    placement read as a suburb the moment the landmass grew past the old cave's size. Up to
+    `VILLAGE_SITES` sites, `VILLAGE_SPACING` apart, plots drawn from two summed `rng_below` calls so
+    they bunch toward a centre and thin at the edge.
+18. **Roofs get a left/right face split (`iso_diamond_lr`), the same trick terrain uses via
+    `FACE_L`/`FACE_R`.** A stack of concentric diamonds has no volume regardless of how its steps
+    are shaded — every slice is one flat colour. An eave-shadow diamond was tried as a cheaper fix
+    first, made it worse (a ring under a ring is still rings), and was reverted; the failed attempt
+    is documented in a comment in `draw_building` so it is not retried.
+19. **Fog now models aerial perspective: unrevealed land goes lighter and lower-contrast with
+    distance, never darker.** The previous blend scaled luminance to 0.55 and pulled toward a dark
+    tint, and since walking only ever reveals to `SIGHT_MAX`, ~95% of any screen was one dead colour.
+    This — not the camera — was the mechanical cause of "traversal feels suffocating." `fog_lerp`
+    remains the single path from true colour to screen colour; only its destination changed.
+20. **Assets from the team's eventual art handoff bake into a compiled-in C header at build time —
+    they are never loaded at runtime.** Forced by the zero-external-files rule combined with the
+    backbone/team framing in §1. Not yet built; the architecture and contract are specified in
+    [[Art Bible]] §8 and scheduled as [[Phase Roadmap]] Phase 07.
+21. **A provisional [[Art Bible]] exists**, explicitly superseded when the team's real art direction
+    lands. It fixes palette ramps, a value hierarchy (walls lightest, foliage darkest, the two
+    accent colours reserved), and the sprite/bake contract — see the file itself.
+22. **No subagents on this project.** Recorded in persistent memory, not just here: two `Explore`
+    subagents died mid-task on a monthly spend limit, and this codebase is one file with one
+    Handover — a cold subagent re-derives context that direct reading already has. See §10.
 
 ---
 
 ## 7. Traps — each of these already cost time once
 
-**Build / toolchain**
+Items from the previous handover (the `.data`/`.bss` static-buffer trap; gcc needing PATH; SDL's
+`-DSDL_DYNAMIC_API=0` patch; `SDL_LOADSO` dependency; the transient linker permission error;
+`sizeof` on a decayed pointer; `game_init` must zero the whole `Game`; never run `src/main.c`
+through a PowerShell text filter; here-strings breaking `git commit -m`; relative assertions proving
+nothing; a verifier that never rejects proves nothing; suspect the harness; screenshots being poor
+evidence of *direction* but the right tool for *rendering*; `SetForegroundWindow` blocked for
+background processes; `FindWindow(null, ...)` failing from PowerShell; PowerShell 5.1 having no
+`&&`/`||`/ternary; a 1920×1080 window not fitting a 1920×1080 desktop; a fullscreen window rarely
+being an exact multiple of the logical size; the screen clear being mandatory now) **are all still
+true and are not repeated in full here — see git history at `545598f` for verbatim text.**
 
-- **Zero-initialised statics land in `.data`, not `.bss`.** On PE/COFF, `-fdata-sections` emits
-  them as file-backed `.data$name` COMDATs. Four world-sized `static` arrays once put **39,648
-  bytes of literal zeros** into the exe. **Never declare a world-sized buffer `static`** — use a
-  stack local or `SDL_malloc`. Check with `objdump -h`: currently `.data` 17,520 B / `.bss`
-  2,912 B, which is the SDL baseline. Large `.data` + small `.bss` means it happened again.
-- gcc shells out to `as.exe` / `ld.exe` **by bare name**, so the devkit's `bin` must be on PATH.
-  `build.ps1` does this; a manual gcc invocation will fail with "cannot execute 'as'".
-- SDL refuses `-DSDL_DYNAMIC_API=0` on the command line. `build-sdl2.ps1` patches
-  `src/dynapi/SDL_dynapi.h` instead and fails loudly if the guard text stops matching.
-- `SDL_VIDEO` requires `SDL_LOADSO` on Windows. The only subsystem dependency that could not be cut.
-- **The linker intermittently fails with "cannot open output file … Permission denied."** No
-  process holds the exe; it is a transient file-lock (antivirus or indexer). **Just re-run the
-  build.** It cost two false alarms.
+**New this session:**
 
-**C**
-
-- **`sizeof` on a pointer.** A refactor turned `Uint8 seen[3600]` into `Uint8 *seen`, so
-  `sizeof(seen)` silently became **8**. Watch for this whenever an array parameter becomes a
-  pointer.
-- **`game_init` must zero the whole `Game`.** It previously left progress counters alone, so
-  pressing **R** carried the old world's fragment count into the new one and the win condition
-  fired on an untouched world.
-
-**Source hygiene**
-
-- **Never run source through a PowerShell text filter.** `Get-Content -Raw | Set-Content` on
-  `src/main.c` read it as CP1252 and rewrote it as UTF-8, turning **all 76 em-dashes into mojibake
-  and adding a BOM**. It compiled cleanly, so nothing caught it until an editor edit failed to
-  match its own search string. PowerShell 5.1 does not reliably detect BOM-less UTF-8, and
-  `Set-Content -Encoding utf8` writes a BOM. **Use the editor.** The same hazard applies to commit
-  messages written via `Set-Content` (one landed with a BOM in the subject line and needed a
-  `filter-branch` to fix).
-- PowerShell here-strings (`@'...'@`) as a `git commit -m` argument silently failed to parse and
-  git received the message as a dozen pathspecs. **Write the message to a file and use
-  `git commit -F`.**
-
-**Testing**
-
-- **Relative assertions are not correctness.** Every structural region test once passed on a
-  partition covering **5 of 1585** walkable tiles, because all of them checked counts against
-  counts. Prefer absolute invariants — `--village-test` is written that way deliberately.
-- **A verifier that never rejects anything proves nothing.** Every checker here has a negative
-  control: reachability, iso rasterisation, and both village invariants.
-- **Suspect the harness.** The playthrough test twice reported worlds unwinnable when the test
-  walker was wrong, not the game.
-- **Screenshots are poor evidence of *direction*** — with a follow camera the player stays centred.
-  Use `--input-test`. They are, however, the *right* tool for judging rendering, and `--shot`
-  exists for that.
-
-**Windows / PowerShell (this environment)**
-
-- `SetForegroundWindow` is **blocked for background processes**, so synthetic keystrokes silently
-  go elsewhere. Use `PostMessage(hwnd, WM_KEYDOWN, vk, lparam)` straight to the window.
-- `FindWindow(null, "X")` fails from PowerShell — `$null` marshals as `""`. Use `EnumWindows`.
-- PowerShell 5.1: **no `&&`, no `||`, no ternary.** `2>&1` on a native exe turns stderr into
-  `NativeCommandError` and can fail on a mere warning — don't redirect.
-- Beware PowerShell function names colliding with built-in aliases (`H` shadowed `Get-History`).
-
-**Rendering**
-
-- **A 1920×1080 window does not fit a 1920×1080 desktop.** Guessing at window chrome cost a whole
-  scale step. Ask SDL for `SDL_GetDisplayUsableBounds` (already excludes the taskbar) and allow
-  only for the title bar.
-- **A fullscreen window is rarely an exact multiple of the logical size.** `blit_scale` must centre
-  *and clear the margin*, or the border holds whatever was in the surface before.
-- **The screen clear is mandatory now.** The old flat loop covered every pixel by construction
-  (measured: exactly 1.00× the screen). Diamonds only tile where the world exists.
+- **A running `wayfarer.exe` blocks the release relink with `Permission denied`**, not a build error.
+  This happened because the user was actively playing the game while a rebuild was attempted.
+  `Get-Process -Name wayfarer` before assuming the build is broken. The self-test binary uses a
+  different filename and is unaffected.
+- **A per-tile height jitter checkerboards.** The first attempt at breaking up flat outcrop tops
+  hashed height jitter per individual tile at ±4; since adjacent tiles almost always disagreed, the
+  rasteriser drew a visible step between every pair and the result was a checkerboard, not rock.
+  Fixed by hashing on the 2×2 block instead of the tile, at a smaller ±2. **Any per-tile visual
+  jitter needs to be checked for this before it ships** — the fix is "hash a coarser unit," not
+  "reduce the amplitude," though both were tried.
+- **A stack of concentric diamonds has no volume, however its steps are shaded.** This looks like a
+  shading problem (wrong colours per step) but is actually a *geometry* problem (no left/right
+  distinction exists anywhere in the shape). No amount of retuning the per-step colour fixes it;
+  the fix has to add a face split. Costly to learn by iterating on colour first — don't.
+- **Fog and palette constants were tuned by guess-rebuild-screenshot, three passes, and it thrashed.**
+  Pass 1 undercorrected (still dark). Pass 2 overcorrected (washed-out uniform grey). Pass 3 found
+  stone had *also* been pushed too light in an earlier commit and was now the brightest surface in
+  the world, fighting the fog fix. **This is the direct argument for building the live tuning
+  overlay (Phase 03) before doing more colour work by hand** — every future palette decision should
+  be made with a slider and instant feedback, not a rebuild-and-look loop.
+- **A `village_selftest` mean can silently reflect an unintended threshold change**, not a bug in
+  the test. When `VILLAGE_RADIUS` went from 6 to 9 the mean building count moved from 5 to 12 with
+  every existing test still passing — the tests check placement *validity*, not placement *density*
+  against a design target. If a density number matters, it needs its own assertion, not an eyeball
+  of the printed mean.
 
 ---
 
@@ -368,46 +403,45 @@ perf    : render 0.859 ms  present 1.259 ms  3.27 M px/frame  74,835 calls/frame
 
 ### Verified — measured, not assumed
 
-- Builds clean, zero warnings; binary **stripped**, **static**, imports only OS DLLs; no
-  SDL_image/ttf/mixer; no self-test or perf code in the shipping exe (proved by a **+0 byte delta**
-  when the instrumentation was added)
-- PRNG: reproducible, streams provably independent, `rng_below` bias 1.4–3.3%
-- Collision: 20 seeds, zero solid-tile overlaps, no escapes, no drift, identical trajectories,
-  straight and diagonal both exactly 220.00 px/60 ticks
-- Region graph: 30 seeds — 100% tile coverage, all regions contiguous, adjacency symmetric, graph
-  connected, spawn never gated
-- Reachability: 50 seeds solvable first attempt **with ~22 buildings placed**, gating never
-  relaxed, plus a negative control proving the verifier rejects sealed worlds
-- Gating: walk-reachable == graph-reachable at all 4 ability tiers, 30 seeds
-- **Full playthroughs: 50/50 seeds completed** by autopilot through real collision
-- **Isometric rasterisation: exact.** Diamonds tile with zero gaps *and* zero overdraw; zero seam
-  pixels under random elevation; zero pixels owned by the wrong tile; integer upscale exact at
-  ×1/×2/×3 with margins cleared. Negative control rejects a 1 px offset
-- Building placement: 30 seeds, footprints solid, indexed, disjoint and approachable; two negative
-  controls both fire
-- Audio callback: **0.141 ms worst case against a 21.333 ms deadline**; zero partial writes, zero
-  NaN, no clipping
-- Render cost: 0.859 ms + 1.259 ms present of a 16.67 ms budget (~13%), measured at every slice
+Everything from the previous handover's list still holds (builds clean; PRNG properties; collision
+determinism; region graph invariants; reachability with a negative control; gating parity across all
+4 tiers; **50/50 playthroughs — re-verified after the landform rewrite, still 50/50**; exact
+isometric rasterisation with a negative control; building placement invariants with two negative
+controls; audio callback timing; render cost). New this session:
+
+- **The game has been played by a human being, for the first time.** Four consecutive handovers
+  carried "nobody has played it by hand" as a standing, named risk. On 2026-08-04 the user played it
+  and reported: *"even though the gameplay is in early stage, it did feel slightly enjoyable."* This
+  is one datapoint from the person who wrote the design, not a QA pass, but the specific risk "we
+  have built something nobody has ever moved around in" is retired. [[QA Checklist]]'s "runs clean
+  on a machine without dev tools" — a *different* item — is still unchecked.
+- **The island generator does not weaken the collision invariant.** `solid` is still the only thing
+  `tile_blocked` reads; the full test suite, including the 50-seed reachability and playthrough
+  tests, was re-run (not re-argued) after the generator was replaced and stayed green.
+- **Render cost did not regress from adding `fill_ellipse` and the roof/fog changes.** Measured
+  0.749–0.844 ms across runs, against the previous session's 0.859 ms baseline — if anything, faster.
 
 ### NOT verified — be honest about these
 
-- **Whether any of it is fun, or even pleasant to look at in motion.** Everything above is geometry
-  and byte counts.
-- **Nobody has played it by hand.** Every playthrough was the autopilot. Interact affordance, reach
-  radius, movement speed, tree density, whether the isometric camera is comfortable, and whether
-  world-aligned input is disorienting — all unjudged.
-- **No audio has ever been heard**, only measured
-- **Never run on another machine.** [[QA Checklist]]'s "runs clean without dev tools" is unchecked
-- Perf measured on one machine (2048×1152, scale ×2) with the window unoccluded. `present` is an
-  OS blit whose cost depends on the compositor
-- **Pacing after the scale change is unmeasured.** The old 30–82 s shortest-path number was taken
-  before buildings existed and before `TILE` doubled. `PLAYER_SPEED` was doubled to keep
-  tiles-per-second constant, so it *should* hold, but nobody has re-run it
-- Whether `fog_lerp` keeps four canopy shades distinguishable at low reveal — checked by eye at a
-  few levels, not measured
-- The gating-relaxation fallback **has never fired** (0/50 seeds), so that path is untested
-- SDL's own resampler never ran — this device satisfied both 48000 and 44100 exactly
-- Generation time not profiled (noticeable when the grid view builds 12 worlds)
+- **Whether it is fun beyond one early, positive, informal reaction.** One playtest is not QA.
+- **Whether the fog and palette values are actually *right***, as opposed to "no longer obviously
+  wrong." They were tuned by eye, by one person, in three iterative passes, with no measurement of
+  shade separability under fog. `--fog-test` does not exist. See Phase 05.
+- **Whether the island generator produces a good *distribution* of coastline shapes, island sizes,
+  or rock coverage across many seeds** — `--land-test` does not exist, so this has only been checked
+  on the 2–3 seeds that got screenshotted, not swept.
+- **Whether the village clustering produces villages that read as villages across many seeds** — the
+  clustering logic has a structural test (via `--village-test`, which checks *validity*) but no test
+  of *how it looks*, which is the actual goal.
+- **No audio has ever been heard**, only measured — still true, unchanged.
+- **Never run on another machine.** [[QA Checklist]]'s "runs clean without dev tools" is unchecked —
+  still true, unchanged.
+- **Pacing has not been re-measured** since either the tile-size change or this session's landmass
+  rework. The island's open-ground fraction is different from the old cave's; nobody has timed a
+  shortest-path clear against it.
+- SDL's own resampler never ran — unchanged.
+- Generation time not profiled — unchanged, and now slightly more expensive (three noise lattices
+  sampled per tile instead of a cellular automaton pass), though not measured.
 
 ---
 
@@ -416,27 +450,29 @@ perf    : render 0.859 ms  present 1.259 ms  3.27 M px/frame  74,835 calls/frame
 | Decision | Status |
 |---|---|
 | Grid vs continuous movement | **RESOLVED** — continuous, 2026-08-02 |
-| Rendering approach | **RESOLVED** — isometric 2.5D, 2026-08-04. See [[Isometric Rendering]] |
+| Rendering approach | **RESOLVED** — isometric 2.5D, 2026-08-04 |
 | Tile size / resolution | **RESOLVED** — 32 px tiles, 960×540 logical, integer-scaled |
-| **Input orientation** | **OPEN, and it matters.** `W` currently travels up-right on screen. Screen-aligned input was chosen in planning but is not built. It is a *simulation* change: it rewrites every trajectory and invalidates `--input-test`, `--move-test`'s diagonal assertion and the autopilot's steering. Give it its own slice |
-| Landmass size / region count | **Provisional 16.** Pacing needs re-measuring after the scale change |
-| Fragment + Found Soul counts | **Provisional 14 + 5.** Awaiting sign-off |
-| Kindle: passive radius vs active ping | **Open.** Currently a plain region gate |
-| Inventory/tool icons from mockup | **Open.** Treated as pitch-art decoration, not built |
+| Landform generation method | **RESOLVED, this session** — radial height field + layered noise, not a cave. See decision 16 |
+| Building placement pattern | **RESOLVED, this session** — clustered village sites, not uniform scatter. See decision 17 |
+| Fog destination colour | **RESOLVED, this session, but tuned by eye and unmeasured** — light haze, `FOG_KEEP` contrast preservation. See decision 19 and Phase 05 |
+| Asset pipeline for team-authored art | **RESOLVED, this session** — build-time bake to a compiled-in header, never runtime load. See decision 20, [[Art Bible]] §8, Phase 07 |
+| **Input orientation** | **STILL OPEN, and it still matters.** `W` travels up-right. This is a *simulation* change — it rewrites every trajectory and invalidates `--move-test`'s diagonal assertion, `--input-test`, and the autopilot's steering. Scheduled as [[Phase Roadmap]] Phase 04, deliberately kept isolated from any render-only change |
+| Camera easing | **STILL OPEN.** Currently a hard snap to player-centred with axis clamping only. Scheduled alongside or just after input, Phase 04 |
+| Landmass size / region count | **Provisional 16 regions.** Pacing needs measuring against the *new* island shape, not just re-measuring against the old cave's numbers |
+| Fragment + Found Soul counts | **Provisional 14 + 5.** Unchanged, still awaiting sign-off |
+| Kindle: passive radius vs active ping | **Open.** Unchanged |
+| Inventory/tool icons from mockup | **Open, and now explicitly addressed in [[Art Bible]] §7**: out of scope per [[Save and UI]]'s "no HUD clutter," reinstating any of it is its own flagged decision |
 
 [[Cut List]] is pre-committed if time runs short. **Never cut:** the fog-reveal core feel, the
 reachability guarantee, staying under the byte limit, a defined completable end state.
 
-### The size finding, and what it means for planning
+### The size finding, restated with current numbers
 
-The entire isometric pivot — projection, elevation, upscaling, surface detail, seven kinds of
-procedural prop, and mix-and-match buildings — cost **9,728 bytes**. All game logic ever written
-for this project is about 25 KB. SDL2 is the other 664 KB.
-
-**Bytes are not the constraint and never were.** There is also ~250 KB of reclaimable SDL dead
-weight documented in [[Toolchain Setup]] that has never been touched. The real constraint is that
-every visual has to be *written*, in C, by hand — so plan against authoring effort, and stop
-citing the byte budget as a reason to keep things simple.
+Everything built across both sessions this cycle — the island generator, village clustering,
+`fill_ellipse`, contact shadows, the roof face split, and the fog rewrite — cost **1,536 bytes**
+(689,152 → 690,688). All game logic ever written for this project remains a rounding error next to
+SDL2. **Bytes are still not the constraint.** Authoring judgement is — see the traps section on
+tuning by guess-and-rebuild, which cost real session time this cycle for zero byte cost.
 
 ---
 
@@ -445,42 +481,70 @@ citing the byte budget as a reason to keep things simple.
 Follow [[Agent Prompt]]'s loop, and narrate which stage you are in:
 **plan → implement → build → measure → verify → report.**
 
-- Report the exact `.exe` byte size and delta after **every** build
-- Treat warnings as defects
-- Batch-test ≥20 seeds after any change to generation or placement
-- **Any new checker needs a negative control.** Every existing one has one
-- **Keep render-only data render-only.** The moment collision reads `height` or `bld_at`, the
-  completability proof needs re-arguing instead of re-running
-- State plainly what you did **not** verify. Never claim audio sounds right or that something
-  feels good — those need a human
-- Every new note must link to an existing one; orphans break the graph
+- **Read [[Phase Roadmap]] before picking a task.** It sequences everything left, with a definition
+  of done and a verification gate per phase — do not re-derive the ordering from scratch each
+  session.
+- Report the exact `.exe` byte size and delta after **every** build.
+- Treat warnings as defects.
+- Batch-test ≥20 seeds after any change to generation or placement.
+- **Any new checker needs a negative control.** Every existing one has one — `--land-test` and
+  `--fog-test` are the two currently missing this, and that is tracked debt, not an oversight to
+  repeat.
+- **Keep render-only data render-only.** The moment collision reads `height`, `bld_at`, or `surf`,
+  the completability proof needs re-arguing instead of re-running.
+- **Do not tune colour or shading by rebuild-and-screenshot for more than one or two passes.** If a
+  third pass is needed, that's the signal to build the live tuning overlay (Phase 03) instead of
+  continuing to guess.
+- State plainly what you did **not** verify. One playtest is not many; never claim audio sounds
+  right or that something feels good without a human saying so.
+- Every new note must link to an existing one; orphans break the graph.
 - Log every session to `devlog/YYYY-MM-DD-session-NN.md`, and append a `## Session NN` section if
-  a file for today already exists. Update [[INDEX]] every session
+  a file for today already exists. Update [[INDEX]] every session.
+
+### Persistent memory — read this too, it survives across chats
+
+Outside this vault, at `C:\Users\nabil\.claude\projects\g--1-44mb-game\memory\`, there is a small
+set of memory files that a fresh session should pull in automatically. They cover things that don't
+belong in a vault note because they're about *how to work*, not *what the game is*:
+
+- **`wayfarer-skill-policy.md`** — which Claude Code skills genuinely apply to this project (a
+  small list: `art-bible`, `run`, `code-review`, `simplify`) and the much longer list of installed
+  skills that target web/mobile stacks and do not transfer to a C program writing pixels into an SDL
+  surface. Check this before reaching for an unfamiliar skill.
+- **`wayfarer-screenshot-recipe.md`** — the exact commands to actually *see* what the renderer
+  produces: `--shot` and `--overlay` exist only in the **self-test** binary, output BMP, and need a
+  conversion step before they can be read as an image. This has been used every single visual
+  session so far and will be needed again.
+- **`wayfarer-asset-pipeline.md`** — the zero-external-files rule and the build-time bake decision,
+  stated for an audience that might not read [[Art Bible]] §8 first.
+- **`wayfarer-team-context.md`** — the backbone/provisional-art framing from §1 of this document,
+  including the user's own words about what "good enough" means for keeping current art.
+- **`no-subagents-on-wayfarer.md`** — why this project's sessions read `src/main.c` directly instead
+  of delegating to subagents, and what happened the one time that was tried.
+
+If a future session doesn't have these loaded, that's worth noticing and fixing, not working around.
 
 ---
 
-## 11. What to do next
+## 11. Roadmap — see [[Phase Roadmap]] for the real detail
 
-Three candidates, in the order I would take them.
+This handover intentionally does **not** duplicate the forward plan. `design/phases/` holds one file
+per phase — what it is, why it's sequenced where it is, its definition of done, exactly which
+functions and lines it touches, and its verification gate. The index is [[Phase Roadmap]].
 
-**1. Get someone to play it.** This is now the third handover in a row saying nobody has. Two
-provisional counts, the pacing number, the tree density, and whether the isometric camera is
-comfortable are all blocked on it — and it costs an afternoon, not a week.
+**Current position, in one paragraph:** Phases 00–02 (memory + skill policy + provisional Art Bible;
+island landform + village clustering + a first palette/foliage pass; roof face shading + the fog
+rewrite) are **done** and committed as `5ffdb38` and `e5c8942`. Phase 03 (bitmap font, then a live
+tuning overlay behind it) is **next**, chosen specifically because the last two sessions' colour work
+was tuned by slow rebuild-and-screenshot cycles and that needs to stop before more art judgement calls
+get made. After that: screen-aligned input as its own isolated simulation slice (Phase 04), the two
+missing test checkers (Phase 05), then water features, the asset bake pipeline, save/load, the
+remaining placeholder art, and motion (Phases 06–10) — all timeboxed, with a **hard stop on
+2026-08-14** before the ship-critical remainder (Phase 11: audio, font-dependent HUD, QA, submission)
+takes over regardless of how much of the art work is finished.
 
-**2. Restoration-driven rebuild** — the highest-value *building* task left. A building's drawn
-state becomes a function of its region's `restoration` float, expressed as **parts suppressed**
-rather than a second set of art: at 0.0 walls only and gapped, at 0.4 roof partial, at 0.7 roof and
-windows complete, at 1.0 windows lit and chimney smoking. This makes the game's own hook —
-*restore memories, rebuild lives, return colour and life to the world* — literally visible, and it
-reuses `regions[].restoration`, which already eases smoothly. Perhaps 60 lines.
-
-**3. Week 4 — [[Audio and Synth]].** Softsynth, pattern data, the five named layers, SFX, and
-callback profiling under full five-layer load. `try_restore` is where a layer would be switched
-on; the hook already exists. Current callback headroom is ~99%.
-
-**Schedule reality.** Today is 2026-08-04; the deadline is 2026-09-04. Week 4 (a softsynth from
-zero) and Week 5 (bitmap font, save/load, HUD, minimap, win state, game-feel pass) are both
-completely untouched, and the isometric pivot consumed time that was not budgeted for it.
-**Judging order is finished → under size → fun.** A beautiful isometric village with no audio, no
-font and no save scores worse than the flat build with all three. If something has to give, take
-it from [[Cut List]] — the most likely candidate is cutting Kindle and shipping Wade + Climb only.
+**Schedule reality, unchanged in substance from the last handover:** today is 2026-08-04; the
+deadline is 2026-09-04. Audio (a softsynth from zero) and the rest of Week 5 (save/load, HUD, win
+state, game-feel pass) are both completely untouched. **Judging order is finished → under size →
+fun.** If something has to give, take it from [[Cut List]] — the most likely candidate remains
+cutting Kindle and shipping Wade + Climb only.

@@ -25,6 +25,9 @@ Exploration-driven memory-restoration game for the 2P Game Arcade 1.44MB Floppy 
 - [[Cut List]] — pre-committed descoping order if time runs short
 - [[QA Checklist]] — continuous verification rules
 
+## Roadmap
+- [[Phase Roadmap]] — the forward plan, phase by phase, in `design/phases/`. Read this before picking a task; it sequences everything left with a definition of done and a verification gate per phase, so the plan doesn't get re-derived from scratch each session.
+
 ## Progress
 - devlog/INDEX.md — running log of every build session, current `.exe` size, current status. Every session note there links back to whichever system(s) it touched.
 

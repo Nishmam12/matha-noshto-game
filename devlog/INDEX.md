@@ -10,10 +10,19 @@ session-logging rules. Picking this up cold? Start with [[Handover]].
 **Current `.exe` size:** 690,688 bytes
 **Current status:** verified — island landform, clustered villages, rounded foliage, roof face
 shading and the fog rewrite. **The game has now been played by a human once** and read as "slightly
-enjoyable". No animation, no character, no audio, no font; input is still world-aligned
+enjoyable". No animation, no character, no audio, no font; input is still world-aligned.
+**Forward plan:** see [[Phase Roadmap]] — Phases 00–02 done, Phase 03 (bitmap font + live tuning
+overlay) next
 **Headroom:** 749,312 bytes under the 1,440,000 ship target
 
 ## Sessions
+
+- [[2026-08-04-session-01]] *(Session 04)* — **Handover rewrite, and a phase-by-phase roadmap.**
+  Documentation only, ahead of a fresh chat. [[Handover]] rewritten against a fresh build and a
+  fresh full test run (nothing carried forward unverified). New `design/phases/` folder: an index
+  ([[Phase Roadmap]]) plus 12 phase files, Phases 00–02 marked done with commit/byte evidence,
+  Phases 03–11 planned with a definition of done, concrete file/line-referenced tasks, a
+  verification gate, and phase-specific traps each. No code changed.
 
 - [[2026-08-04-session-01]] *(Session 03)* — **Roof volume, and the fog rewrite.** `iso_diamond_lr`
   gives roofs the same left/right face split terrain gets from `FACE_L`/`FACE_R`, fixing the flat-plate
