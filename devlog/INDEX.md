@@ -7,9 +7,10 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 684,544 bytes
-**Current status:** verified — isometric renderer in place; village generation and audio ahead
-**Headroom:** 755,456 bytes under the 1,440,000 ship target
+**Current `.exe` size:** 689,152 bytes
+**Current status:** verified — isometric renderer and procedural buildings in place; no animation,
+no character, no audio, no font
+**Headroom:** 750,848 bytes under the 1,440,000 ship target
 
 ## Sessions
 
@@ -58,7 +59,9 @@ session-logging rules. Picking this up cold? Start with [[Handover]].
 | 08-04 | 680,960 | +512 | elevation: derived heights, cliff side faces, terraced rock |
 | 08-04 | 682,496 | +1,536 | 960×540 logical backbuffer, integer upscale, F11 fullscreen |
 | 08-04 | 683,008 | +512 | per-tile hash, ground grain, per-terrain surface marks |
-| 08-04 | **684,544** | +1,536 | layered trees and bushes, two-sub-pass depth sort |
+| 08-04 | 684,544 | +1,536 | layered trees and bushes, two-sub-pass depth sort |
+| 08-04 | 686,592 | +2,048 | rock/reed/flower/crystal/stump props, isometric interact ring |
+| 08-04 | **689,152** | +2,560 | procedural buildings, mix-and-match house parts, `--village-test` |
 
 Self-test builds (`wayfarer-selftest.exe`) are not deliverables and are deliberately excluded
 from this table and from the budget gate.
@@ -77,8 +80,13 @@ from this table and from the budget gate.
 - The gating-relaxation fallback in world generation has never fired (0 of 50 seeds), so that
   code path is untested against real failure.
 - Physical keyboard input verified via posted window messages, not a real key press.
-- **The world is still the cave generator, dressed.** The village layout the isometric look was
-  chosen for does not exist yet, and it is the one remaining slice that can invalidate the
-  reachability guarantee rather than merely need re-running against it.
+- **Nothing in the world moves.** No sway, shimmer, bob or smoke; the player is still a 24×24
+  orange square with no facing or walk cycle. A static isometric scene reads as a diorama.
+- **Buildings do not respond to restoration yet.** The ruin→whole rebuild is designed but not
+  built, and it is what would make the game's own hook literally visible.
+- **Input is still world-aligned:** `W` travels up-right on screen. Changing it is a *simulation*
+  change and needs its own verified slice.
+- **Pacing has not been re-measured** since the tile size doubled and buildings started blocking
+  routes. The 30–82 s figure predates both.
 - Render cost is measured on one machine with the window unoccluded. `present` is an OS blit whose
   cost depends on the compositor and window state.
