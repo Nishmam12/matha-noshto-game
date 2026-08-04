@@ -1,4 +1,4 @@
-/* Wayfarer — 2P Game Arcade 1.44MB Floppy Disk contest entry.
+﻿/* Wayfarer â€” 2P Game Arcade 1.44MB Floppy Disk contest entry.
  *
  * PIPELINE PROOF ONLY. No game systems live here yet; the design is not
  * finalised (see design/Pending Team Discussion.md). This file proves the
@@ -7,7 +7,7 @@
  *
  * Rendering is a hand-rolled software framebuffer written straight into the
  * window surface. SDL's render subsystem is compiled out entirely (see
- * build-sdl2.ps1) — it cost more than the whole rest of SDL, and the brief
+ * build-sdl2.ps1) â€” it cost more than the whole rest of SDL, and the brief
  * calls for hand-rolled rendering regardless.
  *
  * Everything under WAYFARER_SELFTEST is verification scaffolding and is
@@ -49,7 +49,7 @@
  * TILE went 16 -> 32 for the isometric pass: a 64x32 diamond gives procedural
  * props and buildings room to show their layering, where a 32x16 one did not.
  * Everything below that is expressed as a fraction of TILE was scaled with it,
- * so collision is unchanged in tile terms — player_blocked divides by TILE, so
+ * so collision is unchanged in tile terms â€” player_blocked divides by TILE, so
  * doubling both the player box and the tile cancels exactly. Only absolute
  * pixel numbers move (speed_selftest's 110.00 becomes 220.00). */
 #define TILE     32
@@ -62,13 +62,13 @@
 #define REVEAL_TILES 5     /* sight radius, in tiles */
 #define REVEAL_RATE  2.5f  /* sight units/sec */
 
-/* Walking somewhere reveals its SHAPE but not its colour — sight tops out well
+/* Walking somewhere reveals its SHAPE but not its colour â€” sight tops out well
  * below 1. Only restoring a memory takes a region to full colour.
  *
  * This splits Fog and Reveal's single "restoration%" into two contributions,
  * and that is an interpretation worth flagging: the note specifies restoration
  * drives the blend, but with nothing else the world would be pitch black until
- * the first fragment is restored — including the fragment you must find first.
+ * the first fragment is restored â€” including the fragment you must find first.
  * Sight keeps exploration possible; restoration is still the only thing that
  * brings colour back. */
 #define SIGHT_MAX    0.42f
@@ -88,7 +88,7 @@
  *     sx = wx - wy + ISO_OX
  *     sy = (wx + wy) / 2 + ISO_OY
  *
- * — one subtract and one halve, no multiplies and no matrix, exact for integer
+ * â€” one subtract and one halve, no multiplies and no matrix, exact for integer
  * inputs. It also holds at any tile size, which is why the 16 -> 32 change cost
  * nothing here.
  *
@@ -104,7 +104,7 @@
 #define ELEV_WATER (-6) /* water sits below the ground plane */
 #define ELEV_LEDGE 16   /* Climb terrain reads as a shelf before you can climb */
 
-/* Face shading — the whole lighting model. One notional light from the upper
+/* Face shading â€” the whole lighting model. One notional light from the upper
  * left, no normals and no dot products: the top face keeps its true colour and
  * each side face is scaled by a fixed percentage. Two constants do the entire
  * job of making flat colour read as volume. */
@@ -155,7 +155,7 @@
  * Why PCG32 rather than the xorshift32 this started as: World Generation
  * requires terrain, entity and audio generation to be INDEPENDENT, so that
  * tuning one does not reshuffle another. PCG32's `inc` is a sequence selector
- * — each distinct odd value defines a different period-2^64 sequence. Seeding
+ * â€” each distinct odd value defines a different period-2^64 sequence. Seeding
  * one generator per stream from a shared master seed therefore gives streams
  * that are independent by construction, not merely started at different
  * offsets in one shared sequence (which is all a single xorshift could offer,
@@ -167,7 +167,7 @@ typedef struct {
 } Rng;
 
 /* Stream ids. Adding a stream must not perturb the existing ones, so never
- * renumber these — append only. */
+ * renumber these â€” append only. */
 enum {
     STREAM_TERRAIN  = 1,
     STREAM_ENTITIES = 2,
@@ -246,14 +246,14 @@ typedef struct {
     int    req_rate; /* rate we ask for; always AUDIO_RATE except under --rate */
     int    rate;     /* rate the device actually gave us */
     int    channels;
-    double phase; /* cycles, in [0,1) — double so long runs don't drift */
+    double phase; /* cycles, in [0,1) â€” double so long runs don't drift */
     int    noise; /* 0 = sine tone, 1 = seeded white noise */
     int    tone;  /* ambient test tone; off in the game, on in audio selftests */
     Rng    rng;
 
     /* Restore confirm beat. The main thread only ever bumps an atomic counter;
      * the callback owns everything else. No lock, no allocation, no shared
-     * mutable state on the audio thread's critical path — the audio callback
+     * mutable state on the audio thread's critical path â€” the audio callback
      * has a hard deadline and Agent Prompt.md treats faults there as release
      * blockers. */
     SDL_atomic_t sfx_fire;
@@ -360,7 +360,7 @@ static SDL_AudioDeviceID audio_open(Audio *a, SDL_AudioSpec *have)
 
     /* Allow only a frequency change. Accepting the device's native rate costs
      * us one multiply; letting SDL resample would drag in its converter and
-     * add latency. Format stays F32 — WASAPI's native format on Windows, so
+     * add latency. Format stays F32 â€” WASAPI's native format on Windows, so
      * in practice no conversion happens at all. */
     dev = SDL_OpenAudioDevice(NULL, 0, &want, have, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
     if (!dev)
@@ -400,7 +400,7 @@ static int arg_flag(int argc, char **argv, const char *key)
 /* ----------------------------------------------------------------- world -- */
 /* WEEK 1 PLACEHOLDER. This is a tile grid so movement and the fog-to-color
  * reveal have something to act on. The real world is a region graph
- * (design/systems/World Generation.md) and lands in Week 2 — at which point
+ * (design/systems/World Generation.md) and lands in Week 2 â€” at which point
  * per-tile `reveal` becomes per-region restoration% that tiles inherit. */
 
 /* --------------------------------------------------------------- regions -- */
@@ -424,7 +424,7 @@ enum {
 };
 
 /* Ability flags. Bitmask because "which abilities do you have" is the whole of
- * the ability system — see design/systems/Abilities.md: no trees, no levels. */
+ * the ability system â€” see design/systems/Abilities.md: no trees, no levels. */
 enum {
     ABIL_NONE   = 0,
     ABIL_WADE   = 1 << 0,
@@ -449,7 +449,7 @@ typedef struct {
 /* Fragments and Found Souls. Counts are the scope-safe defaults from
  * design/Overview.md (~12-16 fragments, 4-6 Found Souls), tracked separately
  * rather than as the mockup's combined 23/40 counter. Still awaiting formal
- * sign-off in design/Open Decisions.md — these are defaults, not a decision.
+ * sign-off in design/Open Decisions.md â€” these are defaults, not a decision.
  *
  * Found Souls reuse the fragment restoration path entirely; is_soul only
  * changes how they draw and what they add to the mix. */
@@ -482,7 +482,7 @@ typedef struct {
 } World;
 
 /* Scratch buffers for generation. One struct so callers allocate it once as a
- * stack local — these must never be `static`, see the .data trap in
+ * stack local â€” these must never be `static`, see the .data trap in
  * design/Toolchain Setup.md. */
 typedef struct {
     Uint8 seen[WORLD_W * WORLD_H];
@@ -501,6 +501,7 @@ typedef struct {
     World  w;
     Player p;
     Entity ents[ENTITY_COUNT];
+    Uint64 seed;            /* world seed, kept for the decoration hash */
     int    gen_attempts;    /* >0 attempts used; <0 means gating was relaxed */
     int    frags_restored;  /* tracked separately from souls, per Fragments.md */
     int    souls_restored;
@@ -524,7 +525,7 @@ static void world_gen(World *w, Rng *rng)
 {
     /* Deliberately a local, not a static. On PE/COFF, -fdata-sections emits
      * zero-initialised statics as .data$name COMDATs, which are stored in the
-     * file — 40 KB of literal zeros measured in the executable before this was
+     * file â€” 40 KB of literal zeros measured in the executable before this was
      * moved to the stack. Keep world-sized scratch buffers off the static path. */
     Uint8 next[WORLD_H][WORLD_W];
     int x, y, pass;
@@ -559,7 +560,7 @@ static void world_gen(World *w, Rng *rng)
 /* Multi-source BFS across open tiles. Fills dist (hop count, -1 unreachable)
  * and, when owner is non-NULL, which source claimed each tile. Because regions
  * grow outward from their seeds in lockstep, every region it produces is
- * connected by construction — there is no way to end up with an island of tiles
+ * connected by construction â€” there is no way to end up with an island of tiles
  * assigned to a region they cannot walk to. */
 static void bfs_open(const World *w, const int *sources, int nsrc,
                      int *dist, Uint8 *owner, int *queue)
@@ -603,7 +604,7 @@ static void bfs_open(const World *w, const int *sources, int nsrc,
 
 /* Partition the walkable area into REGION_COUNT connected regions.
  *
- * Seeds are chosen by farthest-point sampling — repeatedly take the walkable
+ * Seeds are chosen by farthest-point sampling â€” repeatedly take the walkable
  * tile furthest (in path distance, not straight line) from every seed chosen so
  * far. Path distance matters: two tiles either side of a wall are close in
  * space but far apart to walk, and sampling on straight-line distance produces
@@ -705,7 +706,7 @@ static void regions_depth(const World *w, int *depth)
 }
 
 /* Assign terrain, biased by depth so gating ramps outward from spawn. This only
- * has to be *plausible* — the reachability invariant is what makes it correct,
+ * has to be *plausible* â€” the reachability invariant is what makes it correct,
  * and it regenerates this if the layout turns out unsolvable. */
 static void regions_assign_terrain(World *w, Rng *rng, const int *depth)
 {
@@ -732,7 +733,7 @@ static void regions_assign_terrain(World *w, Rng *rng, const int *depth)
 /* ------------------------------------------------- reachability invariant -- */
 
 /* Which regions can be entered with this ability set, walking out from spawn.
- * Bitmask over regions — REGION_COUNT is capped at 32 for exactly this. */
+ * Bitmask over regions â€” REGION_COUNT is capped at 32 for exactly this. */
 static Uint32 regions_reachable(const World *w, Uint8 abilities)
 {
     Uint32 visited = 0;
@@ -764,7 +765,7 @@ static Uint32 regions_reachable(const World *w, Uint8 abilities)
 
 /* THE invariant (design/systems/World Generation.md): at every ability tier the
  * player holds, at least one un-restored fragment must be reachable. Simulated
- * as an actual playthrough — repeatedly restore everything currently reachable,
+ * as an actual playthrough â€” repeatedly restore everything currently reachable,
  * bank any abilities that grants, and see if the frontier ever opens further.
  * If the loop stalls with entities left, the world has a dead end.
  *
@@ -827,8 +828,8 @@ static int pick_tile_in_region(const World *w, int r, Rng *rng)
     return chosen;
 }
 
-/* Place the three ability grants on the advancing frontier — each one inside
- * what is reachable *before* it is granted — then scatter the rest anywhere
+/* Place the three ability grants on the advancing frontier â€” each one inside
+ * what is reachable *before* it is granted â€” then scatter the rest anywhere
  * reachable once everything is held. Placing by frontier rather than at random
  * makes solvable layouts the common case; world_solvable is still what proves
  * it, since this alone guarantees nothing. */
@@ -958,7 +959,7 @@ static void move_axis(Game *g, float dx, float dy)
 }
 
 /* Raise reveal toward 1 within a radius of the player. WEEK 1 PLACEHOLDER for
- * the trigger only — the shipped trigger is restoring a fragment, which sets a
+ * the trigger only â€” the shipped trigger is restoring a fragment, which sets a
  * whole region's restoration% (see design/systems/Fog and Reveal.md). The blend
  * maths below is the real thing; only what raises it is temporary. */
 static void reveal_around(Game *g, float dt)
@@ -1006,7 +1007,7 @@ static void input_poll(Input *in)
 }
 
 /* Nearest un-restored entity within reach, or -1. Proximity + a keypress is the
- * whole interaction — design/systems/Fragments.md is explicit that restoration
+ * whole interaction â€” design/systems/Fragments.md is explicit that restoration
  * is "a short confirm beat, not a puzzle-minigame". */
 static int entity_in_reach(const Game *g)
 {
@@ -1108,7 +1109,7 @@ static void sim_step(Game *g, const Input *in, float dt)
  * be 3500 tiles deep and blowing the stack in a generator is not a bug anyone
  * enjoys finding later.
  *
- * This is also the seed of Week 2's reachability invariant — the same fill
+ * This is also the seed of Week 2's reachability invariant â€” the same fill
  * answers "can the player actually get to that fragment?". */
 static int flood_open(const World *w, Uint8 *seen, int *stack, int sx, int sy,
                       int *first, int *sum_x, int *sum_y)
@@ -1161,7 +1162,7 @@ static int flood_open(const World *w, Uint8 *seen, int *stack, int sx, int sy,
  * Render-only, and deliberately the last thing game_init does: it needs
  * regions[].terrain, and nothing downstream may depend on it.
  *
- * `dist` is a function local, never a static — see the .data trap in
+ * `dist` is a function local, never a static â€” see the .data trap in
  * design/Toolchain Setup.md. */
 static void world_heights(World *w)
 {
@@ -1221,7 +1222,7 @@ static int height_at(const World *w, int tx, int ty)
  * effect were untestable. */
 static int game_init(Game *g, Rngs *rngs)
 {
-    /* Scratch is a local, not a static — see the .data trap in
+    /* Scratch is a local, not a static â€” see the .data trap in
      * design/Toolchain Setup.md. ~47 KB of frame against a 2 MB stack. */
     Scratch sc;
     Uint8 *seen = sc.seen;
@@ -1230,7 +1231,7 @@ static int game_init(Game *g, Rngs *rngs)
     int x, y, biggest = 0, biggest_first = -1;
 
     /* Wipe everything first. Leaving progress counters alone made restoration
-     * totals accumulate across regenerations — pressing R would have carried
+     * totals accumulate across regenerations â€” pressing R would have carried
      * the previous world's fragment count into the new one, and
      * game_complete() would fire on a world nobody had touched. */
     SDL_zero(*g);
@@ -1264,14 +1265,14 @@ static int game_init(Game *g, Rngs *rngs)
     /* Pass 2: re-flood only that region so `seen` marks exactly its tiles,
      * then spawn on the one nearest its centroid. Spawning on the region's
      * lowest tile index instead put the player hard against the world corner,
-     * where the camera clamps and most of the view is wasted — which made the
+     * where the camera clamps and most of the view is wasted â€” which made the
      * reveal effect much harder to judge. */
     {
         int sum_x = 0, sum_y = 0, first = -1;
         int cx, cy, best_d = WORLD_W * WORLD_W + WORLD_H * WORLD_H, best_idx = biggest_first;
 
         /* sizeof(sc.seen), NOT sizeof(seen): `seen` is a pointer, so sizeof
-         * would be 8 and this memset would clear almost nothing — leaving pass
+         * would be 8 and this memset would clear almost nothing â€” leaving pass
          * 1's marks in place, making this flood return immediately and letting
          * the centroid search below range over every component instead of this
          * one. That put spawns in tiny side pockets. */
@@ -1306,6 +1307,7 @@ static int game_init(Game *g, Rngs *rngs)
      * of the SDL_zero at the top, which draws flat and is correct. */
     world_heights(&g->w);
 
+    g->seed = rngs->seed;
     g->cam_x = 0;
     g->cam_y = 0;
     return biggest; /* open tiles reachable from spawn */
@@ -1316,7 +1318,7 @@ static int game_init(Game *g, Rngs *rngs)
  *
  * This exists because "~56 fps" was never evidence of anything. The loop sleeps
  * on purpose, and SDL_Delay's millisecond granularity sets the frame period by
- * itself — Sleep(14) routinely returns at 15-16 ms on Windows. So the one
+ * itself â€” Sleep(14) routinely returns at 15-16 ms on Windows. So the one
  * number we had measured sleep, not drawing, and the render cost of the tile
  * loop has never been measured at all (design/Toolchain Setup.md lists it as
  * unprofiled). Separate the two before changing the renderer, so the isometric
@@ -1379,7 +1381,7 @@ static void perf_report(const Perf *p, int w, int h, int scale)
 
 /* ------------------------------------------------------------- graphics -- */
 
-/* Window surfaces are plain memory — never RLE-encoded — so SDL_MUSTLOCK is
+/* Window surfaces are plain memory â€” never RLE-encoded â€” so SDL_MUSTLOCK is
  * false for them and no lock/unlock is needed. Caller guarantees 32bpp.
  * Clips, because tiles at the screen edge are partly off it. */
 static void fill_rect(SDL_Surface *s, int x, int y, int w, int h, Uint32 colour)
@@ -1394,7 +1396,7 @@ static void fill_rect(SDL_Surface *s, int x, int y, int w, int h, Uint32 colour)
         return;
 
     /* Counted after clipping, so this is real writes rather than requested
-     * ones — an off-screen tile must not inflate the number. */
+     * ones â€” an off-screen tile must not inflate the number. */
     PERF_COUNT(w * h);
 
     for (iy = 0; iy < h; iy++) {
@@ -1411,7 +1413,7 @@ static void fill_rect(SDL_Surface *s, int x, int y, int w, int h, Uint32 colour)
  * Each source row is expanded once and the result memcpy'd down to the other
  * s-1 rows, so scaling vertically costs a linear copy rather than another pass
  * of per-pixel work. Centring matters because a fullscreen window is rarely an
- * exact multiple of the logical size — 960x540 at x2 leaves a 64x36 border on
+ * exact multiple of the logical size â€” 960x540 at x2 leaves a 64x36 border on
  * a 2048x1152 desktop, and that border holds whatever was in the surface
  * before unless it is cleared. */
 static void blit_scale(const SDL_Surface *src, SDL_Surface *dst, int s)
@@ -1456,6 +1458,32 @@ static void blit_scale(const SDL_Surface *src, SDL_Surface *dst, int s)
     PERF_COUNT(dw * dh);
 }
 
+/* Per-tile decoration hash: a SplitMix64 finaliser over (seed, tx, ty).
+ *
+ * Deliberately stateless and deliberately NOT drawn from the terrain or entity
+ * RNG streams. Decoration therefore cannot perturb a single fragment placement,
+ * and every existing seed-based test result stays valid by construction rather
+ * than by tracing the call graph to prove it. It is also stable regardless of
+ * draw order or culling, so nothing crawls or flickers as the camera moves.
+ *
+ * One call per tile per frame; each decoration parameter is a different bit
+ * field of the single result. The budget, fixed once so it is never re-derived:
+ *
+ *   0-11  detail mark positions      18-21  trunk/canopy size jitter
+ *  12-14  canopy palette             22-26  lean and shape jitter
+ *  16-17  trunk palette              27-31  sway phase
+ *   8-12  prop presence roll (reused; presence is decided before shape)
+ */
+static Uint32 tile_hash(Uint64 seed, int tx, int ty)
+{
+    Uint64 h = seed * 0x9E3779B97F4A7C15ULL
+             + (Uint64)(Uint32)tx * 0xBF58476D1CE4E5B9ULL
+             + (Uint64)(Uint32)ty * 0x94D049BB133111EBULL;
+    h ^= h >> 30; h *= 0xBF58476D1CE4E5B9ULL;
+    h ^= h >> 27; h *= 0x94D049BB133111EBULL;
+    return (Uint32)(h ^ (h >> 31));
+}
+
 /* World pixels -> isometric map pixels. The camera is NOT applied here; callers
  * subtract cam_x/cam_y, exactly as the flat renderer did. */
 static void world_to_iso(float wx, float wy, int *sx, int *sy)
@@ -1466,7 +1494,7 @@ static void world_to_iso(float wx, float wy, int *sx, int *sy)
 
 /* Vertical run. x is clipped by the caller (once per tile, not once per column),
  * so only y is tested here. Striding by pitch sounds cache-hostile, but a whole
- * diamond is 64 adjacent columns of at most ~80 px — a working set small enough
+ * diamond is 64 adjacent columns of at most ~80 px â€” a working set small enough
  * to stay resident while consecutive columns re-touch the same lines. */
 static void vspan(SDL_Surface *s, int x, int y, int n, Uint32 c)
 {
@@ -1507,7 +1535,7 @@ static void vspan(SDL_Surface *s, int x, int y, int n, Uint32 c)
  * hl/hr are the drops to the front-left and front-right neighbours, already
  * clamped at 0 by the caller so hidden faces are never drawn. */
 static void iso_tile(SDL_Surface *fb, int ax, int ay, int h, int hl, int hr,
-                     Uint32 top, Uint32 cl, Uint32 cr)
+                     Uint32 top, Uint32 top2, Uint32 grain, Uint32 cl, Uint32 cr)
 {
     int i, i0 = 0, i1 = DIA_W;
     int x0 = ax - ISO_HW;
@@ -1527,7 +1555,21 @@ static void iso_tile(SDL_Surface *fb, int ax, int ay, int h, int hl, int hr,
         y = ay - h + (a >> 1);
         n = DIA_H - a;
         left = (i < ISO_HW);
-        vspan(fb, x0 + i, y, n, top);
+        /* Grain, as a two-tone dither over the top face. Indexed by (i ^ a>>1)
+         * rather than by i so the pattern follows the tile's own diagonal axes
+         * and reads as ground in perspective rather than screen-aligned noise.
+         *
+         * Split into two runs because one bit per column produced visible
+         * vertical stripes: the whole 32 px column took a single shade. Two
+         * independently-indexed halves break the streak for one extra vspan.
+         * Callers wanting a flat tile pass top2 == top and grain == 0. */
+        {
+            int half = n >> 1;
+            vspan(fb, x0 + i, y, half,
+                  ((grain >> ((i ^ (a >> 1)) & 31)) & 1) ? top2 : top);
+            vspan(fb, x0 + i, y + half, n - half,
+                  ((grain >> ((i * 5 + a + 7) & 31)) & 1) ? top2 : top);
+        }
         vspan(fb, x0 + i, y + n, left ? hl : hr, left ? cl : cr);
     }
 }
@@ -1553,7 +1595,30 @@ static Uint32 fog_lerp(SDL_Surface *s, int r, int gr, int b, float reveal)
                       (Uint8)(fb + ((float)b - fb) * reveal));
 }
 
-/* True colour per terrain, before the fog blend. Flat-shaded and readable —
+/* Scatter a few marks across a tile's top face â€” grass tufts, pebbles, cracks,
+ * strata. This is what stops a field of one terrain reading as a single flat
+ * colour, and it is the cheapest detail in the renderer by a wide margin.
+ *
+ * The trick that removes all clipping: a mark is positioned by its offset
+ * WITHIN the tile in world pixels and then projected, so it lands inside the
+ * diamond by construction and needs no shape test. Positions come from the tile
+ * hash, so a given tile's marks are identical every frame â€” deterministic, not
+ * per-frame noise. */
+static void tile_detail(SDL_Surface *fb, int ax, int ay, int h, Uint32 hash,
+                        Uint32 c, int nmark, int mw)
+{
+    int k;
+
+    for (k = 0; k < nmark; k++) {
+        /* Inset to 4..27 of the tile's 32 px so a mark never straddles the
+         * diamond's very edge, where it would read as a notch in the outline. */
+        int ox = 4 + (int)((hash >> (k * 4)) & 15) + (int)((hash >> (k * 4 + 2)) & 7);
+        int oy = 4 + (int)((hash >> (k * 4 + 6)) & 15) + (int)((hash >> (k * 4 + 1)) & 7);
+        fill_rect(fb, ax + ox - oy, ay + ((ox + oy) >> 1) - h, mw, 1, c);
+    }
+}
+
+/* True colour per terrain, before the fog blend. Flat-shaded and readable â€”
  * design/Overview.md is explicit that the painted mockup is pitch art and the
  * in-engine target is simple procedural geometry. */
 static void terrain_colour(int terrain, int *r, int *g, int *b)
@@ -1567,7 +1632,7 @@ static void terrain_colour(int terrain, int *r, int *g, int *b)
 }
 
 /* How much of a tile's colour reaches the screen: sight shows shape,
- * restoration brings colour, and whichever is stronger wins — so a restored
+ * restoration brings colour, and whichever is stronger wins â€” so a restored
  * region stays lit after you leave it, because restoration is permanent and
  * sight is not a memory of colour. */
 static float tile_reveal(const Game *g, int tx, int ty, int overlay)
@@ -1632,9 +1697,9 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
         for (tx = lo; tx <= hi; tx++) {
             int ty = band - tx;
             int ax = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
-            int cr, cg, cb, h, hl, hr;
+            int cr, cg, cb, h, hl, hr, terr, nmark, mw;
             float rev;
-            Uint32 top, c_l = 0, c_r = 0;
+            Uint32 top, top2, c_l = 0, c_r = 0, hash, mark;
             if (ax + ISO_HW <= 0 || ax - ISO_HW >= fb->w)
                 continue;
 
@@ -1649,7 +1714,12 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
 
             tile_colour(g, tx, ty, overlay, &cr, &cg, &cb);
             rev = tile_reveal(g, tx, ty, overlay);
+            hash = tile_hash(g->seed, tx, ty);
             top = fog_lerp(fb, cr, cg, cb, rev);
+            /* A second shade a few per cent lighter, dithered across the face.
+             * Small on purpose: enough to break the flat fill, not enough to
+             * read as a pattern. */
+            top2 = fog_lerp(fb, cr + (cr >> 4), cg + (cg >> 4), cb + (cb >> 4), rev);
             /* Most tiles are flat, so the side colours are only computed when
              * there is actually a face to paint with them. */
             if (hl)
@@ -1658,7 +1728,32 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             if (hr)
                 c_r = fog_lerp(fb, cr * FACE_R / 100, cg * FACE_R / 100,
                                cb * FACE_R / 100, rev);
-            iso_tile(fb, ax, ay, h, hl, hr, top, c_l, c_r);
+            iso_tile(fb, ax, ay, h, hl, hr, top, top2, hash, c_l, c_r);
+
+            /* Per-terrain marks on top of the face. Rock gets a few pale
+             * pebbles and a crack; grass gets tufts, both lighter and darker so
+             * it reads as texture rather than as sprinkles; ledges get long
+             * horizontal strata that emphasise the shelf. */
+            terr = g->w.solid[ty][tx] ? -1 : (g->w.region[ty][tx] == REGION_NONE
+                       ? TERRAIN_NORMAL : g->w.regions[g->w.region[ty][tx]].terrain);
+            nmark = 5; mw = 2;
+            if (terr < 0) {
+                mark = fog_lerp(fb, 0x74, 0x64, 0x54, rev); nmark = 3; mw = 3;
+            } else if (terr == TERRAIN_LEDGE) {
+                mark = fog_lerp(fb, 0xa2, 0x92, 0x72, rev); nmark = 3; mw = 7;
+            } else if (terr == TERRAIN_WATER) {
+                mark = fog_lerp(fb, 0x58, 0x92, 0xc4, rev); nmark = 3; mw = 5;
+            } else if (terr == TERRAIN_DARK) {
+                mark = fog_lerp(fb, 0x64, 0x54, 0x88, rev); nmark = 2; mw = 2;
+            } else {
+                mark = fog_lerp(fb, 0x74, 0xc6, 0x6e, rev); nmark = 6; mw = 2;
+            }
+            tile_detail(fb, ax, ay, h, hash, mark, nmark, mw);
+            /* Grass gets a second, darker scatter. One shade of speckle reads
+             * as dirt on a flat field; two read as depth in the grass. */
+            if (terr == TERRAIN_NORMAL)
+                tile_detail(fb, ax, ay, h, hash * 2654435761u,
+                            fog_lerp(fb, 0x3a, 0x78, 0x40, rev), 5, 2);
         }
     }
 
@@ -1690,7 +1785,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             cr = 0xff; cg = 0xd7; cb = 0x6a; s = 12;
         }
         /* Entities are tile-anchored, so project the tile centre, then lift by
-         * the tile's height — without this a fragment on a ledge is drawn
+         * the tile's height â€” without this a fragment on a ledge is drawn
          * buried in the cliff it sits on. */
         world_to_iso((float)(ex * TILE + TILE / 2), (float)(ey * TILE + TILE / 2),
                      &sx, &sy);
@@ -1699,7 +1794,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                   SDL_MapRGB(fb->format, (Uint8)cr, (Uint8)cg, (Uint8)cb));
     }
 
-    /* A ring under the player when something is close enough to restore —
+    /* A ring under the player when something is close enough to restore â€”
      * the only affordance telling you the interact key will do anything.
      * Still an axis-aligned box; making it a diamond is a polish-pass job. */
     if (entity_in_reach(g) >= 0) {
@@ -1731,7 +1826,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
 
 /* Grid view: several seeds at once, which is how you spot a generator that is
  * subtly biased far faster than by walking one world at a time. Rendered once
- * into a heap buffer rather than regenerating every frame — generation is far
+ * into a heap buffer rather than regenerating every frame â€” generation is far
  * too slow to run 12 worlds per frame. */
 #define GRID_COLS 4
 #define GRID_ROWS 3
@@ -1806,7 +1901,7 @@ static void render_grid(SDL_Surface *fb, Uint64 base_seed)
 /* Same shape as the flat version; only the coordinate space and the two limits
  * change. The world's screen footprint is a diamond inside a 4000x2000 box, so
  * at the east and west corners the visible content is a thin wedge and the rest
- * is void. That is not a bug to fix — a landmass floating in a dark abyss is the
+ * is void. That is not a bug to fix â€” a landmass floating in a dark abyss is the
  * expected isometric read, and world_gen's forced-solid border ring gives it a
  * rock rim for free. */
 static void camera_follow(Game *g, int view_w, int view_h)
@@ -1864,7 +1959,7 @@ static int pick_scale(void)
  *
  * Returns NULL if it cannot be made, and the caller then draws straight into
  * the window surface at native resolution. That is a real degraded mode rather
- * than a crash — the renderer does not care what resolution it is handed. */
+ * than a crash â€” the renderer does not care what resolution it is handed. */
 static SDL_Surface *backbuffer_new(const SDL_Surface *win_fb, void **pixels)
 {
     SDL_Surface *s;
@@ -1883,8 +1978,8 @@ static SDL_Surface *backbuffer_new(const SDL_Surface *win_fb, void **pixels)
 }
 
 /* Push whatever was drawn to the screen. The scale is recomputed from the live
- * surface every frame rather than remembered, so toggling fullscreen — where
- * the window stops being an exact multiple of the logical size — needs no
+ * surface every frame rather than remembered, so toggling fullscreen â€” where
+ * the window stops being an exact multiple of the logical size â€” needs no
  * special case. `back` may be NULL (degraded mode), in which case the drawing
  * already went straight to the window surface. */
 static void present(SDL_Window *win, SDL_Surface *fb, SDL_Surface *back)
@@ -1903,7 +1998,7 @@ static void present(SDL_Window *win, SDL_Surface *fb, SDL_Surface *back)
 
 /* Drives the simulation headlessly with scripted input. The invariant that
  * matters: the player must never occupy a solid tile, on any seed, from any
- * direction, at any point during the run — not merely at the end. */
+ * direction, at any point during the run â€” not merely at the end. */
 static int move_selftest(Uint64 seed, int verbose)
 {
     Game g;
@@ -1973,7 +2068,7 @@ static int move_selftest(Uint64 seed, int verbose)
         fails++;
     }
 
-    /* A player that cannot move at all means a sealed spawn pocket — legal for
+    /* A player that cannot move at all means a sealed spawn pocket â€” legal for
      * this placeholder generator, but worth surfacing rather than hiding. */
     moved = SDL_fabsf(g.p.x - startx) + SDL_fabsf(g.p.y - starty);
 
@@ -2070,7 +2165,7 @@ static int region_selftest(Uint64 seed, int verbose)
         }
     }
 
-    /* 4. Graph is connected ignoring ability gates — otherwise some regions
+    /* 4. Graph is connected ignoring ability gates â€” otherwise some regions
      *    could never be entered no matter what the player collects. */
     regions_depth(&g.w, depth);
     for (i = 0; i < g.w.region_count; i++) {
@@ -2082,7 +2177,7 @@ static int region_selftest(Uint64 seed, int verbose)
 
     /* 5. COVERAGE: every tile the player can walk to must belong to a region.
      *    This is the check that matters, and the one whose absence let a badly
-     *    broken partition pass everything else — the other tests are all
+     *    broken partition pass everything else â€” the other tests are all
      *    relative (counts agreeing with counts), so a partition covering 5 of
      *    1585 walkable tiles satisfied them trivially. Assert the absolute
      *    property, not just internal consistency. */
@@ -2167,7 +2262,7 @@ static Uint32 walk_regions(const World *w, Uint8 abilities, int spawn_tile,
  *
  * Week 2's reachability guarantee is computed on the region graph, but what a
  * player can actually reach is decided by tile-level collision. If those two
- * ever disagree, the guarantee is worthless — the generator would certify a
+ * ever disagree, the guarantee is worthless â€” the generator would certify a
  * world as completable that the movement code makes impossible. So compare them
  * directly at every ability tier. */
 static int gating_selftest(Uint64 seed, int verbose)
@@ -2211,7 +2306,7 @@ static int gating_selftest(Uint64 seed, int verbose)
     return fails;
 }
 
-/* BFS over tiles standable under `abilities` — the same rule the movement code
+/* BFS over tiles standable under `abilities` â€” the same rule the movement code
  * enforces, so paths it produces are paths a player could actually walk. */
 static void bfs_gated(const World *w, Uint8 abilities, int start, int *dist, int *queue)
 {
@@ -2248,7 +2343,7 @@ static void bfs_gated(const World *w, Uint8 abilities, int start, int *dist, int
 /* One tick of an autopilot that plays the real game: restores anything in
  * reach, otherwise walks one step along a genuine shortest path to the nearest
  * reachable un-restored entity. Uses the real collision, the real ability
- * flags and the real restore call — nothing is teleported or shortcut, because
+ * flags and the real restore call â€” nothing is teleported or shortcut, because
  * the point is to catch a divergence between the model and the game.
  *
  * Returns 1 if it restored something, 0 if it moved, -1 if nothing is
@@ -2280,7 +2375,7 @@ static int autopilot_tick(Game *g, Scratch *sc)
         return -1;
 
     /* Re-root the field at the target so we can descend it from where we
-     * stand — that gives the next step directly, with no path buffer and no
+     * stand â€” that gives the next step directly, with no path buffer and no
      * greedy steering to wedge in a concave corner. */
     bfs_gated(&g->w, g->p.abilities, g->ents[target].tile, sc->dist, sc->queue);
     if (sc->dist[here] < 0)
@@ -2369,7 +2464,7 @@ static int playthrough_selftest(Uint64 seed, int verbose)
 }
 
 /* The same autopilot, but in a real window with real rendering. Exists so the
- * restoration visual can be seen and captured deterministically — hunting for a
+ * restoration visual can be seen and captured deterministically â€” hunting for a
  * fragment by hand with synthetic keystrokes is luck, and the core hook of this
  * game is what the screen does when a memory comes back. */
 static int autoplay_selftest(Uint64 seed, int ms)
@@ -2516,7 +2611,7 @@ static int solvable_negative_test(Uint64 seed)
 
 /* The reachability invariant, checked independently of the generator that is
  * supposed to enforce it. Also confirms every entity actually sits on a
- * walkable tile in the region it claims — a fragment placed inside rock is
+ * walkable tile in the region it claims â€” a fragment placed inside rock is
  * unreachable no matter what the graph says. */
 static int reach_selftest(Uint64 seed, int verbose, int *relaxed)
 {
@@ -2586,7 +2681,7 @@ static int reach_selftest(Uint64 seed, int verbose, int *relaxed)
 /* Speed must not depend on direction. Run in a deliberately empty world so
  * walls cannot mask the result: straight and diagonal movement over the same
  * number of ticks must cover the same distance. Without the 0.707 factor,
- * diagonal travel comes out 1.41x too fast — a bug that is easy to ship and
+ * diagonal travel comes out 1.41x too fast â€” a bug that is easy to ship and
  * annoying to notice. */
 static int speed_selftest(void)
 {
@@ -2829,7 +2924,7 @@ static int rng_selftest(Uint64 seed)
 /* --- isometric rasteriser ------------------------------------------------
  *
  * The single highest-risk claim in the isometric change is that diamonds tile
- * the plane exactly — no gaps from rounding, no overdraw — and that raising a
+ * the plane exactly â€” no gaps from rounding, no overdraw â€” and that raising a
  * tile leaves a hole its side face fills precisely. Both are argued from an
  * identity in iso_tile's comment; an argument is not a check, so this measures
  * it instead. Headless, no window, milliseconds.
@@ -2844,7 +2939,7 @@ static int rng_selftest(Uint64 seed)
 #define ISO_T_OY 160
 
 /* Our drawing code reads only w/h/pitch/pixels, so a headless framebuffer needs
- * no SDL surface API and no pixel format — colours are passed in already
+ * no SDL surface API and no pixel format â€” colours are passed in already
  * packed. This is also the fallback documented for the backbuffer if
  * SDL_CreateRGBSurfaceWithFormatFrom is ever culled from our SDL build. */
 static void fake_surface(SDL_Surface *s, Uint32 *px, int w, int h)
@@ -2857,7 +2952,7 @@ static void fake_surface(SDL_Surface *s, Uint32 *px, int w, int h)
 }
 
 /* Draw one patch tile. Heights come from the caller's array, with out-of-patch
- * treated as ground level — exactly how the renderer treats out-of-world. */
+ * treated as ground level â€” exactly how the renderer treats out-of-world. */
 static void iso_t_draw(SDL_Surface *s, const int *hgt, int tx, int ty, Uint32 c,
                        int dy)
 {
@@ -2869,7 +2964,7 @@ static void iso_t_draw(SDL_Surface *s, const int *hgt, int tx, int ty, Uint32 c,
 
     if (hl < 0) hl = 0;
     if (hr < 0) hr = 0;
-    iso_tile(s, ax, ay, h, hl, hr, c, c, c);
+    iso_tile(s, ax, ay, h, hl, hr, c, c, 0, c, c);
 }
 
 static int iso_selftest(Uint64 seed)
@@ -2938,7 +3033,7 @@ static int iso_selftest(Uint64 seed)
 
     /* ---- negative control -------------------------------------------------
      * Every check above passed on the first attempt, which is exactly when a
-     * checker deserves suspicion — a function hardwired to print PASS would
+     * checker deserves suspicion â€” a function hardwired to print PASS would
      * have produced identical output. Re-rasterise the same flat patch with a
      * one-pixel vertical error injected into half the tiles. That is the
      * smallest error the exactness claim forbids, so the coverage check must
@@ -2986,7 +3081,7 @@ static int iso_selftest(Uint64 seed)
         }
 
     /* case 2: no seams. Along any interior column the covered pixels must form
-     * one unbroken run — a gap between a raised tile's side face and the top
+     * one unbroken run â€” a gap between a raised tile's side face and the top
      * face of the tile in front of it would show up as a hole here. */
     {
         int holes = 0, x, y;
@@ -3006,7 +3101,7 @@ static int iso_selftest(Uint64 seed)
     }
 
     /* case 3: depth order. Every pixel must end up owned by the nearest tile
-     * that covers it — a farther tile painting over a nearer one is the classic
+     * that covers it â€” a farther tile painting over a nearer one is the classic
      * painter's-algorithm bug and is invisible until something tall exists. */
     {
         int wrong = 0;
@@ -3019,8 +3114,8 @@ static int iso_selftest(Uint64 seed)
 
     /* ---- case 4: the upscale is exactly nearest-neighbour -----------------
      * The logical image must survive scaling untouched. Comparing framebuffer
-     * checksums across the resolution change cannot show that — the images are
-     * different sizes — so check the actual property: every source pixel
+     * checksums across the resolution change cannot show that â€” the images are
+     * different sizes â€” so check the actual property: every source pixel
      * becomes exactly its own s-by-s block at the right place, and every pixel
      * outside the scaled image is cleared.
      *
@@ -3219,7 +3314,7 @@ int main(int argc, char **argv)
     Rngs rngs;
     SDL_AudioSpec have;
     SDL_AudioDeviceID dev;
-    Game game; /* local, not static — see the note in world_gen */
+    Game game; /* local, not static â€” see the note in world_gen */
     Uint64 prev;
     double perf;
     float acc = 0.0f;
@@ -3317,7 +3412,7 @@ int main(int argc, char **argv)
     }
 #endif
 
-    /* Video is required; audio is not. These must be separate calls — SDL_Init
+    /* Video is required; audio is not. These must be separate calls â€” SDL_Init
      * fails if ANY requested subsystem fails, so asking for VIDEO|AUDIO here
      * would refuse to start the game on a machine with no working sound
      * device. Verified: with SDL_AUDIODRIVER set to a bogus value the combined
@@ -3336,7 +3431,7 @@ int main(int argc, char **argv)
     }
 
     /* Needs the window's pixel format, so it cannot be built before this point.
-     * Allocated even at scale 1, where present() copies 1:1 — F11 can raise the
+     * Allocated even at scale 1, where present() copies 1:1 â€” F11 can raise the
      * scale at any moment, and a rendering path that only exists above a
      * threshold is a path that only gets tested above one. */
     {
@@ -3398,7 +3493,7 @@ int main(int argc, char **argv)
                     /* Borderless fullscreen. On a display that is tall enough
                      * for the doubled image but not for the window chrome as
                      * well, this is the only way to get the intended pixel
-                     * scale — and it is where a pixel-art game wants to be. */
+                     * scale â€” and it is where a pixel-art game wants to be. */
                     fullscreen = !fullscreen;
                     SDL_SetWindowFullscreen(win, fullscreen
                                             ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
@@ -3458,7 +3553,7 @@ int main(int argc, char **argv)
         t_a = SDL_GetPerformanceCounter();
 #endif
         if (grid) {
-            /* Regenerate only when dirty — 12 worlds per frame would crawl —
+            /* Regenerate only when dirty â€” 12 worlds per frame would crawl â€”
              * but always re-present, so a repaint after the surface is
              * invalidated does not leave a blank window. */
             if (dirty) {
@@ -3553,7 +3648,7 @@ int main(int argc, char **argv)
     }
 
 #if WAYFARER_PERF
-    /* Reported against the LOGICAL size — that is what render() actually filled,
+    /* Reported against the LOGICAL size â€” that is what render() actually filled,
      * and quoting the window size would make the pixel ratio meaningless. */
     if (show_perf)
         perf_report(&pf, back ? back->w : LOGICAL_W, back ? back->h : LOGICAL_H,
