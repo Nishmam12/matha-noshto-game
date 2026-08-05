@@ -8,6 +8,8 @@ updated: 2026-08-05
 # Phase 12 — Dream Realm
 
 **Status:** Planned. Approved 2026-08-05 as a deliberate change of direction, timeboxed.
+**Implementation plan:** [[Phase 12 - Dream Realm Plan]] — 11 tasks across the five slices, each
+with its test-first cycle and its negative control.
 **Sequenced:** after [[Phase 08 - Save Load]], before [[Phase 10 - Motion]]. Numbered 12 rather than
 renumbered into place because every other phase file is linked by name and renumbering would break
 the graph. **It does not move the 2026-08-14 hard stop**; [[Phase 11 - Ship Critical]] still begins
@@ -39,6 +41,11 @@ both the fiction and the technical strategy (see Art Production, tier 1).
 - [ ] The grid is `108×104`. Overworld occupies rows 0–59, dream archipelago rows 64–103, with rows
       60–63 an unwalkable void band. Both landmasses generate from the same radial height field,
       run twice with different parameters.
+      **The dream sector is ragged but CONNECTED, not a true archipelago** — corrected 2026-08-05
+      while writing the plan. Genuinely separate islets would strand entities the verifier requires
+      to be reachable, and it would reject seeds forever. The islet *look* comes from a rougher
+      coast (`DREAM_ROUGH 0.78` against `LAND_ROUGH 0.55`) at the same sea threshold, not from
+      fragmenting the landmass.
 - [ ] A portal pair links the two. Travel is an `E` press with a proximity check, **not** a step-on
       trigger, so `tile_blocked` still reads `solid` and `regions[].terrain` and nothing else.
 - [ ] `portal_link()` is consulted by the walk BFS, region adjacency, the autopilot and the interact
@@ -62,16 +69,27 @@ both the fiction and the technical strategy (see Art Production, tier 1).
 dream realm is. Read by `tile_colour`, `world_heights`, `prop_at`, `place_buildings`,
 `place_rivers` and `place_entities`. Moving the sector is therefore a one-line change.
 
-**`portal_link(w, tile)`** — returns the paired tile or −1. Consulted by exactly four callers:
+**`portal_link(w, tile)`** — returns the paired tile or −1. Consulted by **five** callers, reached
+through a single `tile_neighbours()` helper:
 
-1. the walk BFS (`bfs_open` / `flood_open`),
-2. region adjacency in `regions_build`,
-3. `autopilot_tick`,
-4. the `E` interact in `sim_step`.
+1. `bfs_open` — the region partition,
+2. `flood_open` — the spawn component and `--land-test`,
+3. **`walk_regions`** (`src/main.c:4194`) — the *walk* side of `--gating-test`,
+4. region adjacency in `regions_build`,
+5. `autopilot_tick`,
 
-That (1) and (2) read the *same* function is the entire correctness argument. This is the portal's
-version of decision 33 — *a bridge clears `solid`; it is not a collision special case* — and it is
-why `--gating-test`'s walk-vs-graph assertion needs no weakening.
+plus the `E` interact in `sim_step`, which is not a traversal.
+
+> **Corrected 2026-08-05 while writing the plan.** This section originally said *four* callers and
+> omitted `walk_regions` — which is exactly the omission that would have made walk-reachable and
+> graph-reachable disagree while every other traversal looked right. Rather than document five
+> places to remember, the plan introduces **`tile_neighbours()`**: one function returning the four
+> orthogonal tiles plus the portal's pair, with each caller applying its own blocked test. The
+> split is then impossible rather than merely discouraged.
+
+That every traversal reads the *same* adjacency is the entire correctness argument. This is the
+portal's version of decision 33 — *a bridge clears `solid`; it is not a collision special case* —
+and it is why `--gating-test`'s walk-vs-graph assertion needs no weakening.
 
 ### What deliberately does not change
 
