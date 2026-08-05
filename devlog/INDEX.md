@@ -7,16 +7,33 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 692,224 bytes
-**Current status:** verified — island landform, clustered villages, a bitmap font and F3 fog-tuning
-overlay (self-test-only, +0 shipping bytes), the whole world **rescaled to 24 px tiles on a 108×60
-grid** with all art routed through `PX()`, **screen-aligned input** (`W` finally moves up) and an
-eased follow camera. No animation, no character, no audio.
+**Current `.exe` size:** 756,224 bytes
+**Current status:** verified — island landform, a bitmap font and F3 fog-tuning overlay
+(self-test-only, +0 shipping bytes), the world on 24 px tiles over a 108×60 grid with all art routed
+through `PX()`, screen-aligned input and an eased follow camera, rivers + bridges + waterfalls, and
+**37 baked sprites** through the Phase 07 asset seam. Settlement is now **capped and typed**: ≤6
+houses, ≤2 windmills, exactly 1 market stall, each footprint sized to the sprite that stands on it.
+No animation, no audio.
 **Forward plan:** see [[Phase Roadmap]] — **Phases 00–07 all done**, and 07 absorbed most of 09.
 Next: the player-occlusion decision, then Phase 08 (save/load)
-**Headroom:** 747,776 bytes under the 1,440,000 ship target
+**Headroom:** 683,776 bytes under the 1,440,000 ship target
 
 ## Sessions
+
+- [[2026-08-05-session-01]] *(Session 07)* — **The pale apron, and eight specs from someone who
+  actually looked at it.** First session driven by played-build defects rather than a phase file.
+  The pale un-walkable ring around every building was **three bugs stacked**: the footprint was
+  rolled *before* the sprite was chosen (a 120 px plot under a 64–74 px house), that overhang was
+  painted as packed earth to disguise it, and the detail pass speckled it as rock. Inverted the
+  dependency — kind first, `bld_kind_fp` sizes the plot to the sprite — and the paint covering for it
+  came out too. Added population caps (stall is an **equality**, placed first with relaxing
+  clearance), prop clearance rings checked *before* the `solid` branch that had been seeding boulders
+  onto buildings, and `clear_of_market` after a screenshot caught a cottage two tiles from the awning.
+  Purple: `TERRAIN_DARK` recoloured off violet, and **Session 06's decision to leave the bush's
+  magenta base disc for the teammates is reversed** — repainted in the source PNG *and* the baked
+  palette, verified 163 px changed with zero collateral. `--river-test`'s first threshold **failed at
+  19/40 for the wrong reason** (scored against the map, not the island) and carries a negative
+  control: flank rate 100% → 35% with the bias off. **+1,024 bytes.**
 
 - [[2026-08-05-session-01]] *(Session 05)* — **The waterfalls, and bridges stop being an argument.**
   [[Phase 06 - Water And Bridges]] closed at **+0 bytes**. `--bridge-test` regenerates each seed

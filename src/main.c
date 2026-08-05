@@ -544,26 +544,83 @@ typedef struct {
  * `variant` packs nine independent part choices at 3 bits each. There are no
  * building "types": every house is a fresh combination, which is why 40 of them
  * on screen do not read as 40 copies of five prefabs. */
+/* What stands on the plot. This used to be implicit — a footprint was rolled
+ * first and building_sprite_id picked a sprite to fit whatever came out — and
+ * that is exactly what put a pale apron of ground around every building: a 2x3
+ * plot projects to a 120 px diamond and the house standing on it is 64-74 px
+ * wide, so 20+ px of bare footprint showed on every side AND blocked movement.
+ *
+ * The dependency now runs the other way. The kind is chosen first, and its
+ * footprint is sized so the plot's diamond matches the sprite that will stand
+ * on it, which makes the solid area and the drawn area the same area. */
+enum {
+    BKIND_HOUSE = 0, /* the four small-house sprites */
+    BKIND_LARGE,     /* bld_large_building */
+    BKIND_WINDMILL,
+    BKIND_MARKET,
+    BKIND_COUNT
+};
+
+/* Footprint per kind, in tiles. A w*h plot projects to a diamond (w+h)*ISO_HW
+ * px wide, which at TILE 24 is 24*(w+h) — so these are chosen against the
+ * measured sprite widths in art_data.h, not guessed:
+ *
+ *   HOUSE     w+h=3 ->  72 px   sprites are 64/74/66/70 px
+ *   LARGE     w+h=4 ->  96 px   sprite is 91 px
+ *   WINDMILL  w+h=3 ->  72 px   sprite is 68 px
+ *   MARKET    w+h=2 ->  48 px   sprite is 59 px at the awning, narrower at
+ *                               the base, which is what has to line up
+ *
+ * Slight overhang is deliberate and correct: eaves and awnings are supposed to
+ * stick out past the walls you collide with. Slight UNDERHANG is the bug this
+ * replaces, because a footprint wider than its sprite is an invisible wall. */
+static const Uint8 bld_kind_fp[BKIND_COUNT][2] = {
+    { 2, 1 }, /* HOUSE    */
+    { 2, 2 }, /* LARGE    */
+    { 2, 1 }, /* WINDMILL */
+    { 1, 1 }  /* MARKET   */
+};
+
 typedef struct {
     Uint8  x, y, w, h;  /* footprint, in tiles */
     Uint8  levels;      /* 1..3, wall height in storeys */
     Uint8  region;
-    Uint16 pad;
+    Uint8  kind;        /* BKIND_*; decided before the footprint, see above */
+    Uint8  pad;
     Uint32 variant;
 } Building;
 
 #define BUILDING_MAX 40
-/* Houses cluster into villages rather than covering the island. BUILDING_TARGET
- * is what placement actually aims for; BUILDING_MAX stays the array bound. */
+/* Per-kind caps. The island is meant to read as sparsely settled countryside
+ * with a couple of landmarks in it, not as a town: 22 buildings scattered over
+ * four village sites filled every open plot and left nowhere to walk.
+ *
+ * These are hard ceilings, not targets. Placement rolls a count under each and
+ * may still fall short when the ground will not take a plot, EXCEPT for the
+ * market stall, which is placed with a relaxing clearance until it lands — one
+ * stall is a guarantee, not an aspiration. */
+#define BLD_HOUSE_MAX    6  /* houses and large buildings together */
+#define BLD_WINDMILL_MAX 2
+/* Tiles of open ground a plot needs around it. Two leaves a lane wide enough to
+ * walk down and to see ground through; at one, neighbouring houses ended up
+ * with a single tile between them and read as one continuous terrace. */
+#define BLD_CLEAR        2
+/* The stall's forecourt. It is a market: the space around it is the point, and
+ * at BLD_CLEAR the surrounding trees closed over it. This is also what
+ * prop_at keeps clear of vegetation — see BLD_PROP_CLEAR there. */
+#define MARKET_CLEAR     5
 /* These are in TILES, so they do not scale with tile size — they had to be
  * re-derived by hand for TILE 32 -> 24. Radius and spacing grew by 32/24 so a
  * village stays the same size in world pixels rather than shrinking with the
- * tiles; sites and target grew because the world now holds 1.8x as many tiles
- * and 3 villages in it read as an empty island. */
-#define VILLAGE_SITES   4
+ * tiles. Sites came back down to 2 with the building cap: four sites sharing
+ * six houses is not four villages, it is four pairs of sheds. */
+#define VILLAGE_SITES   2
 #define VILLAGE_RADIUS  12  /* tiles from a site centre to its outermost plot */
 #define VILLAGE_SPACING 29  /* minimum tiles between two site centres */
-#define BUILDING_TARGET 22
+/* A windmill stands away from the houses — it needs the wind, and on screen it
+ * is the tallest sprite in the game, so it earns its silhouette by not being
+ * crowded. Measured from a village site centre. */
+#define WINDMILL_OFFSET 14
 /* Wall height per storey, and the plinth under the first one.
  *
  * Both were roughly doubled after the roof-alignment fix made the real
@@ -859,6 +916,11 @@ static void world_gen(World *w, Rng *rng)
  * shrinks the reachable area — see bridge_negative_test. Always 0 outside
  * that test, so this changes nothing about normal generation. */
 static int g_suppress_bridges = 0;
+/* --river-test only: reverts river 0's source to first-valid-sample, so the
+ * flank bias can be measured against its own absence. A bias that "passes" a
+ * test its removal also passes is not doing anything. Always 0 outside that
+ * test. */
+static int g_suppress_river_bias = 0;
 #endif
 static void place_rivers(World *w, Rng *rng, int *dist, int *queue)
 {
@@ -904,14 +966,44 @@ static void place_rivers(World *w, Rng *rng, int *dist, int *queue)
         int x, y;
 
         /* Source: a genuinely inland tile, sampled rather than scanned so two
-         * rivers on the same seed do not always start in the same place. */
-        for (tries = 0; tries < 300; tries++) {
-            int cx = (int)rng_below(rng, WORLD_W);
-            int cy = (int)rng_below(rng, WORLD_H);
-            int ci = cy * WORLD_W + cx;
-            if (dist[ci] >= RIVER_SRC_MIN && w->surf[cy][cx] != SURF_RIVER) {
-                best = ci;
-                break;
+         * rivers on the same seed do not always start in the same place.
+         *
+         * River 0 additionally takes the BEST of its samples rather than the
+         * first, scoring on distance from the world's vertical centreline — so
+         * one river reliably runs down a side of the map instead of every
+         * channel cutting through the middle of the settled ground. It is a
+         * preference, not a constraint: the sample still has to clear
+         * RIVER_SRC_MIN, so on a narrow landmass the best available source is
+         * simply nearer the middle and the river still gets carved.
+         *
+         * Rivers descend the sea-distance field, so a source out on one flank
+         * reaches the sea on that flank. Biasing the source is the whole of it;
+         * the descent needs no steering. */
+        {
+            int best_score = -1;
+            int biased = (r == 0);
+            int budget = biased ? 600 : 300;
+#if WAYFARER_SELFTEST
+            if (g_suppress_river_bias)
+                biased = 0;
+#endif
+            for (tries = 0; tries < budget; tries++) {
+                int cx = (int)rng_below(rng, WORLD_W);
+                int cy = (int)rng_below(rng, WORLD_H);
+                int ci = cy * WORLD_W + cx, score;
+                if (dist[ci] < RIVER_SRC_MIN || w->surf[cy][cx] == SURF_RIVER)
+                    continue;
+                if (!biased) {
+                    best = ci;
+                    break;
+                }
+                score = cx - WORLD_W / 2;
+                if (score < 0)
+                    score = -score;
+                if (score > best_score) {
+                    best_score = score;
+                    best = ci;
+                }
             }
         }
         if (best < 0)
@@ -1009,10 +1101,76 @@ static void place_rivers(World *w, Rng *rng, int *dist, int *queue)
  * A plot needs open ground plus a one-tile gap from anything else already
  * solid, which keeps a house from fusing into a cliff and guarantees it is
  * approachable from at least one side. */
+
+/* Is a `kind`'s plot at (bx, by) standing on open ground with `clear` tiles of
+ * open ground all round it? Shared by every placement pass below, so "what
+ * counts as a legal plot" is one decision rather than four copies that drift. */
+static int plot_free(const World *w, int kind, int bx, int by, int clear)
+{
+    int bw = bld_kind_fp[kind][0], bh = bld_kind_fp[kind][1], x, y;
+
+    if (bx < 2 || by < 2 || bx + bw > WORLD_W - 2 || by + bh > WORLD_H - 2)
+        return 0;
+    for (y = by - clear; y < by + bh + clear; y++)
+        for (x = bx - clear; x < bx + bw + clear; x++)
+            if (solid_at(w, x, y))
+                return 0;
+    return 1;
+}
+
+/* Is a `kind`'s plot at (bx, by) clear of the market stall's forecourt?
+ *
+ * Separate from plot_free because it is a different question. plot_free asks
+ * whether the GROUND is open, and by the time houses are placed the stall has
+ * already claimed its clearance as open ground — which is precisely why a
+ * cottage could then land two tiles away and close the forecourt back in. The
+ * stall reserves its space against buildings as well as against vegetation, or
+ * it does not reserve it at all. */
+static int clear_of_market(const World *w, int kind, int bx, int by)
+{
+    int bw = bld_kind_fp[kind][0], bh = bld_kind_fp[kind][1], i;
+
+    for (i = 0; i < w->bld_count; i++) {
+        const Building *m = &w->bld[i];
+        if (m->kind != BKIND_MARKET)
+            continue;
+        if (bx < (int)m->x + m->w + MARKET_CLEAR && bx + bw + MARKET_CLEAR > (int)m->x &&
+            by < (int)m->y + m->h + MARKET_CLEAR && by + bh + MARKET_CLEAR > (int)m->y)
+            return 0;
+    }
+    return 1;
+}
+
+/* Stamp one building. The footprint comes from the kind, never from the caller
+ * — that is the whole point of bld_kind_fp, and letting a caller pass its own
+ * w/h is how the sprite and the collision box drifted apart last time. */
+static void stamp_building(World *w, Rng *rng, int kind, int bx, int by)
+{
+    int bw = bld_kind_fp[kind][0], bh = bld_kind_fp[kind][1], x, y;
+    Building *b;
+
+    if (w->bld_count >= BUILDING_MAX)
+        return;
+    for (y = by; y < by + bh; y++)
+        for (x = bx; x < bx + bw; x++) {
+            w->solid[y][x] = 1;
+            w->bld_at[y][x] = (Uint8)(w->bld_count + 1);
+        }
+    b = &w->bld[w->bld_count++];
+    b->x = (Uint8)bx; b->y = (Uint8)by;
+    b->w = (Uint8)bw; b->h = (Uint8)bh;
+    b->levels = (Uint8)(1 + (int)rng_below(rng, 2));
+    b->region = REGION_NONE;
+    b->kind = (Uint8)kind;
+    b->pad = 0;
+    b->variant = rng_next(rng);
+}
+
 static void place_buildings(World *w, Rng *rng)
 {
     int sx[VILLAGE_SITES], sy[VILLAGE_SITES];
     int sites = 0, tries;
+    int mills, houses, clear;
 
     w->bld_count = 0;
     SDL_memset(w->bld_at, 0, sizeof(w->bld_at));
@@ -1046,14 +1204,73 @@ static void place_buildings(World *w, Rng *rng)
     if (sites == 0)
         return; /* no open ground at all; the verifier will reject this world */
 
-    /* Footprints are 2..3 tiles, not 2..4. A 4-tile house is 256 px wide on
-     * screen against a ~20 px tree, which broke the scale contract in
-     * design/Art Bible.md §4 badly enough that the world read as warehouses
-     * with shrubs. */
-    for (tries = 0; tries < 5000 && w->bld_count < BUILDING_TARGET; tries++) {
+    /* Order matters, and it is the reverse of "most numerous first".
+     *
+     * The market stall goes down FIRST because it is the only structure with a
+     * hard clearance requirement, so it has to pick its ground before the
+     * houses have eaten the open plots. Windmills next, because they are placed
+     * by distance FROM the village and want room. Houses last, filling in
+     * whatever is left near the sites.
+     *
+     * ---- 1. the market stall: exactly one, always ------------------------
+     *
+     * Clearance relaxes rather than the stall being dropped. "One stall per
+     * map" is a guarantee the player can rely on for orientation, so a cramped
+     * stall beats no stall — but MARKET_CLEAR is tried first and on ordinary
+     * seeds it is what lands. */
+    for (clear = MARKET_CLEAR; clear >= BLD_CLEAR && w->bld_count == 0; clear--) {
+        for (tries = 0; tries < 600 && w->bld_count == 0; tries++) {
+            int s  = (int)rng_below(rng, (Uint32)sites);
+            int bx = sx[s] - VILLAGE_RADIUS + (int)rng_below(rng, VILLAGE_RADIUS * 2 + 1);
+            int by = sy[s] - VILLAGE_RADIUS + (int)rng_below(rng, VILLAGE_RADIUS * 2 + 1);
+            if (plot_free(w, BKIND_MARKET, bx, by, clear))
+                stamp_building(w, rng, BKIND_MARKET, bx, by);
+        }
+    }
+    /* Last resort: sweep the whole map for any open tile at all. Sampling near
+     * a village site is what makes the stall read as belonging to the village,
+     * but on a seed whose sites all landed in cramped ground that sampling can
+     * come up empty, and "exactly one stall" must not depend on the dice. */
+    if (w->bld_count == 0) {
+        int x, y;
+        for (y = 2; y < WORLD_H - 2 && w->bld_count == 0; y++)
+            for (x = 2; x < WORLD_W - 2 && w->bld_count == 0; x++)
+                if (plot_free(w, BKIND_MARKET, x, y, 1))
+                    stamp_building(w, rng, BKIND_MARKET, x, y);
+    }
+
+    /* ---- 2. windmills: one or two, out past the houses -------------------
+     *
+     * 1 + a coin flip rather than 0..2: a windmill is the map's tallest
+     * landmark and a seed without one loses the silhouette that tells you
+     * where the settled ground is. BLD_WINDMILL_MAX is still the ceiling.
+     *
+     * Sampled on a ring at WINDMILL_OFFSET from a site rather than in a disc,
+     * so they land outside the village instead of in the middle of it. */
+    mills = 1 + (int)rng_below(rng, BLD_WINDMILL_MAX);
+    for (tries = 0; tries < 1500 && mills > 0; tries++) {
         int s  = (int)rng_below(rng, (Uint32)sites);
-        int bw = 2 + (int)rng_below(rng, 2);          /* 2..3 tiles */
-        int bh = 2 + (int)rng_below(rng, 2);
+        int bx = sx[s] - WINDMILL_OFFSET + (int)rng_below(rng, WINDMILL_OFFSET * 2 + 1);
+        int by = sy[s] - WINDMILL_OFFSET + (int)rng_below(rng, WINDMILL_OFFSET * 2 + 1);
+        int dx = bx - sx[s], dy = by - sy[s];
+        if (dx * dx + dy * dy < WINDMILL_OFFSET * WINDMILL_OFFSET)
+            continue; /* inside the village; that is not where a mill goes */
+        if (!plot_free(w, BKIND_WINDMILL, bx, by, BLD_CLEAR + 1) ||
+            !clear_of_market(w, BKIND_WINDMILL, bx, by))
+            continue;
+        stamp_building(w, rng, BKIND_WINDMILL, bx, by);
+        mills--;
+    }
+
+    /* ---- 3. houses and halls: up to BLD_HOUSE_MAX between them ----------
+     *
+     * The large building is rolled at 1 in 5, which is the same odds it had
+     * when one sprite out of five was picked uniformly — a village silhouette
+     * wants a hall standing over the cottages now and then, not every time. */
+    houses = BLD_HOUSE_MAX - 2 + (int)rng_below(rng, 3); /* 4..6 */
+    for (tries = 0; tries < 3000 && houses > 0; tries++) {
+        int s = (int)rng_below(rng, (Uint32)sites);
+        int kind = (rng_below(rng, 5) == 0) ? BKIND_LARGE : BKIND_HOUSE;
         /* Two draws summed, so plots bunch toward the site centre and thin out
          * at the edge rather than filling a hard-edged disc. */
         int bx = sx[s] - VILLAGE_RADIUS
@@ -1062,40 +1279,11 @@ static void place_buildings(World *w, Rng *rng)
         int by = sy[s] - VILLAGE_RADIUS
                + (int)rng_below(rng, VILLAGE_RADIUS + 1)
                + (int)rng_below(rng, VILLAGE_RADIUS + 1);
-        int x, y, ok = 1;
-
-        if (bx < 2 || by < 2 || bx + bw > WORLD_W - 2 || by + bh > WORLD_H - 2)
+        if (!plot_free(w, kind, bx, by, BLD_CLEAR) ||
+            !clear_of_market(w, kind, bx, by))
             continue;
-
-        /* The footprint and a TWO-tile skirt must all be open ground. At one
-         * tile, neighbouring houses ended up with a single tile between them
-         * and the cluster read as one continuous terrace of roofs; two tiles
-         * leaves a lane wide enough to walk down and to see ground through.
-         * It also still guarantees the plot is approachable from every side. */
-        for (y = by - 2; y <= by + bh + 1 && ok; y++)
-            for (x = bx - 2; x <= bx + bw + 1 && ok; x++)
-                if (solid_at(w, x, y))
-                    ok = 0;
-        if (!ok)
-            continue;
-
-        for (y = by; y < by + bh; y++)
-            for (x = bx; x < bx + bw; x++) {
-                w->solid[y][x] = 1;
-                w->bld_at[y][x] = (Uint8)(w->bld_count + 1);
-            }
-        {
-            Building *b = &w->bld[w->bld_count];
-            b->x = (Uint8)bx; b->y = (Uint8)by;
-            b->w = (Uint8)bw; b->h = (Uint8)bh;
-            /* Bigger footprints carry more storeys, so a village silhouette has
-             * a few halls standing over the cottages instead of being uniform. */
-            b->levels = (Uint8)(1 + (int)rng_below(rng, (bw * bh >= 9) ? 3 : 2));
-            b->region = REGION_NONE;
-            b->pad = 0;
-            b->variant = rng_next(rng);
-            w->bld_count++;
-        }
+        stamp_building(w, rng, kind, bx, by);
+        houses--;
     }
 }
 
@@ -1746,22 +1934,18 @@ static int flood_open(const World *w, Uint8 *seen, int *stack, int sx, int sy,
  * Which baked sprite, if any, stands in for this building. Returns ART_NONE to fall back to the
  * procedural mix-and-match house, so deleting a row here is a complete, reversible undo.
  *
- * Chosen by FOOTPRINT AREA, because a sprite has one fixed size and the footprint decides how
- * much ground it has to cover. In this projection a w*h footprint spans (w+h)*TILE screen px, so
- * at TILE 24 a 2x2 plot is exactly 96 px — which is exactly how wide the small-house sprites are.
- * That is not luck: the team authored to a 48 px diamond, the same scale the renderer already
- * uses. Bigger plots take the 128 px sprites and run slightly narrow, which reads as a building
- * standing in its own yard rather than as an error.
+ * Chosen by KIND, which placement decided before it sized the footprint — see bld_kind_fp. It
+ * used to be chosen by footprint AREA, with the footprint rolled first, and that had the
+ * dependency backwards: a 2x3 plot is a 120 px diamond and the sprite that landed on it was
+ * 64-74 px, so every building sat in an apron of bare, solid, un-walkable ground. Sizing the
+ * plot to the sprite is what removed that apron; picking by area would now be picking by
+ * something derived from the answer.
  *
  * Read by BOTH draw_building and world_heights, and it must give them the same answer — see the
  * wall-height note in world_heights below. */
 static const short art_bld_small[] = {
     ART_BLD_HOUSE_SMALL_01, ART_BLD_HOUSE_SMALL_02,
-    ART_BLD_HOUSE_SMALL_03, ART_BLD_HOUSE_SMALL_04,
-    ART_BLD_MARKET_STALL
-};
-static const short art_bld_large[] = {
-    ART_BLD_LARGE_BUILDING, ART_BLD_WINDMILL
+    ART_BLD_HOUSE_SMALL_03, ART_BLD_HOUSE_SMALL_04
 };
 
 static int building_sprite_id(const Building *b)
@@ -1770,9 +1954,13 @@ static int building_sprite_id(const Building *b)
      * reusing them would tie which sprite appears to a palette that is no longer drawn. */
     Uint32 pick = (b->variant >> 12) & 0xFFu;
 
-    if (b->w * b->h <= 4)
+    switch (b->kind) {
+    case BKIND_LARGE:    return ART_BLD_LARGE_BUILDING;
+    case BKIND_WINDMILL: return ART_BLD_WINDMILL;
+    case BKIND_MARKET:   return ART_BLD_MARKET_STALL;
+    default:
         return art_bld_small[pick % (Uint32)(sizeof art_bld_small / sizeof *art_bld_small)];
-    return art_bld_large[pick % (Uint32)(sizeof art_bld_large / sizeof *art_bld_large)];
+    }
 }
 
 /* Draw height per tile, derived from `solid` plus the region's terrain. Rock
@@ -2553,7 +2741,14 @@ static void terrain_colour(int terrain, int *r, int *g, int *b)
     switch (terrain) {
     case TERRAIN_WATER: *r = 0x2f; *g = 0x6d; *b = 0x7d; break; /* Wade */
     case TERRAIN_LEDGE: *r = 0x8c; *g = 0x70; *b = 0x48; break; /* Climb */
-    case TERRAIN_DARK:  *r = 0x3b; *g = 0x33; *b = 0x50; break; /* Kindle */
+    /* Deep shadowed moss, NOT the violet 0x3b3350 this was. Purple is not a
+     * colour ground comes in: against the sage grass it read as a stain
+     * painted onto the map rather than as land, which is what got it reported.
+     * The gate still has to be legible before you hold Kindle, so it keeps the
+     * job the violet was doing — it is much darker and much less saturated than
+     * the open grass, and it holds that contrast under fog. It is a lightless
+     * hollow now instead of a different substance. */
+    case TERRAIN_DARK:  *r = 0x25; *g = 0x33; *b = 0x2c; break; /* Kindle */
     /* Sage, not the primary green this was. design/Art Bible.md §4: the old
      * 0x4e9e54 was the most saturated thing on screen and flattened everything
      * next to it — trees included, which is what made them merge into the lawn. */
@@ -2972,6 +3167,35 @@ static void draw_stump(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
               fog_lerp(fb, tp[2][0], tp[2][1], tp[2][2], rev));
 }
 
+/* Tiles of clearance vegetation keeps from a plot.
+ *
+ * Two is not "next to the house", it is a tree TRUNK two tiles out — and a
+ * baked tree is 48x76 with the canopy centred over that trunk, so at one tile
+ * it drew straight through the roof. Two clears the building; the market stall
+ * asks for much more because an open forecourt is what a market IS, and at two
+ * the surrounding wood closed over it entirely.
+ *
+ * MARKET_PROP_CLEAR is deliberately larger than the MARKET_CLEAR that
+ * placement demands: placement needs ground it can actually find, whereas this
+ * only has to suppress props, which can never fail. */
+#define BLD_PROP_CLEAR    2
+#define MARKET_PROP_CLEAR 5
+
+/* Does this tile fall inside any building's plot or its clearance ring? */
+static int prop_banned(const World *w, int tx, int ty)
+{
+    int i;
+
+    for (i = 0; i < w->bld_count; i++) {
+        const Building *b = &w->bld[i];
+        int c = (b->kind == BKIND_MARKET) ? MARKET_PROP_CLEAR : BLD_PROP_CLEAR;
+        if (tx >= (int)b->x - c && tx < (int)b->x + b->w + c &&
+            ty >= (int)b->y - c && ty < (int)b->y + b->h + c)
+            return 1;
+    }
+    return 0;
+}
+
 /* Which prop, if any, stands on this tile. Presence is decided from its own bit
  * field, before shape, so retuning a tree's jitter never moves a tree. */
 static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
@@ -2981,6 +3205,12 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
     int    roll = (int)((h >> 8) & 31);
 
     *hout = h;
+
+    /* Nothing grows on a plot or in the lane around it. This has to come FIRST,
+     * ahead of the solid check below — a footprint is solid, so without it the
+     * boulder branch was seeding rocks on top of the buildings themselves. */
+    if (prop_banned(w, tx, ty))
+        return PROP_NONE;
 
     /* Never stand a tall prop where the tile in front is far higher: the band
      * sweep draws that neighbour afterwards, but the prop is tall enough to
@@ -3284,6 +3514,34 @@ static void draw_prop(SDL_Surface *fb, int kind, int cx, int by, Uint32 h, float
     }
 }
 
+/* Which terrain a tile SHOWS. Not the same question as which terrain it IS:
+ * `region` is REGION_NONE on every solid tile, so a building's flattened
+ * footprint has no terrain of its own, and asking directly would paint a plot
+ * in the middle of a Kindle region plain grass. Borrowing the first neighbour
+ * that does have a region is what keeps a plot part of the ground it stands in.
+ *
+ * RENDER-ONLY, like everything else that reads `height`. Collision reads
+ * `solid` and regions[].terrain and still nothing else. */
+static int tile_show_terrain(const World *w, int tx, int ty)
+{
+    static const int dx[4] = { 1, -1, 0, 0 };
+    static const int dy[4] = { 0, 0, 1, -1 };
+    Uint8 rg = w->region[ty][tx];
+    int d;
+
+    if (rg != REGION_NONE)
+        return w->regions[rg].terrain;
+    for (d = 0; d < 4; d++) {
+        int nx = tx + dx[d], ny = ty + dy[d];
+        if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+            continue;
+        rg = w->region[ny][nx];
+        if (rg != REGION_NONE)
+            return w->regions[rg].terrain;
+    }
+    return TERRAIN_NORMAL;
+}
+
 /* How much of a tile's colour reaches the screen: sight shows shape,
  * restoration brings colour, and whichever is stronger wins — so a restored
  * region stays lit after you leave it, because restoration is permanent and
@@ -3310,15 +3568,17 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
     if (bi) {
         const Building *bb = &g->w.bld[bi - 1];
         if (building_sprite_id(bb) != ART_NONE) {
-            /* Packed earth, not wall colour. When a sprite is the whole building, world_heights
-             * has flattened this tile, so it is now GROUND the house stands on rather than the
-             * wall's own top face — and leaving it wall-coloured left a pale slab spreading out
-             * from under every cottage.
+            /* PLAIN GROUND, and nothing else. When a sprite is the whole building, world_heights
+             * has flattened this tile, so it is neither the wall's top face nor a yard — it is
+             * simply the grass the sprite stands on, and the sprite covers it.
              *
-             * Deliberately a worn dirt yard: it is what a footprint bigger than its sprite has
-             * to be, and it starts paying off the "the village reads as buildings-in-a-field,
-             * not as inhabited" note in Handover section 2. */
-            *cr = 0x8f; *cg = 0x7d; *cb = 0x5e;
+             * This was packed earth (0x8f7d5e) when footprints were rolled independently of the
+             * sprite and ran 20+ px wider on every side: the dirt was an attempt to make that
+             * visible overhang read as a deliberate yard. It never did — it read as a pale slab
+             * spreading out from under every cottage, which is exactly the report this fixes.
+             * bld_kind_fp removed the overhang at the source, so the paint that was covering for
+             * it has to go too, or the buildings just get smaller pale slabs. */
+            terrain_colour(tile_show_terrain(&g->w, tx, ty), cr, cg, cb);
         } else {
             const Uint8 *p = wall_pal[BV_WALL(bb->variant)];
             *cr = p[0]; *cg = p[1]; *cb = p[2];
@@ -3444,8 +3704,13 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
              * pebbles and a crack; grass gets tufts, both lighter and darker so
              * it reads as texture rather than as sprinkles; ledges get long
              * horizontal strata that emphasise the shelf. */
-            terr = g->w.solid[ty][tx] ? -1 : (g->w.region[ty][tx] == REGION_NONE
-                       ? TERRAIN_NORMAL : g->w.regions[g->w.region[ty][tx]].terrain);
+            /* A building footprint is solid but is NOT rock: it is flattened
+             * ground with a sprite standing on it, so it takes the ground's
+             * marks. Left as `solid ? -1` it took the rock branch, and the pale
+             * pebble strata under every house were the other half of the "pale
+             * area around the building" report — the fill was only one half. */
+            terr = (g->w.solid[ty][tx] && !g->w.bld_at[ty][tx])
+                       ? -1 : tile_show_terrain(&g->w, tx, ty);
             nmark = 5; mw = PX(2);
             if (terr < 0) {
                 /* Rock. Long marks, because stone reads through aligned
@@ -3456,7 +3721,9 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             } else if (terr == TERRAIN_WATER) {
                 mark = fog_lerp(fb, 0x5a, 0xa0, 0xa8, rev); nmark = 3; mw = PX(5);
             } else if (terr == TERRAIN_DARK) {
-                mark = fog_lerp(fb, 0x58, 0x4c, 0x74, rev); nmark = 2; mw = PX(2);
+                /* Followed the fill off violet — see terrain_colour. A purple
+                 * speckle over unpurple ground is still purple on the map. */
+                mark = fog_lerp(fb, 0x3e, 0x50, 0x44, rev); nmark = 2; mw = PX(2);
             } else {
                 mark = fog_lerp(fb, 0x55, 0x7a, 0x45, rev); nmark = 6; mw = PX(2);
             }
@@ -4593,6 +4860,79 @@ static int bridge_negative_test(int n, Uint64 base)
            "[%d/%d bridge-bearing seeds shrank when suppressed]\n",
            (tested > 0 && shrank == 0) ? "FAIL" : "PASS", shrank, tested);
     return (tested > 0 && shrank == 0) ? 1 : 0;
+}
+
+/* Do rivers actually run down a FLANK rather than through the middle?
+ * place_rivers biases river 0's source away from the vertical centreline, and a
+ * bias is exactly the kind of change that can silently do nothing.
+ *
+ * Scored against the LANDMASS, not against the map. The first version of this
+ * test asked whether a river reached the outer third of WORLD_W and failed at
+ * 19/40 — but the island does not span the map, so most of that outer third is
+ * open sea and no river could ever have reached it. Measuring a river against
+ * ground that does not exist tells you about the coastline, not about the
+ * sampler. The denominator here is how far the land itself gets from the
+ * centreline on that seed, so 100% means "as far out as this island goes".
+ *
+ * Scored on the river's OUTERMOST reach, because a river that rises on the
+ * flank and runs to the sea there is what the requirement asks for, and its
+ * mouth may well be nearer the middle. */
+static int river_selftest(int n, Uint64 base, int verbose, int *out_pct, int *out_flank)
+{
+    int s, seeds_with_river = 0, on_flank = 0, sum_pct = 0;
+
+    for (s = 0; s < n; s++) {
+        Uint64 seed = base + (Uint64)s;
+        Game *g = (Game *)SDL_malloc(sizeof(Game));
+        Rngs rngs;
+        int x, y, tiles = 0, far = 0, land = 0, pct;
+
+        if (!g)
+            return 1;
+        rngs_init(&rngs, seed);
+        (void)game_init(g, &rngs);
+
+        for (y = 0; y < WORLD_H; y++)
+            for (x = 0; x < WORLD_W; x++) {
+                int off = x - WORLD_W / 2;
+                if (off < 0) off = -off;
+                if (g->w.surf[y][x] != SURF_OCEAN && off > land)
+                    land = off;               /* how far out the island reaches */
+                if (g->w.surf[y][x] == SURF_RIVER) {
+                    if (off > far) far = off; /* how far out the water reaches */
+                    tiles++;
+                }
+            }
+        SDL_free(g);
+        if (!tiles || !land)
+            continue; /* island too small to hold a river; not a failure */
+
+        seeds_with_river++;
+        pct = far * 100 / land;
+        sum_pct += pct;
+        /* "On a flank" = out past the halfway point of the island's own reach.
+         * A river at the exact centreline scores 0; one hugging the coast, 100. */
+        if (pct >= 50)
+            on_flank++;
+        if (verbose)
+            printf("  seed %-6.0f river tiles %3d  reach %3d%% of the island's own extent  %s\n",
+                   (double)seed, tiles, pct, (pct >= 50) ? "FLANK" : "mid");
+    }
+
+    if (!seeds_with_river) {
+        printf("river placement: no seed produced a river - FAIL\n");
+        return 1;
+    }
+    if (out_pct)
+        *out_pct = sum_pct / seeds_with_river;
+    if (out_flank)
+        *out_flank = on_flank * 100 / seeds_with_river;
+    printf("\n%d/%d seeds put a river on a flank, mean reach %d%% of the island's extent\n",
+           on_flank, seeds_with_river, sum_pct / seeds_with_river);
+    /* Four fifths, not all: the bias is a preference over sampled sources, and
+     * a seed whose only inland ground sits mid-island cannot honour it. */
+    printf("%s\n", (on_flank * 5 >= seeds_with_river * 4) ? "PASS" : "FAIL");
+    return (on_flank * 5 >= seeds_with_river * 4) ? 0 : 1;
 }
 
 /* The reachability invariant, checked independently of the generator that is
@@ -5925,16 +6265,32 @@ static int village_selftest(Uint64 seed, int verbose, int *total)
 {
     Game *g = (Game *)SDL_malloc(sizeof(Game));
     Rngs rngs;
-    int i, x, y, bad = 0, unreachable = 0;
+    int i, x, y, bad = 0, unreachable = 0, crowded = 0;
+    int kinds[BKIND_COUNT];
 
     if (!g)
         return 1;
+    for (i = 0; i < BKIND_COUNT; i++)
+        kinds[i] = 0;
     rngs_init(&rngs, seed);
     (void)game_init(g, &rngs);
 
     for (i = 0; i < g->w.bld_count; i++) {
         const Building *b = &g->w.bld[i];
         int open_neighbours = 0;
+
+        /* The footprint must be the one its KIND dictates, not one the caller
+         * chose. This is the invariant that keeps the collision box the same
+         * size as the sprite standing on it — the plot used to be rolled
+         * independently and ran 20+ px wider than its building on every side,
+         * which is the pale un-walkable apron this suite now guards against. */
+        if (b->kind >= BKIND_COUNT) {
+            bad++;
+        } else {
+            kinds[b->kind]++;
+            if (b->w != bld_kind_fp[b->kind][0] || b->h != bld_kind_fp[b->kind][1])
+                bad++;
+        }
 
         for (y = b->y; y < b->y + b->h; y++)
             for (x = b->x; x < b->x + b->w; x++) {
@@ -5960,15 +6316,53 @@ static int village_selftest(Uint64 seed, int verbose, int *total)
             if (g->w.bld_at[y][x] && !g->w.solid[y][x])
                 bad++;
 
+    /* Population caps, checked as properties of the finished world rather than
+     * trusted from the loop bounds that produced it. Exactly one stall is the
+     * strong claim here: it is an equality, not a ceiling, because placement
+     * relaxes its clearance until one lands rather than giving up. */
+    if (kinds[BKIND_MARKET] != 1)
+        bad++;
+    if (kinds[BKIND_WINDMILL] > BLD_WINDMILL_MAX)
+        bad++;
+    if (kinds[BKIND_HOUSE] + kinds[BKIND_LARGE] > BLD_HOUSE_MAX)
+        bad++;
+
+    /* Vegetation clearance. prop_at is the only thing that decides where a tree
+     * stands, so ask it directly over the whole map: no prop may share a plot
+     * or its clearance ring, and the stall's forecourt is wider than the rest.
+     * Checking the drawn result rather than the ban table means a prop path
+     * that forgot to consult it would still be caught. */
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            Uint32 h;
+            if (prop_at(&g->w, g->seed, x, y, &h) != PROP_NONE &&
+                prop_banned(&g->w, x, y))
+                crowded++;
+        }
+
+    /* The forecourt holds against BUILDINGS too. Vegetation and buildings are
+     * placed by completely different code, so "the stall has room" has to be
+     * asked of both or it is only half true — which is what it was until a
+     * screenshot showed a cottage two tiles from the awning. */
+    for (i = 0; i < g->w.bld_count; i++) {
+        const Building *b = &g->w.bld[i];
+        if (b->kind == BKIND_MARKET || b->kind >= BKIND_COUNT)
+            continue;
+        if (!clear_of_market(&g->w, b->kind, b->x, b->y))
+            crowded++;
+    }
+
     if (verbose)
-        printf("  seed %-6.0f buildings %2d  bad tiles %d  walled-in %d  %s\n",
-               (double)seed, g->w.bld_count, bad, unreachable,
-               (bad || unreachable || g->w.bld_count == 0) ? "FAIL" : "PASS");
+        printf("  seed %-6.0f buildings %2d (house %d large %d mill %d stall %d)"
+               "  bad %d  walled-in %d  crowded %d  %s\n",
+               (double)seed, g->w.bld_count, kinds[BKIND_HOUSE], kinds[BKIND_LARGE],
+               kinds[BKIND_WINDMILL], kinds[BKIND_MARKET], bad, unreachable, crowded,
+               (bad || unreachable || crowded || g->w.bld_count == 0) ? "FAIL" : "PASS");
     *total += g->w.bld_count;
     if (g->w.bld_count == 0)
         bad++;
     SDL_free(g);
-    return (bad || unreachable) ? 1 : 0;
+    return (bad || unreachable || crowded) ? 1 : 0;
 }
 
 /* Negative control. Everything above passing first time is exactly when a
@@ -6283,6 +6677,29 @@ int main(int argc, char **argv)
             int bad;
             printf("=== bridge suppression, %d seeds ===\n", n);
             bad = bridge_negative_test(n, (Uint64)base);
+            printf("%s\n", bad ? "FAIL" : "PASS");
+            return bad ? 1 : 0;
+        }
+        if (arg_flag(argc, argv, "--river-test")) {
+            int n = arg_int(argc, argv, "--seeds", 40);
+            int base = arg_int(argc, argv, "--seed", 1);
+            int bad, on_pct = 0, on_flank = 0, off_pct = 0, off_flank = 0;
+            printf("=== river flank placement, %d seeds ===\n", n);
+            bad = river_selftest(n, (Uint64)base, 1, &on_pct, &on_flank);
+
+            /* Negative control. Re-run the identical seeds with the bias off:
+             * if the numbers barely move, the bias is decoration and this test
+             * is measuring the coastline rather than the sampler. */
+            printf("\n--- negative control: same seeds, flank bias disabled ---\n");
+            g_suppress_river_bias = 1;
+            (void)river_selftest(n, (Uint64)base, 0, &off_pct, &off_flank);
+            g_suppress_river_bias = 0;
+            printf("negative control (flank bias is load-bearing): %s  "
+                   "[reach %d%% -> %d%%, flank rate %d%% -> %d%%]\n",
+                   (on_pct > off_pct + 5) ? "PASS" : "FAIL",
+                   off_pct, on_pct, off_flank, on_flank);
+            if (on_pct <= off_pct + 5)
+                bad = 1;
             printf("%s\n", bad ? "FAIL" : "PASS");
             return bad ? 1 : 0;
         }
