@@ -12,12 +12,25 @@ session-logging rules. Picking this up cold? Start with [[Handover]].
 overlay (self-test-only, +0 shipping bytes), the whole world **rescaled to 24 px tiles on a 108×60
 grid** with all art routed through `PX()`, **screen-aligned input** (`W` finally moves up) and an
 eased follow camera. No animation, no character, no audio.
-**Forward plan:** see [[Phase Roadmap]] — Phases 00–05 done, **Phase 06 is HALF done**: rivers and
-bridges work; waterfalls and the bridge-suppression negative control are still owed. Finish those
-before starting Phase 07
+**Forward plan:** see [[Phase Roadmap]] — **Phases 00–06 all done.** Next is Phase 07, the
+build-time asset bake
 **Headroom:** 747,776 bytes under the 1,440,000 ship target
 
 ## Sessions
+
+- [[2026-08-05-session-01]] *(Session 05)* — **The waterfalls, and bridges stop being an argument.**
+  [[Phase 06 - Water And Bridges]] closed at **+0 bytes**. `--bridge-test` regenerates each seed
+  twice, once with decking suppressed, and compares the player's spawn component: **200/200
+  bridge-bearing seeds shrank**, so "bridges are load-bearing" is measured rather than argued —
+  retiring the item four handovers carried as the highest-value test left. Waterfalls came from
+  carrying `place_rivers`' BFS field out to a render-only `sea_dist` and quantising it, so
+  `iso_tile` draws each drop with no new routine. Two faults found by **screenshot, not test**
+  (`height` is render-only, so no checker can see either): the descent had to be **depth, not
+  elevation** — terracing upward clamped at ground level and turned the channel into a blue path on
+  the grass — and a bridge deck, still `SURF_RIVER`, drew at the bottom of the channel as a walkable
+  pit until it got its own height branch. Also: **probe the data for existence, screenshot for
+  judgement**; a wrong `RIVER_FALL_EVERY` was invisible by eye and instant in the numbers.
+  Re-run not re-argued: play 50/50, reach 50/50, land 30/30, gating 30/30.
 
 - [[2026-08-05-session-01]] *(Session 04)* — **Rivers reach the sea, and the chat handed over.**
   [[Phase 06 - Water And Bridges]] part 1: rivers descend a BFS **distance-to-sea** field rather

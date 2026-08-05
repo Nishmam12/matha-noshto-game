@@ -23,16 +23,18 @@ Running log: [[INDEX]]
 |---|---|
 | **State** | 692,224 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
 | **Deadline** | 2026-09-04. **Hard stop on art/backbone work 2026-08-14** — nine days from now |
-| **Do first** | **Finish [[Phase 06 - Water And Bridges]].** It is the only half-done phase |
-| **Then** | Phase 07 (asset bake) → 08 (save/load) → 09 (art) → 10 (motion) → **11 is non-negotiable** |
+| **Do first** | **[[Phase 07 - Asset Seam]]** — the bake pipeline. Phases 00–06 are all done |
+| **Then** | 08 (save/load) → 09 (art) → 10 (motion) → **11 is non-negotiable** |
 | **Biggest risk** | **Audio does not exist at all.** A softsynth from zero, plus save/load and a HUD, all still ahead of a 30-day deadline |
 
-**The two things Phase 06 still owes**, in priority order:
+**Phase 06 closed 2026-08-05.** Both outstanding items landed, at +0 shipping bytes:
 
-1. **The bridge-suppression negative control.** Regenerate seeds with bridges disabled; confirm the
-   verifier rejects the ones that were only solvable via a bridge. The phase file calls this its
-   single most important test. Until it exists, "bridges are load-bearing" is argued, not measured.
-2. **Waterfalls.** Blocked on one missing array — see §2 and the phase file for the exact fix.
+1. **The bridge-suppression negative control** (`--bridge-test`) — **200/200 bridge-bearing seeds
+   shrank the player's reachable component when bridges were suppressed.** "Bridges are
+   load-bearing" is now measured rather than argued.
+2. **Waterfalls** — river beds terrace by a new render-only `sea_dist` field, and `iso_tile`'s
+   existing side-face draw makes each step a water-coloured drop. The drops are 3 px and subtle;
+   see §8.
 
 **Three habits this project runs on**, learned the expensive way:
 
@@ -110,10 +112,10 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 | `build\wayfarer-selftest.exe` | 727,552 bytes — **not a deliverable**, never shipped |
 | `src\main.c` | 5,382 lines, single translation unit |
 | Warnings | zero, under `-Wall -Wextra` |
-| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–05 done; Phase 06 is HALF done** — rivers and bridges work, waterfalls and the bridge negative control do not exist. See [[Phase Roadmap]]. Audio, save and UI are all still untouched |
+| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–06 all done.** See [[Phase Roadmap]]. Audio, save and UI are all still untouched |
 
-> **If you are starting here: the first job is finishing Phase 06.** Two named items,
-> both listed under §2 "What does NOT exist yet". Do not start Phase 07 on top of a half-done phase.
+> **If you are starting here: the first job is [[Phase 07 - Asset Seam]]**, the build-time PNG→header
+> bake. Nothing is half-finished behind you.
 
 ### What actually works right now
 
@@ -123,10 +125,13 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 - **Screen-aligned input** — `W` moves up on screen, verified per direction, with a negative control
   that rejects the old world-aligned mapping. See [[Phase 04 - Traversal]]
 - **An eased follow camera** with a deadzone, replacing the per-frame hard snap
-- **Rivers and bridges.** Rivers descend a BFS distance-to-sea field from the interior to the
-  coast; bridges deck them. **A bridge is not a collision special case** — it clears `solid`, so
-  collision, the region graph and the verifier all see a crossable tile through the path they
-  already used. See decisions 32–33 and [[Phase 06 - Water And Bridges]]
+- **Rivers, bridges and waterfalls.** Rivers descend a BFS distance-to-sea field from the interior
+  to the coast; bridges deck them. **A bridge is not a collision special case** — it clears `solid`,
+  so collision, the region graph and the verifier all see a crossable tile through the path they
+  already used. River beds **terrace** by that same field carried out to a render-only `sea_dist`,
+  3–4 levels per river, so `iso_tile` draws a water-coloured side face at each drop — a waterfall
+  from the rasteriser that already existed. See decisions 32–33, 35 and
+  [[Phase 06 - Water And Bridges]]
 - **Isometric 2.5D renderer**: 2:1 diamonds, elevation with cliff faces, band-sweep depth sort
 - **Procedural scenery**: layered trees with round `fill_ellipse` canopies (not the earlier
   axis-aligned lollipops), bushes, rocks, reeds, flowers, crystals, stumps — all from a per-tile
@@ -170,19 +175,6 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 - **The player is still an orange square** (18×18 at the current tile size). No layered character,
   no walk cycle, no facing
 - **Buildings do not respond to restoration.** The ruin→whole rebuild is designed but not built
-- **NO WATERFALLS — Phase 06 item 1 of 2 outstanding.** River tiles sit at one flat depth.
-  Terracing them so the river steps down to the coast would make `iso_tile` draw a water-coloured
-  side face at each drop — a waterfall, essentially free, using the rasteriser that already exists.
-  The blocker is that `world_heights`' local `dist` array is the chamfer distance *into solid
-  masses*, which is 1 along the whole length of a one-tile-wide river. It needs the
-  distance-to-sea field carried out of `place_rivers` in a new per-tile array (~6.5 KB of `World`,
-  zero exe bytes)
-- **NO BRIDGE-SUPPRESSION NEGATIVE CONTROL — Phase 06 item 2 of 2, and the more important one.**
-  [[Phase 06 - Water And Bridges]] calls it *"the single most important test in this phase"*:
-  regenerate a batch of seeds with bridge placement disabled and confirm the reachability verifier
-  rejects every one that was only solvable via a bridge. Until it exists, "bridges are
-  load-bearing" is **argued, not measured** — and this project's own rule is that a checker which
-  has never rejected anything proves nothing
 - **No worn paths between buildings.** The village reads as buildings-in-a-field, not as inhabited
 - Idle sway/breathe for Found Souls
 - Audio-layer-per-restore (the hook is wired; the layers are not)
@@ -270,6 +262,7 @@ $e = ".\build\wayfarer-selftest.exe"
 & $e --move-test   --seeds 20 --seed 1      # collision, no drift, determinism, diagonal speed
 & $e --region-test --seeds 30 --seed 1      # region graph structure + coverage
 & $e --reach-test  --seeds 50 --seed 1      # reachability invariant + negative control
+& $e --bridge-test --seeds 200 --seed 1     # bridges are load-bearing (suppression control)
 & $e --gating-test --seeds 30 --seed 1      # walk-reachable == graph-reachable, all 4 tiers
 & $e --play-test   --seeds 50 --seed 1      # full headless playthroughs to completion
 & $e --audio-test 3000 --sfx                # callback timing under restore-beat load
@@ -279,10 +272,12 @@ $e = ".\build\wayfarer-selftest.exe"
 & $e --frames 60 --seed 4 --overlay --shot out.bmp   # scripted screenshot — see the recipe in §10
 ```
 
-**All currently pass.** Last full run, 2026-08-05, after `e42f2f4` (rivers and bridges) — re-run
-fresh for this handover rather than carried forward:
+**All currently pass.** Last full run, 2026-08-05, after Phase 06 part 2 (waterfalls and
+`--bridge-test`) — re-run fresh for this handover rather than carried forward:
 
 ```
+bridge  : PASS  200/200 bridge-bearing seeds shrank the player's reachable
+                component when bridge decking was suppressed
 land    : PASS  30 seeds (100 also clean); both controls (drowned map,
                 shattered island) fire
 fog     : PASS  0 collapsed ramps; 45 colours x 5 reveals, 0 inversions,
@@ -297,7 +292,7 @@ move    : PASS (0 failures across 20 seeds); direction-independent speed confirm
 region  : PASS (0 failures across 30 seeds)
 reach   : PASS (0 failures across 50 seeds); negative control PASS; gating relaxed on 0/50
 gating  : PASS (0 failures across 30 seeds)
-play    : PASS (0 seeds could not be completed) — still 50/50 after the landform rewrite
+play    : PASS (0 seeds could not be completed) — still 50/50 after the waterfall terracing
 audio   : worst case 0.136 ms of a 21.333 ms deadline; 0 partial writes
 perf    : render 0.865 ms mean (2.190 ms max), frame 16.613 ms = 60.2 fps
 ```
@@ -346,14 +341,14 @@ this as a map of the file's *order* and trust the grep, not the table.
 | 466 | World | Region/World/Scratch/Building/**SURF_\*** structs, terrain enums; `RIVER_*`/`BRIDGE_SPACING` at 587 |
 | ~95 | **Fog** | `FOG_TINT_*`, `FOG_KEEP`, and the **`FOG_*_V` / `FogTune` indirection** that makes them F3-adjustable in self-test builds and literal in the shipping one |
 | 620 | **Island generation** | `solid_at`, `land_lattice`, `land_noise`, `world_gen` (742) — the island height field |
-| 819 | **Rivers and bridges** (new) | `place_rivers` — BFS distance-to-sea descent, bridges clear `solid`. Runs *before* buildings and the verifier |
+| 819 | **Rivers and bridges** (new) | `place_rivers` — BFS distance-to-sea descent, bridges clear `solid`, field carried out to `sea_dist` for waterfall terracing. Runs *before* buildings and the verifier. `g_suppress_bridges` (self-test only) gates the decking step for `--bridge-test` |
 | 956 | **Building placement** | `place_buildings` — village-site clustering, also *before* the verifier |
 | 1051 | Regions | `bfs_open`, `regions_build`, `regions_depth`, `regions_assign_terrain` |
 | 1223 | Reachability | `regions_reachable`, `world_solvable`, entity placement, generate-then-verify |
 | 1394 | Movement | `tile_blocked`, `player_blocked`, `move_axis`, `sim_step` — **reads `solid` and `regions[].terrain` only, still** |
 | 1485 | Input | `input_poll` — screen-aligned since Phase 04 |
 | 1498 | Restoration | `entity_in_reach`, `try_restore`, `game_complete`, `world_stage` |
-| 1679 | **Heights** | `world_heights` — derived, render-only; island/rock/ocean/**river** branches |
+| 1679 | **Heights** | `world_heights` — derived, render-only; island/rock/ocean/**bridge**/**river (terraced)** branches. Bridge is checked *before* river; see decision 35 |
 | 1785 | World init | `game_init` — wipe, generate, **rivers**, buildings, flood-fill spawn, verify, derive heights |
 | 1883 | **Perf** | `Perf`, counters, `perf_report`. All behind `WAYFARER_PERF` |
 | 1949 | Graphics | `fill_rect` (1954), `vspan`, `iso_tile` (2232), `iso_diamond`, `iso_diamond_lr`, `iso_ring`, `fill_ellipse`, `blit_scale`, `tile_hash`, `fog_lerp` (2275), `tile_detail` |
@@ -390,6 +385,7 @@ this as a map of the file's *order* and trust the grep, not the table.
 | `LAND_ROCK_T` | **0.74** | Outcrop threshold. Raised once already — 0.68 covered ~40% of frame in rock. `--land-test` now bounds this at 40% |
 | `RIVER_COUNT` / `RIVER_SRC_MIN` | **2 / 10 (new)** | Rivers per world; a source must be ≥10 BFS hops from the sea or the "river" is a puddle on the beach |
 | `BRIDGE_SPACING` | **9 (new)** | River tiles between bridge attempts. A bridge is taken only where there is open ground on both sides, with a fallback sweep so a spacing accident does not burn a whole world |
+| `RIVER_FALL_STEPS` / `RIVER_FALL_EVERY` | **4 / 5 (new)** | Waterfall terracing: 4 drops between a source and the mouth, one per 5 BFS hops of `sea_dist`. **`EVERY` was measured, not guessed** — at 8 a river reached only 2–3 of its 4 steps. Read as *depth*, see decision 35 |
 | `VILLAGE_SITES` / `VILLAGE_RADIUS` / `VILLAGE_SPACING` | **4 / 12 / 29** | All in *tiles*, so all re-derived by hand for `TILE` 24. Radius/spacing × 32/24 keeps a village the same physical size; sites raised because 3 in a 1.8× larger world read as an empty island |
 | `BUILDING_TARGET` / `BUILDING_MAX` | **22** / 40 | Raised with the world size; mean is 21 per world. `BUILDING_MAX` stays the array bound |
 | `STOREY_H` / `WALL_BASE` | 14 / 10 | Unchanged |
@@ -512,6 +508,27 @@ New decisions from the rescale + traversal session (2026-08-05):
     not the constraint**; authoring effort and pixel density are. See §9 for the size-and-scale
     advice given, and [[Phase 07 - Asset Seam]] for the pipeline.
 
+New decisions from the Phase 06 part 2 session (2026-08-05):
+
+35. **A river's descent is expressed as DEPTH, not elevation, and a bridge deck gets its own height
+    branch.** The land a river cuts through sits at height 0, so terracing the bed *upward* going
+    inland clamps at ground level and the river stops being a channel — it renders as a blue path
+    painted on the grass. The working form is shallow at the source stepping **down** to the sea,
+    with the deepest step landing exactly on the sea floor's own deepest step. Separately, a bridge
+    tile is still `SURF_RIVER` (which is what keeps the water reading as continuous under it), so it
+    inherited the river's sunken height and drew its deck at the bottom of the channel as a walkable
+    pit; it now takes ground level, checked *before* the river branch. **Neither fault was visible
+    while the river was one flat depth**, and neither is testable — `height` is render-only by
+    construction, so both were found by screenshot. `sea_dist[][]` is likewise render-only, so the
+    completability proof needed no new argument, only a re-run.
+36. **`--bridge-test` measures an empirical claim, not a fallible checker, and that is why its pass
+    condition is different.** Every other negative control here builds a broken world and confirms a
+    checker rejects it. There is no such construction for bridges: the flood fill is exact and
+    cannot "pass when it shouldn't". What is being verified is the *claim* that bridges are
+    load-bearing, so the test generates each seed twice — normally, and with decking suppressed —
+    and fails only if it never once observes the reachable component shrink. Same "a check that has
+    never rejected anything proves nothing" bar, applied to a measurement.
+
 ---
 
 ## 7. Traps — each of these already cost time once
@@ -608,6 +625,24 @@ true and are not repeated in full here — see git history at `545598f` for verb
   actually matters — not to loosen the number until it went green. If a bound has to move, the
   justification belongs in the phase file.
 
+**New in the Phase 06 part 2 session (2026-08-05):**
+
+- **A terrain feature carved *into* the ground cannot be terraced upward.** The river's first
+  descent added height going inland, which clamped at ground level within two steps and turned the
+  channel into a blue path painted on the grass — strictly worse than the flat version it replaced.
+  Anything below the ground plane has to be expressed as **depth increasing toward its outlet**, not
+  elevation increasing away from it. See decision 35.
+- **Giving a flat thing a height gradient breaks everything that was silently sharing its height.**
+  Bridge decks had always taken the river's height branch; that was invisible while the river was
+  one flat shallow depth and became a walkable pit the moment it wasn't. **When a constant becomes a
+  gradient, go and find everything that was relying on it being constant** — a grep for the field is
+  faster than waiting for the screenshot.
+- **A 3 px feature is at the edge of what a screenshot can settle.** Whether the waterfall steps
+  existed at all was far quicker to answer by probing the height field directly (a throwaway that
+  printed each river's distinct heights) than by zooming into captures. `RIVER_FALL_EVERY` was
+  wrong — only 2–3 of 4 steps materialised — and that showed up instantly in the numbers and not at
+  all by eye. **Probe the data for existence, use the screenshot for judgement.**
+
 ---
 
 ## 8. Verified vs NOT verified
@@ -658,20 +693,35 @@ controls; audio callback timing; render cost). New this session:
   reach 50/50 with its control, gating 30/30, play **50/50**, land 30/30.
 - **River pathfinding terminates.** Not by testing but by construction — see decision 32. There is
   no seed on which the descent can fail to reach water.
+- **BRIDGES ARE LOAD-BEARING — now measured.** `--bridge-test` regenerates each seed twice, once
+  with bridge decking suppressed, and compares the size of the open component the player spawns in.
+  **200 of 200 bridge-bearing seeds shrank when suppressed**, so a bridge is the thing reconnecting
+  a cut island on every seed measured, not decoration. This retires the standing "highest-value
+  single test left in the project" item that four handovers carried.
+- **The waterfall staircase exists in the height field.** Probed directly across seeds 3/5/7/12:
+  3–4 distinct river-bed levels per river, spanning the intended range down to the sea floor's own
+  deepest step. Whether it *reads* as falling water is a separate question — see below.
+- **Waterfall terracing did not weaken the completability proof.** `sea_dist` is render-only and
+  `world_heights` has never been a collision input, but the guarantee was re-**run** not re-argued:
+  bridge 200/200, land 30/30 + both controls, reach 50/50 + control, gating 30/30, play **50/50**.
 
 ### NOT verified — be honest about these
 
-- **THAT BRIDGES ARE LOAD-BEARING IS ARGUED, NOT MEASURED.** No test suppresses bridge placement
-  and confirms the verifier then rejects the seeds that needed one. The suite passing proves rivers
-  didn't *break* anything; it does not prove a bridge is ever the thing making a world solvable.
-  This is the highest-value single test left in the project — see §2.
+- **The waterfall drops are 3 px and nobody has judged them.** The steps are confirmed present in
+  the data and the channel now reads as a channel with banks, but whether a 3 px drop reads as
+  *falling water* to a player is unjudged. [[Phase 10 - Motion]]'s shimmer is what would sell it;
+  until then this is geometry that is correct rather than an effect that is convincing.
+- **`--bridge-test` measures reachable-area shrinkage, not solvability.** The stronger claim — "the
+  verifier would reject this seed outright without its bridge" — is not what is checked; entity
+  placement re-runs against the smaller component and can still succeed. Shrinkage is the honest
+  measurement and is what is reported.
 - **Nobody has played at the new scale, or driven the new camera.** The screenshots say the world is
   denser and better-proportioned; whether 24 px tiles are *nice to walk around* is a different
   question. `CAM_DEADZONE`/`CAM_EASE` are first guesses and "does the easing feel right" cannot be
   claimed from here.
-- **Rivers have been seen on one seed.** Seed 7 was screenshotted and reads correctly. There is no
-  sweep of how often a river is scenic vs. a straight line across the map, no check that two rivers
-  never merge into a lake, and no measurement of how often a river forces a long detour.
+- **Rivers have been seen on four seeds** (3, 5, 7, 12), all of which read correctly. There is still
+  no sweep of how often a river is scenic vs. a straight line across the map, no check that two
+  rivers never merge into a lake, and no measurement of how often a river forces a long detour.
 - **The user's verdict on the houses, 2026-08-05:** *"fine, not perfect but workable"*. The land is
   *"decent but lacks the pixelated game feel"* — see §9, that is a resolution/palette question and
   is still open.
@@ -817,22 +867,23 @@ This handover intentionally does **not** duplicate the forward plan. `design/pha
 per phase — what it is, why it's sequenced where it is, its definition of done, exactly which
 functions and lines it touches, and its verification gate. The index is [[Phase Roadmap]].
 
-**Current position, in one paragraph:** **Phases 00–05 are done; Phase 06 is half done.** 00–02
+**Current position, in one paragraph:** **Phases 00–06 are all done.** 00–02
 (memory + skill policy + Art Bible; island landform + village clustering; roof shading + the fog
 rewrite) as `5ffdb38` and `e5c8942`; **Phase 03** (bitmap font + F3 fog-tuning overlay, +0 bytes) as
 `60b4e3a`, its human-usability gate discharged the same day; **Phase 04** (screen-aligned input +
 eased camera) as `dd8cfef`; **Phase 05** (`--land-test`, `--fog-test`, both with negative controls,
-+0 bytes) as `4847bf5`; **Phase 06 part 1** (rivers + bridges) as `e42f2f4`. Two unplanned pieces
-landed alongside them, both from the user looking at the screen: the world was **rescaled**
-(`e03138d`, `TILE` 32→24 with every authored dimension routed through `PX()`, grid grown to
-108×60), and the **houses were fixed** (`b4bf446` — the roof had been drawn half a tile off its own
-walls since buildings landed, which also put the windows on the roof).
++0 bytes) as `4847bf5`; **Phase 06** (rivers + bridges as `e42f2f4`, then waterfalls and
+`--bridge-test`, +0 bytes). Two unplanned pieces landed alongside them, both from the user looking
+at the screen: the world was **rescaled** (`e03138d`, `TILE` 32→24 with every authored dimension
+routed through `PX()`, grid grown to 108×60), and the **houses were fixed** (`b4bf446` — the roof
+had been drawn half a tile off its own walls since buildings landed, which also put the windows on
+the roof).
 
-**Start here: finish Phase 06.** Waterfalls, then the bridge-suppression negative control — the
-second is the more important and the phase file calls it its single most important test. After
-that: the asset bake pipeline, save/load, the remaining placeholder art, and motion (Phases 07–10),
-all timeboxed, with a **hard stop on 2026-08-14** before the ship-critical remainder (Phase 11:
-audio, font-dependent HUD, QA, submission) takes over regardless of how much art work is finished.
+**Start here: [[Phase 07 - Asset Seam]]** — the build-time PNG→`src/assets.h` bake, which does not
+exist yet and which nothing has been baked through. After that: save/load, the remaining placeholder
+art, and motion (Phases 08–10), all timeboxed, with a **hard stop on 2026-08-14** before the
+ship-critical remainder (Phase 11: audio, font-dependent HUD, QA, submission) takes over regardless
+of how much art work is finished.
 
 **Nine days to that hard stop.** Audio is a softsynth from zero and is completely untouched; so are
 save/load and any on-screen HUD. If something has to give, take it from [[Cut List]].
