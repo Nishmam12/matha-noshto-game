@@ -184,14 +184,14 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 Remote: **`https://github.com/Nishmam12/matha-noshto-game`** — private, branch `main`.
 
 ```
+0e85464  Phase 06, part 2: waterfalls, and bridges stop being an argument
+ef09d9e  Handover for a fresh chat: Phase 06 half-done, and the asset answer
 e42f2f4  Phase 06, part 1: rivers that reach the sea, and bridges that cross them
 66222b6  docs: the house fix and Phase 05, and the rule debt closes
 4847bf5  Phase 05: --land-test and --fog-test, paying down three sessions of rule debt
 b4bf446  Houses: put the roof back on the box, and the windows back on the wall
 037936c  docs: the rescale and Phase 04, plus the traps both cost
 dd8cfef  Phase 04: screen-aligned input, and an eased follow camera
-e03138d  Rescale the world: TILE 32 -> 24, and make TILE an honest knob
-60b4e3a  Bitmap font and a live fog-tuning overlay, both at +0 shipping bytes
 ```
 
 **Everything is committed.** Nothing is pushed to the remote yet — check before assuming.
@@ -203,9 +203,25 @@ never need saying again.
 `build/` and `.obsidian/` are gitignored. `wayfarer.exe` is therefore not in the repo — attach it
 to a GitHub Release if a playable download is wanted.
 
+> **THE TEAM'S ART HAS ARRIVED, and it is untracked and undecided.** An `assets/` directory appeared
+> during the 2026-08-05 Phase 06 part 2 session: **130 PNGs across `buildings/`, `nature/`,
+> `player/`, `magical/`, `generated/`, plus 81 Godot `.import` sidecars, 1.2 MB total.** Left
+> untracked and out of that session's commit on purpose — what to do with it is [[Phase 07 - Asset
+> Seam]]'s whole job and a decision the user has not yet been asked to make. Three things the next
+> session needs to know before touching it:
+> - **These are exactly the right kind of input** (PNG, small, pixel art) — the answer given in §9
+>   was "yes, send PNGs as *bake inputs*", and this is that.
+> - **The `.import` files are Godot editor metadata and are not wanted** in any form — not shipped,
+>   not baked, and probably not even committed.
+> - **The sprites are authored at 96–128 px** (`bld_house_small_01.png` is 96×96,
+>   `bld_large_building.png` 128×128). Diamonds are **48×24** at `TILE 24`, so these are roughly 2–4×
+>   the tile footprint. That is not necessarily wrong for a building that stands several tiles tall,
+>   but **the pixel-density question in §9 is now live and blocking**: it should be settled before
+>   anything is baked, or the whole set gets re-authored later.
+>
 > Two files at the vault root that nobody in any build session created: an empty `devlog.md`, and an
 > untracked **`tree.glb`**. See §1 above — the `.glb` is not a hypothetical risk, it is the exact
-> shape of mistake the asset-bake decision exists to prevent. Both left alone rather than deleted
+> shape of mistake the asset-bake decision exists to prevent. All left alone rather than deleted
 > without asking.
 
 > `.claude/` also appears untracked in `git status`. That is this session's own harness state
@@ -768,8 +784,8 @@ controls; audio callback timing; render cost). New this session:
 | Landform generation method | **RESOLVED, this session** — radial height field + layered noise, not a cave. See decision 16 |
 | Building placement pattern | **RESOLVED, this session** — clustered village sites, not uniform scatter. See decision 17 |
 | Fog destination colour | **RESOLVED, this session, but tuned by eye and unmeasured** — light haze, `FOG_KEEP` contrast preservation. See decision 19 and Phase 05 |
-| Asset pipeline for team-authored art | **RESOLVED in principle** — build-time bake to a compiled-in header, never runtime load (decisions 20 and 34, [[Art Bible]] §8, Phase 07). **The bake script does not exist yet.** Nothing has been baked and no asset has been received |
-| **"Lacks the pixelated game feel"** | **OPEN, and probably not an asset problem.** Raised by the user 2026-08-05. The renderer draws 960×540 upscaled ×2 — a fairly *fine* pixel grid, so the world reads smooth rather than chunky. The cheapest lever is dropping `LOGICAL_W`/`LOGICAL_H` (e.g. 640×360 at ×3) so every pixel is physically bigger, plus tighter palette discipline. **Try that before anyone draws art**, or the art gets authored against the wrong pixel density and has to be redrawn |
+| Asset pipeline for team-authored art | **RESOLVED in principle** — build-time bake to a compiled-in header, never runtime load (decisions 20 and 34, [[Art Bible]] §8, Phase 07). **The bake script still does not exist and nothing has been baked — but the art has now ARRIVED**: 130 PNGs in an untracked `assets/`, see §2. This is no longer hypothetical work |
+| **"Lacks the pixelated game feel"** | **OPEN, and now BLOCKING.** Raised by the user 2026-08-05. The renderer draws 960×540 upscaled ×2 — a fairly *fine* pixel grid, so the world reads smooth rather than chunky. The cheapest lever is dropping `LOGICAL_W`/`LOGICAL_H` (e.g. 640×360 at ×3) so every pixel is physically bigger, plus tighter palette discipline. The advice was "try that before anyone draws art" — **art has since arrived anyway** (§2), authored at 96–128 px against 48×24 diamonds. **Settle this before baking**, or the whole set gets re-authored later |
 | **Input orientation** | **RESOLVED, 2026-08-05** — screen-aligned, `dd8cfef`. See decision 28 |
 | Camera easing | **RESOLVED in mechanism, OPEN in feel** — deadzone + exponential ease shipped, but `CAM_DEADZONE`/`CAM_EASE` are first guesses nobody has driven by hand |
 | **Art scale** | **RESOLVED, 2026-08-05** — `TILE` 24 with everything authored through `PX()`. Whether 24 is the *right* number is still a judgement call; it is now a one-line change to try another |
