@@ -1,0 +1,123 @@
+{
+	"animation_name": "walking_and_idle",
+	"animation_style": "walking_and_idle",
+	"animation_type": "",
+	"columns": 4,
+	"directions": [
+		"row_1",
+		"row_2",
+		"row_3",
+		"row_4"
+	],
+	"frame_count": 16,
+	"frame_height": 48,
+	"frame_paths": [],
+	"frame_regions": [
+		{
+			"h": 48,
+			"w": 48,
+			"x": 0,
+			"y": 0
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 48,
+			"y": 0
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 96,
+			"y": 0
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 144,
+			"y": 0
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 0,
+			"y": 48
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 48,
+			"y": 48
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 96,
+			"y": 48
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 144,
+			"y": 48
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 0,
+			"y": 96
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 48,
+			"y": 96
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 96,
+			"y": 96
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 144,
+			"y": 96
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 0,
+			"y": 144
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 48,
+			"y": 144
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 96,
+			"y": 144
+		},
+		{
+			"h": 48,
+			"w": 48,
+			"x": 144,
+			"y": 144
+		}
+	],
+	"frame_width": 48,
+	"name": "char_player_8dir",
+	"prompt": "Isometric pixel art player character, 3/4 top-down view. The character is a small human adventurer figure, about 20x34 pixels within each cell. Desaturated brown tunic (hex 71583c, 8f7450), desaturated tan pants (hex a89478), backpack, asymmetrical cloak breaking the silhouette with one side longer. One tiny amber-gold clasp (hex ffb347) on the cloak. Feet planted on isometric ground with a small contact shadow below. NO red tones, NO green, NO blue, NO purple — only desaturated browns, tans, and ONE amber accent. NO skin tones visible. Hair is desaturated brown. Hard pixel edges, flat shading only, no anti-aliasing, no gradients. Magenta #FF00FF background in every cell.",
+	"rows": 4,
+	"source_image": "",
+	"source_tool": "generate_animation",
+	"spritesheet_height": 192,
+	"spritesheet_path": "res://assets/generated/char_player_8dir.png",
+	"spritesheet_width": 192,
+	"type": "animation"
+}
