@@ -248,6 +248,45 @@ in it — just no shards and no Well.
   written second, and a screenshot loop spent a stretch suspecting a decoder bug the test disproved
   in one run. Screenshots are the slowest debugging loop this project has.
 
+## Evidence — slice 1 (grid growth and the dream sector)
+
+**Landed 2026-08-05. `WORLD_H` 60 → 104, +512 bytes** (755,200 → 755,712; 684,288 still free).
+
+- **`--sector-test` PASS across 30 seeds**, with its negative control disagreeing on 40 of 104
+  rows. Before the fix it failed on exactly the two things being built: 240–308 walkable tiles in
+  the void band, and an overworld flood leaking into ~1,200 dream tiles.
+- **`--land-test` PASS at 30 and 100 seeds**, re-aimed rather than loosened, and both negative
+  controls still fire — the drowned-map control now trips **4** assertions instead of 3, because
+  the new far-sector check catches it too.
+- **The whole suite re-run:** iso, fog, fade, sprite, rng, move(20), village(30 + both controls),
+  region(30), reach(50 + control), gating(30), bridge(**198/200**), **play 50/50**.
+- **Render 1.194 ms mean / 3.329 ms max**, frame 16.943 ms = 59.0 fps. Up from 1.065 ms because
+  the band sweep now covers 210 bands instead of 166. **5.6% of the 21.333 ms budget.**
+- **Looked at**, via the new `--grid` flag: twelve worlds, each with two separated landmasses, the
+  dream one ragged-but-connected and unpopulated.
+
+### What slice 1 changed that the plan did not anticipate
+
+- **`--play-test` never dropped below 50/50.** The plan warned it might, on the theory that
+  `place_entities` could strand a fragment in the unreachable dream sector. It cannot:
+  placement only ever draws from `regions_reachable`, so a disconnected sector simply never
+  receives an entity. The completability proof was never at risk. Good news, but it also means
+  **slice 1's play-test result proves less than it appears to** — the real test of the portal is
+  slice 2's.
+- **`--bridge-test` moved from 200/200 to 198/200** bridge-bearing seeds shrinking under
+  suppression. Expected: river sources are now confined to the overworld, so two seeds have a
+  bridge whose removal no longer changes the spawn component. The test's pass condition is
+  "at least one seed shrank", and 198 is still overwhelming evidence.
+- **`place_rivers` and `place_buildings` had to be clamped to the overworld.** Both sampled `cy`
+  over the whole grid, so half their attempts would have landed in the dream sector — thinning
+  the overworld's villages and rivers without anything failing. `VILLAGE_SITES`, `VILLAGE_RADIUS`,
+  `VILLAGE_SPACING` and `RIVER_SRC_MIN` are all denominated in **tiles** and so do not follow a
+  grid change, which is exactly why the sampling range had to move rather than the constants.
+  This is the "constants denominated in tiles do not scale" trap, hit for the third time.
+- **A `--grid` CLI flag was added** (self-test only, beside `--overlay` and `--tune`). The camera
+  follows the player, so no ordinary capture can ever show both landmasses; without this there is
+  no way to look at the shape of a two-sector world without a human holding F2.
+
 ## Open, and deliberately not decided here
 
 - **Whether the void reads better as recoloured `SURF_OCEAN` or needs a real `SURF_VOID`.** Decided

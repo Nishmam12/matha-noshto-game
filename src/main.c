@@ -59,7 +59,27 @@
  * pixel numbers move (speed_selftest's 110.00 becomes 220.00). */
 #define TILE     24
 #define WORLD_W  108
-#define WORLD_H  60
+
+/* TWO LANDMASSES IN ONE GRID — see design/phases/Phase 12 - Dream Realm.md, approach A.
+ *
+ * Keeping a single World is what lets every existing proof (reach 50, gating 30, play 50) be
+ * re-RUN rather than re-argued: bfs_open, regions_build, place_entities and world_solvable all
+ * already sweep the whole grid, so they pick up the second landmass without any new argument
+ * about correctness.
+ *
+ * The void band is not decoration. It guarantees the two sectors share no tile edge, so the ONLY
+ * connection between them is the portal — which is exactly what --portal-test measures, and what
+ * --sector-test asserts is true before the portal exists. */
+#define OVERWORLD_H  60                        /* rows 0 .. 59   */
+#define DREAM_GAP    4                         /* rows 60 .. 63, always solid */
+#define DREAM_Y0     (OVERWORLD_H + DREAM_GAP) /* 64 */
+#define DREAM_H      40                        /* rows 64 .. 103 */
+#define WORLD_H      (DREAM_Y0 + DREAM_H)      /* 104 */
+
+/* The ONLY thing in the codebase that knows where the dream realm is. Read by tile_colour,
+ * world_heights, prop_at, place_rivers, place_buildings and place_entities, so moving the sector
+ * is a one-line change. */
+#define dream_sector(ty) ((ty) >= DREAM_Y0)
 
 /* --- The art scale knob ---------------------------------------------------
  *
@@ -653,6 +673,16 @@ typedef struct {
     Uint8 owner[WORLD_W * WORLD_H];
 } Scratch;
 
+/* FAILS THE BUILD if the two big generation locals stop fitting a comfortable stack budget.
+ *
+ * These are deliberately locals rather than statics (the .data COMDAT trap above), and eight
+ * self-test functions declare BOTH on one frame — about 281 KB at WORLD_H 104, against MinGW's
+ * 2 MB default. That is fine, and it is fine by measurement rather than by hope. The grid grew
+ * once for the dream realm and will be tempting to grow again, so the number is checked at
+ * compile time instead of being rediscovered as a stack overflow in a self-test. */
+typedef char wayfarer_stack_guard[
+    (sizeof(World) + sizeof(Scratch) < 400 * 1024) ? 1 : -1];
+
 /* Which way the character sprite faces, in SCREEN terms — the same space the input is expressed
  * in (decision 28), so "held D" and "faces right" cannot drift apart. The baked art names its
  * directions n/e/s/w, but the sprites themselves are unambiguous about what they mean: `n` shows
@@ -735,6 +765,15 @@ static int solid_at(const World *w, int tx, int ty)
 #define LAND_ROCK_H   11
 #define LAND_SEA      0.24f /* height below this is ocean; lower = bigger island */
 #define LAND_ROUGH    0.55f /* how far noise moves the coastline in and out */
+/* The dream sector's coast, deliberately rougher so it reads as clustered islets rather than a
+ * second plain island.
+ *
+ * Roughness, NOT a higher sea threshold — and that distinction is load-bearing. Fragmenting the
+ * sector into genuinely separate islands would strand entities on islets the player cannot reach,
+ * and the reachability verifier would reject those seeds forever. Ragged-but-connected buys the
+ * archipelago look without the fault. The spec originally implied a real archipelago; corrected
+ * while writing the plan. */
+#define DREAM_ROUGH   0.78f
 /* Raised from 0.68: at that threshold a single outcrop could cover 40% of the
  * screen, and because rock is the darkest large surface in the palette the
  * result read as a quarry with a lawn around it rather than as a hillside. */
@@ -776,7 +815,12 @@ static float land_noise(const float *lat, int lw, int lh, float fx, float fy)
     return a + (b - a) * ty;
 }
 
-static void world_gen(World *w, Rng *rng)
+/* One landmass, over rows [y0, y1).
+ *
+ * fy is normalised INSIDE the range rather than over the whole grid, which is the entire trick:
+ * the radial term then makes each sector its own island, instead of the dream sector coming out
+ * as the southern lobe of one grid-sized one. */
+static void gen_sector(World *w, Rng *rng, int y0, int y1, float sea, float rough)
 {
     /* Deliberately locals, not statics. On PE/COFF, -fdata-sections emits
      * zero-initialised statics as .data$name COMDATs, which are stored in the
@@ -785,16 +829,16 @@ static void world_gen(World *w, Rng *rng)
     float lat0[LAND_LAT_W * LAND_LAT_H];
     float lat1[LAND_LAT2_W * LAND_LAT2_H];
     float rock[LAND_ROCK_W * LAND_ROCK_H];
-    int x, y;
+    int x, y, span = y1 - y0;
 
     land_lattice(rng, lat0, LAND_LAT_W * LAND_LAT_H);
     land_lattice(rng, lat1, LAND_LAT2_W * LAND_LAT2_H);
     land_lattice(rng, rock, LAND_ROCK_W * LAND_ROCK_H);
 
-    for (y = 0; y < WORLD_H; y++) {
+    for (y = y0; y < y1; y++) {
         for (x = 0; x < WORLD_W; x++) {
             float fx = (float)x / (float)(WORLD_W - 1);
-            float fy = (float)y / (float)(WORLD_H - 1);
+            float fy = (float)(y - y0) / (float)(span - 1);
             float ex = (fx - 0.5f) * 2.0f;
             float ey = (fy - 0.5f) * 2.0f;
             float d  = SDL_sqrtf(ex * ex + ey * ey);
@@ -803,14 +847,16 @@ static void world_gen(World *w, Rng *rng)
             float n  = (0.62f * land_noise(lat0, LAND_LAT_W, LAND_LAT_H, fx, fy)
                       + 0.38f * land_noise(lat1, LAND_LAT2_W, LAND_LAT2_H, fx, fy))
                      - 0.5f;
-            float h  = (1.0f - d) + n * LAND_ROUGH;
+            float h  = (1.0f - d) + n * rough;
             Uint8 s;
 
-            /* The rim is always water, so nothing can walk off the world and
-             * solid_at's out-of-bounds wall never has to be seen. */
-            if (x == 0 || y == 0 || x == WORLD_W - 1 || y == WORLD_H - 1)
+            /* EVERY SECTOR gets its own water rim, not just the grid. That is what guarantees the
+             * two landmasses share no tile edge, so the portal is the only crossing — and it also
+             * keeps the original property that nothing can walk off the world, so solid_at's
+             * out-of-bounds wall never has to be seen. */
+            if (x == 0 || x == WORLD_W - 1 || y == y0 || y == y1 - 1)
                 s = SURF_OCEAN;
-            else if (h < LAND_SEA)
+            else if (h < sea)
                 s = SURF_OCEAN;
             else if (land_noise(rock, LAND_ROCK_W, LAND_ROCK_H, fx, fy) > LAND_ROCK_T)
                 s = SURF_ROCK;
@@ -822,6 +868,33 @@ static void world_gen(World *w, Rng *rng)
             w->reveal[y][x] = 0.0f;
         }
     }
+}
+
+/* The world is TWO landmasses in one grid — see Phase 12. Both come from the same radial height
+ * field run twice, separated by a band that is always solid, so the only connection between them
+ * is the portal placed later in game_init.
+ *
+ * Nothing here is a new input to collision: gen_sector writes `solid` and `surf` exactly as the
+ * single-island version did, so the region partition, building placement and the 50-seed
+ * completability proof all still see what they always saw, and could be re-RUN rather than
+ * re-argued. */
+static void world_gen(World *w, Rng *rng)
+{
+    int x, y;
+
+    gen_sector(w, rng, 0, OVERWORLD_H, LAND_SEA, LAND_ROUGH);
+
+    /* The void band. SURF_OCEAN rather than a new surface kind: the dream sector recolours ocean
+     * to a violet starfield in slice 3 and this band is drawn by that same path, so a SURF_VOID
+     * would be a second way to say one thing. Add one only if the reuse reads wrong ON SCREEN. */
+    for (y = OVERWORLD_H; y < DREAM_Y0; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            w->surf[y][x]   = SURF_OCEAN;
+            w->solid[y][x]  = 1;
+            w->reveal[y][x] = 0.0f;
+        }
+
+    gen_sector(w, rng, DREAM_Y0, WORLD_H, LAND_SEA, DREAM_ROUGH);
 }
 
 /* Carve rivers from the interior to the sea, and deck them with bridges.
@@ -904,10 +977,15 @@ static void place_rivers(World *w, Rng *rng, int *dist, int *queue)
         int x, y;
 
         /* Source: a genuinely inland tile, sampled rather than scanned so two
-         * rivers on the same seed do not always start in the same place. */
+         * rivers on the same seed do not always start in the same place.
+         *
+         * OVERWORLD ONLY. The dream sector is a separate landmass with its own coast, and rivers
+         * there are not part of its design — the water feature it gets is the Well. Sampling the
+         * whole grid would also silently halve the overworld's river count, since half the
+         * candidate rows would be in a sector these rivers are not meant to reach. */
         for (tries = 0; tries < 300; tries++) {
             int cx = (int)rng_below(rng, WORLD_W);
-            int cy = (int)rng_below(rng, WORLD_H);
+            int cy = (int)rng_below(rng, OVERWORLD_H);
             int ci = cy * WORLD_W + cx;
             if (dist[ci] >= RIVER_SRC_MIN && w->surf[cy][cx] != SURF_RIVER) {
                 best = ci;
@@ -1025,9 +1103,15 @@ static void place_buildings(World *w, Rng *rng)
      *
      * Sites are kept VILLAGE_SPACING apart so two clusters never merge back
      * into the uniform scatter this replaced. */
+    /* OVERWORLD ONLY, same reasoning as place_rivers: the dream realm is ruins and flora, not
+     * cottages, and sampling the whole grid would thin the overworld's villages by placing half
+     * the sites in a sector that is not meant to have any. VILLAGE_SITES/RADIUS/SPACING are all
+     * denominated in TILES and so do NOT follow a grid change — they stay calibrated against the
+     * overworld's unchanged 108x60, which is exactly why the sampling range must be clamped
+     * rather than the constants retuned. */
     for (tries = 0; tries < 400 && sites < VILLAGE_SITES; tries++) {
         int cx = 6 + (int)rng_below(rng, WORLD_W - 12);
-        int cy = 5 + (int)rng_below(rng, WORLD_H - 10);
+        int cy = 5 + (int)rng_below(rng, OVERWORLD_H - 10);
         int i, ok = 1;
 
         if (solid_at(w, cx, cy))
@@ -5603,6 +5687,100 @@ static int fade_selftest(void)
     return fails ? 1 : 0;
 }
 
+/* A sector predicate that never separates anything — the negative control for --sector-test's
+ * separation assertion. If that assertion cannot reject "the whole grid is one sector", it is not
+ * testing separation, it is testing that a flood fill terminates. */
+static int dream_sector_always_false(int ty) { (void)ty; return 0; }
+
+/* Phase 12, slice 1: the dream realm is a second landmass in the SAME grid.
+ *
+ * Three claims, and the third is the one that carries the design. Before the portal exists the
+ * two sectors must be genuinely unreachable from each other — otherwise --portal-test in task 4
+ * would measure a portal that merely duplicates a path the player already had, and would pass for
+ * entirely the wrong reason. */
+static int sector_selftest(Uint64 seed, int nseeds)
+{
+    int fails = 0, s;
+
+    for (s = 0; s < nseeds; s++) {
+        Game    *g  = (Game *)SDL_malloc(sizeof(Game));
+        Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+        Rngs rngs;
+        int over = 0, dream = 0, band_open = 0, x, y, i;
+
+        if (!g || !sc) {
+            printf("FAIL  out of memory\n");
+            SDL_free(g); SDL_free(sc);
+            return 1;
+        }
+        rngs_init(&rngs, seed + (Uint64)s);
+        SDL_zerop(g);
+        world_gen(&g->w, &rngs.terrain);
+
+        for (y = 0; y < WORLD_H; y++)
+            for (x = 0; x < WORLD_W; x++) {
+                if (g->w.solid[y][x])
+                    continue;
+                if (dream_sector(y)) dream++; else over++;
+                if (y >= OVERWORLD_H && y < DREAM_Y0) band_open++;
+            }
+
+        if (over < 400) {
+            printf("FAIL  seed %d: overworld has only %d walkable tiles\n", s, over);
+            fails++;
+        }
+        if (dream < 200) {
+            printf("FAIL  seed %d: dream sector has only %d walkable tiles\n", s, dream);
+            fails++;
+        }
+        if (band_open) {
+            printf("FAIL  seed %d: %d walkable tiles in the void band\n", s, band_open);
+            fails++;
+        }
+
+        /* Separation: flood from the first walkable overworld tile and require that it reaches
+         * nothing at all in the dream sector. */
+        for (i = 0; i < WORLD_W * WORLD_H; i++)
+            sc->seen[i] = 0;
+        {
+            int fx = -1, fy = -1, first, sx, sy;
+            for (y = 1; y < OVERWORLD_H && fx < 0; y++)
+                for (x = 1; x < WORLD_W - 1; x++)
+                    if (!g->w.solid[y][x]) { fx = x; fy = y; break; }
+            if (fx < 0) {
+                printf("FAIL  seed %d: no overworld tile to flood from\n", s);
+                fails++;
+            } else {
+                int leaked = 0;
+                flood_open(&g->w, sc->seen, sc->stack, fx, fy, &first, &sx, &sy);
+                for (y = DREAM_Y0; y < WORLD_H; y++)
+                    for (x = 0; x < WORLD_W; x++)
+                        if (sc->seen[y * WORLD_W + x])
+                            leaked++;
+                if (leaked) {
+                    printf("FAIL  seed %d: overworld flood leaked into %d dream tiles\n",
+                           s, leaked);
+                    fails++;
+                }
+            }
+        }
+        SDL_free(g); SDL_free(sc);
+    }
+
+    {
+        int bad = 0, y;
+        for (y = 0; y < WORLD_H; y++)
+            if (dream_sector_always_false(y) != (dream_sector(y) ? 1 : 0))
+                bad++;
+        printf("negative control (sector-blind predicate): %s  [disagrees on %d of %d rows]\n",
+               bad > 0 ? "PASS" : "FAIL", bad, WORLD_H);
+        if (!bad) fails++;
+    }
+
+    printf("%s (%d checks failed)\n", fails ? "FAIL" : "PASS", fails);
+    return fails ? 1 : 0;
+}
+
 /* Decision 41. The team authored a magenta base disc under the bush, which reads as a halo on
  * grass. tools/bake.ps1 drops it to transparent and draw_prop draws a real contact shadow.
  *
@@ -6008,11 +6186,20 @@ static int land_check(const World *w, int spawn_tile, Uint8 *seen, int *stack,
     const int total = WORLD_W * WORLD_H;
     int open = 0, ocean = 0, rock = 0, edge_ocean = 0;
     int big_open = 0, big_ocean = 0, home = 0;
+    /* Phase 12: the grid deliberately holds TWO landmasses, so a count over the whole map is no
+     * longer the right denominator for "can the player reach most of the world". `open_home` is
+     * the walkable ground in the player's OWN sector; `big_dream` is the largest walkable
+     * component in the other one, which is what the portal needs somewhere to land on. */
+    int open_home = 0, big_dream = 0;
+    const int spawn_dream = (spawn_tile >= 0) ? dream_sector(spawn_tile / WORLD_W) : 0;
     int i, bad = 0;
 
     for (i = 0; i < total; i++) {
         int x = i % WORLD_W, y = i / WORLD_W;
-        if (!w->solid[y][x]) open++;
+        if (!w->solid[y][x]) {
+            open++;
+            if (dream_sector(y) == spawn_dream) open_home++;
+        }
         else if (w->surf[y][x] == SURF_OCEAN) ocean++;
         else rock++;
         if (w->surf[y][x] == SURF_OCEAN &&
@@ -6044,6 +6231,17 @@ static int land_check(const World *w, int spawn_tile, Uint8 *seen, int *stack,
         if (n > big_ocean) big_ocean = n;
     }
 
+    /* The far sector's largest walkable component. Safe to flood without a sector filter: the
+     * void band is solid on every column, so a fill started beyond it cannot escape back. */
+    SDL_memset(seen, 0, (size_t)total);
+    for (i = 0; i < total; i++) {
+        int x = i % WORLD_W, y = i / WORLD_W, n;
+        if (seen[i] || w->solid[y][x] || dream_sector(y) == spawn_dream)
+            continue;
+        n = land_flood(w, seen, stack, i, 0);
+        if (n > big_dream) big_dream = n;
+    }
+
     /* 1. There is a real island: enough walkable ground to be a world. */
     if (open < total / 8 || open > (total * 7) / 8) {
         printf("  seed %.0f: walkable %d of %d tiles, outside 12.5%%..87.5%%\n",
@@ -6073,9 +6271,25 @@ static int land_check(const World *w, int spawn_tile, Uint8 *seen, int *stack,
     /* 2b. A loose fragmentation bound, purely to catch a shattered world: if
      *     the player can reach under half the walkable ground, most of what is
      *     on screen is unreachable and the seed is not worth shipping. */
-    if (open > 0 && home * 2 < open) {
-        printf("  seed %.0f: player can reach %d of %d open tiles (<50%%)\n",
-               (double)seed, home, open);
+    /* RE-AIMED FOR PHASE 12, NOT LOOSENED. The denominator is now the player's OWN sector,
+     * because the grid deliberately holds a second landmass that is *supposed* to be unreachable
+     * until the portal exists. Measured against the whole map this fired on seed 16 of 30 — home
+     * 1557 of 3583 open — purely because that seed's dream sector is larger than its overworld,
+     * which is not a defect in anything. The 50% threshold is UNTOUCHED; only the question it
+     * asks changed. Handover §7: when a bound moves, the justification belongs in the phase
+     * file, and it is in Phase 12's Evidence. */
+    if (open_home > 0 && home * 2 < open_home) {
+        printf("  seed %.0f: player reaches %d of %d open tiles in their own sector (<50%%)\n",
+               (double)seed, home, open_home);
+        bad++;
+    }
+    /* 2c. NEW for Phase 12: the far sector has to be a place worth going to. The portal's far end
+     *     is dropped in the largest component there, so if that component is tiny the dream realm
+     *     is a rock in the void and the fragments placed in it are unreachable. Absolute, as a
+     *     fraction of the whole map, per the rule at the top of this function. */
+    if (big_dream * 32 < total) {
+        printf("  seed %.0f: far sector's largest landmass is %d of %d map tiles (<3.1%%)\n",
+               (double)seed, big_dream, total);
         bad++;
     }
     /* 3. The sea is one body that reaches the map edge, not inland puddles. */
@@ -6546,6 +6760,11 @@ int main(int argc, char **argv)
     /* Same idea for F3, so the tuning HUD can be screenshotted over real
      * fogged terrain without a human at the keyboard. */
     tune_show = arg_flag(argc, argv, "--tune");
+    /* And for F2. Added in Phase 12 because the camera follows the player, so a normal capture
+     * can only ever show ONE of the two landmasses — the dream sector sits 64 rows south and is
+     * always off-frame. The grid view draws whole worlds, which is the only way to look at the
+     * shape of a two-sector world without a human holding F2. */
+    grid = arg_flag(argc, argv, "--grid");
 #endif
 
 #if WAYFARER_SELFTEST
@@ -6565,6 +6784,9 @@ int main(int argc, char **argv)
             return sprite_selftest();
         if (arg_flag(argc, argv, "--fade-test"))
             return fade_selftest();
+        if (arg_flag(argc, argv, "--sector-test"))
+            return sector_selftest((Uint64)arg_int(argc, argv, "--seed", 1),
+                                   arg_int(argc, argv, "--seeds", 10));
         if (arg_flag(argc, argv, "--land-test")) {
             int n = arg_int(argc, argv, "--seeds", 20);
             int base = arg_int(argc, argv, "--seed", 1);
