@@ -1,7 +1,7 @@
 ---
 tags: [process, handover, wayfarer]
 updated: 2026-08-05
-exe_size_bytes: 692224
+exe_size_bytes: 755200
 ---
 
 # Handover — Wayfarer
@@ -50,6 +50,10 @@ and any animation at all.
   suite, especially `--play-test --seeds 50`.
 - **A checker that has never rejected anything proves nothing.** Every test here has a negative
   control. New ones must too.
+- **When a phase file names a test to write FIRST, write it first.** Phase 07 said to write the RLE
+  round-trip before trusting the decoder visually. It was written after, and a screenshot loop went
+  on suspecting a decoder bug that the test disproved in one run. Screenshots are the slowest
+  debugging loop this project has; use them for judgement, not for existence.
 
 ---
 
@@ -196,15 +200,19 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 Remote: **`https://github.com/Nishmam12/matha-noshto-game`** — private, branch `main`.
 
 ```
+33f4cd2  Track tools/bake.ps1, which .gitignore was silently swallowing
+ecb2649  docs: catch up devlog/INDEX.md with latest session entry
+c884d95  docs & devlog: update Phase 07 documentation, handover notes, and main.c tweaks
+df480a6  Phase 07: add sprite decoder selftest, baked art_data header, and source PNG assets
+378e8b7  docs: record the art handoff, and the pixel-density question it makes blocking
 0e85464  Phase 06, part 2: waterfalls, and bridges stop being an argument
 ef09d9e  Handover for a fresh chat: Phase 06 half-done, and the asset answer
 e42f2f4  Phase 06, part 1: rivers that reach the sea, and bridges that cross them
-66222b6  docs: the house fix and Phase 05, and the rule debt closes
-4847bf5  Phase 05: --land-test and --fog-test, paying down three sessions of rule debt
-b4bf446  Houses: put the roof back on the box, and the windows back on the wall
-037936c  docs: the rescale and Phase 04, plus the traps both cost
-dd8cfef  Phase 04: screen-aligned input, and an eased follow camera
 ```
+
+**`assets/` (217 files, 1.2 MB) IS committed** as of `df480a6` — the source PNGs plus their Godot
+`.import` sidecars. The sidecars are editor metadata that nothing reads; whether they should be in
+the repo at all is still undecided.
 
 **Everything is committed.** Nothing is pushed to the remote yet — check before assuming.
 
