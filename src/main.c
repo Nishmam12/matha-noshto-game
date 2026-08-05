@@ -655,6 +655,14 @@ typedef struct {
      * river and gives no gradient to terrace with. Never consulted by
      * collision, the region graph or the verifier. */
     Uint8  sea_dist[WORLD_H][WORLD_W];
+    /* The two ends of the portal pair, as tile indices, or -1 before placement.
+     *
+     * NOT render-only, and deliberately called out as the exception. Unlike height, bld_at, surf,
+     * bridge and sea_dist, this IS read by traversal — through tile_neighbours — because a portal
+     * genuinely is a graph edge. What it is still NOT read by is tile_blocked, so decision 12's
+     * invariant holds unchanged: collision sees `solid` and regions[].terrain and nothing else.
+     * Travel is an interact, not a movement. */
+    int    portal[2];
     Building bld[BUILDING_MAX];
     int    bld_count;
     Region regions[REGION_COUNT];
@@ -1183,6 +1191,43 @@ static void place_buildings(World *w, Rng *rng)
     }
 }
 
+/* GRAPH ADJACENCY FOR A TILE: the four orthogonal neighbours, plus — once Phase 12's portal is
+ * placed — its paired tile. Writes up to 5 indices into `out` and returns the count.
+ *
+ * THIS FUNCTION IS THE WHOLE CORRECTNESS ARGUMENT FOR THE PORTAL, and it exists before the portal
+ * does. Five traversals in this file independently answer "what is next to this tile":
+ *
+ *   bfs_open        the region partition
+ *   flood_open      the spawn component, and --land-test
+ *   walk_regions    the WALK side of --gating-test
+ *   regions_build   the adjacency bitmask
+ *   autopilot_tick  pathing
+ *
+ * A portal edge added to four of those five is exactly how walk-reachable and graph-reachable come
+ * apart — and --gating-test would then be RIGHT to fail, on a fault that looks like a test bug.
+ * The spec originally listed four readers and missed walk_regions; that near-miss is why this is
+ * one function rather than five remembered edits.
+ *
+ * It returns CANDIDATES, not passable tiles. Each caller keeps its own blocked test, because
+ * flood_open reads `solid` while walk_regions reads tile_blocked against an ability mask. Merging
+ * those was never on the table — see decision 33 on why a bridge clears `solid` instead of
+ * becoming a second signal collision has to read. */
+static int tile_neighbours(const World *w, int idx, int *out)
+{
+    static const int dx[4] = { 1, -1, 0, 0 };
+    static const int dy[4] = { 0, 0, 1, -1 };
+    int x = idx % WORLD_W, y = idx / WORLD_W, d, n = 0;
+
+    (void)w;
+    for (d = 0; d < 4; d++) {
+        int nx = x + dx[d], ny = y + dy[d];
+        if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+            continue;
+        out[n++] = ny * WORLD_W + nx;
+    }
+    return n;
+}
+
 /* Multi-source BFS across open tiles. Fills dist (hop count, -1 unreachable)
  * and, when owner is non-NULL, which source claimed each tile. Because regions
  * grow outward from their seeds in lockstep, every region it produces is
@@ -1207,17 +1252,13 @@ static void bfs_open(const World *w, const int *sources, int nsrc,
 
     while (head < tail) {
         int idx = queue[head++];
-        int x = idx % WORLD_W, y = idx / WORLD_W, d;
-        static const int dx[4] = { 1, -1, 0, 0 };
-        static const int dy[4] = { 0, 0, 1, -1 };
+        int nb[5];
+        int n = tile_neighbours(w, idx, nb), k;
 
-        for (d = 0; d < 4; d++) {
-            int nx = x + dx[d], ny = y + dy[d], nidx;
-            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+        for (k = 0; k < n; k++) {
+            int nidx = nb[k];
+            if (w->solid[nidx / WORLD_W][nidx % WORLD_W])
                 continue;
-            if (w->solid[ny][nx])
-                continue;
-            nidx = ny * WORLD_W + nx;
             if (dist[nidx] >= 0)
                 continue;
             dist[nidx] = dist[idx] + 1;
@@ -1800,9 +1841,8 @@ static int flood_open(const World *w, Uint8 *seen, int *stack, int sx, int sy,
     while (top > 0) {
         int idx = stack[--top];
         int x = idx % WORLD_W, y = idx / WORLD_W;
-        int d;
-        static const int dx[4] = { 1, -1, 0, 0 };
-        static const int dy[4] = { 0, 0, 1, -1 };
+        int nb[5];
+        int n = tile_neighbours(w, idx, nb), k;
 
         count++;
         *sum_x += x;
@@ -1810,14 +1850,12 @@ static int flood_open(const World *w, Uint8 *seen, int *stack, int sx, int sy,
         if (idx < best)
             best = idx;
 
-        for (d = 0; d < 4; d++) {
-            int nx = x + dx[d], ny = y + dy[d];
-            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+        for (k = 0; k < n; k++) {
+            int nidx = nb[k];
+            if (w->solid[nidx / WORLD_W][nidx % WORLD_W] || seen[nidx])
                 continue;
-            if (w->solid[ny][nx] || seen[ny * WORLD_W + nx])
-                continue;
-            seen[ny * WORLD_W + nx] = 1;
-            stack[top++] = ny * WORLD_W + nx;
+            seen[nidx] = 1;
+            stack[top++] = nidx;
         }
     }
 
@@ -4290,21 +4328,18 @@ static Uint32 walk_regions(const World *w, Uint8 abilities, int spawn_tile,
     queue[tail++] = spawn_tile;
     while (head < tail) {
         int idx = queue[head++];
-        int x = idx % WORLD_W, y = idx / WORLD_W, d;
-        static const int dx[4] = { 1, -1, 0, 0 };
-        static const int dy[4] = { 0, 0, 1, -1 };
+        int x = idx % WORLD_W, y = idx / WORLD_W;
+        int nb[5];
+        int n = tile_neighbours(w, idx, nb), k;
         Uint8 reg = w->region[y][x];
 
         if (reg != REGION_NONE)
             touched |= 1u << reg;
 
-        for (d = 0; d < 4; d++) {
-            int nx = x + dx[d], ny = y + dy[d], nidx;
-            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+        for (k = 0; k < n; k++) {
+            int nidx = nb[k];
+            if (tile_blocked(w, abilities, nidx % WORLD_W, nidx / WORLD_W))
                 continue;
-            if (tile_blocked(w, abilities, nx, ny))
-                continue;
-            nidx = ny * WORLD_W + nx;
             if (seen[nidx])
                 continue;
             seen[nidx] = 1;
@@ -4377,17 +4412,13 @@ static void bfs_gated(const World *w, Uint8 abilities, int start, int *dist, int
     queue[tail++] = start;
     while (head < tail) {
         int idx = queue[head++];
-        int x = idx % WORLD_W, y = idx / WORLD_W, d;
-        static const int dx[4] = { 1, -1, 0, 0 };
-        static const int dy[4] = { 0, 0, 1, -1 };
+        int nb[5];
+        int n = tile_neighbours(w, idx, nb), k;
 
-        for (d = 0; d < 4; d++) {
-            int nx = x + dx[d], ny = y + dy[d], nidx;
-            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+        for (k = 0; k < n; k++) {
+            int nidx = nb[k];
+            if (tile_blocked(w, abilities, nidx % WORLD_W, nidx / WORLD_W))
                 continue;
-            if (tile_blocked(w, abilities, nx, ny))
-                continue;
-            nidx = ny * WORLD_W + nx;
             if (dist[nidx] >= 0)
                 continue;
             dist[nidx] = dist[idx] + 1;
@@ -4406,9 +4437,7 @@ static void bfs_gated(const World *w, Uint8 abilities, int start, int *dist, int
  * reachable (a dead end). */
 static int autopilot_tick(Game *g, Scratch *sc)
 {
-    static const int dx[4] = { 1, -1, 0, 0 };
-    static const int dy[4] = { 0, 0, 1, -1 };
-    int here, target = -1, best = 1 << 30, i, d, next = -1;
+    int here, target = -1, best = 1 << 30, i, next = -1;
     Input in;
 
     if (try_restore(g) >= 0)
@@ -4437,14 +4466,15 @@ static int autopilot_tick(Game *g, Scratch *sc)
     if (sc->dist[here] < 0)
         return -1;
 
-    for (d = 0; d < 4; d++) {
-        int nx = (here % WORLD_W) + dx[d], ny = (here / WORLD_W) + dy[d], nidx;
-        if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
-            continue;
-        nidx = ny * WORLD_W + nx;
-        if (sc->dist[nidx] >= 0 && sc->dist[nidx] == sc->dist[here] - 1) {
-            next = nidx;
-            break;
+    {
+        int nb[5];
+        int n = tile_neighbours(&g->w, here, nb), k;
+        for (k = 0; k < n; k++) {
+            int nidx = nb[k];
+            if (sc->dist[nidx] >= 0 && sc->dist[nidx] == sc->dist[here] - 1) {
+                next = nidx;
+                break;
+            }
         }
     }
 
