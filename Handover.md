@@ -23,7 +23,7 @@ Running log: [[INDEX]]
 |---|---|
 | **State** | 755,200 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
 | **Deadline** | 2026-09-04. **Hard stop on art/backbone work 2026-08-14** — nine days from now |
-| **Do first** | **Decide the player-occlusion question** (below), then [[Phase 08 - Save Load]] |
+| **Do first** | **[[Phase 12 - Dream Realm]]** (new direction, approved 2026-08-05), then [[Phase 08 - Save Load]] |
 | **Then** | 10 (motion) → **11 is non-negotiable**. Phases 00–07 are done and 07 absorbed most of 09 |
 | **Biggest risk** | **Audio does not exist at all.** A softsynth from zero, plus save/load and a HUD, all still ahead of a 30-day deadline |
 
@@ -33,13 +33,12 @@ character, 10 buildings, 11 nature props. Cost **+62,976 bytes** against 684,800
 retires four separate "does not exist" items at once — the orange square, the walk cycle, facing,
 and any animation at all.
 
-> **ONE THING NEEDS A DECISION BEFORE MORE ART WORK.** The player is **routinely hidden behind
-> trees**. This is confirmed by experiment, not suspected: with props disabled the character
-> renders perfectly; with props on she is frequently invisible. A 96 px tree on a 24 px tile grid
-> occludes a 48 px character often, and **the depth sort is behaving correctly** — this is a design
-> problem, not a bug. Three options, none yet chosen: thin the trees further (a one-line change to
-> `prop_at`), draw tree sprites scaled down, or fade props that cover the player (a real feature,
-> and the one that actually solves it). See [[Phase 07 - Asset Seam]] "still not verified".
+> **THE OCCLUSION QUESTION IS SETTLED — 2026-08-05. Props fade when they cover the player.** Four
+> handovers carried this as the top open item: with props disabled the character renders perfectly,
+> with props on she is frequently invisible, because a 96 px tree on a 24 px tile grid covers a
+> 48 px character often and **the depth sort is behaving correctly**. The user chose the real fix
+> over the two cheap ones — not thinning the trees, not scaling the sprites down, but **fading any
+> prop drawn over the player**. See decision 40. It is not yet built.
 
 **Three habits this project runs on**, learned the expensive way:
 
@@ -103,10 +102,11 @@ every decision below:
    named entry point rather than requiring a renderer rewrite. See [[Art Bible]] §8 and
    [[Phase Roadmap]] Phase 07.
 2. **Zero external files still applies to the team's art.** They cannot hand over a PNG or a GLB and
-   have it load at runtime. It has to be baked into a compiled-in C header at build time. Tell them
-   this early — an untracked **`tree.glb`** (36 KB, binary glTF) has been sitting at the vault root
-   since before this framing was agreed, and it is exactly the mistake this note exists to prevent.
-   It can be a *bake input* if someone renders it to sprite frames first. It can never ship as-is.
+   have it load at runtime. It has to be baked into a compiled-in C header at build time. This was
+   not hypothetical: an untracked **`tree.glb`** (36 KB, binary glTF) sat at the vault root for
+   several sessions and was exactly the mistake this note exists to prevent. **It has since been
+   deleted — verified gone 2026-08-05.** The rule stands for the next one: a model can be a *bake
+   input* if someone renders it to sprite frames first, and can never ship as-is.
 
 Full memory of this framing, plus which Claude skills apply to this project and which explicitly do
 not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\memory\` — see §10.
@@ -214,7 +214,10 @@ e42f2f4  Phase 06, part 1: rivers that reach the sea, and bridges that cross the
 `.import` sidecars. The sidecars are editor metadata that nothing reads; whether they should be in
 the repo at all is still undecided.
 
-**Everything is committed.** Nothing is pushed to the remote yet — check before assuming.
+**Everything is committed AND pushed, as of 2026-08-05.** `main` is at `ae788b4` on the remote; the
+two commits this handover previously listed as unpushed (`ae788b4`, `33f4cd2`) are up. Phase 12's
+work lives on **`feat/phase-12-dream-realm`**, also pushed. Older notes saying "nothing is pushed to
+the remote yet" are stale.
 
 **Do not add `Co-Authored-By` trailers to commits.** This was asked for explicitly and one had to
 be stripped and force-pushed once already. It is recorded in persistent memory (§10) so it should
@@ -237,10 +240,9 @@ to a GitHub Release if a playable download is wanted.
 > diamond width at `TILE 24`. The team authored against the scale already shipping, so nothing
 > needed re-authoring and no resolution change was required. See §9.
 >
-> Two files at the vault root that nobody in any build session created: an empty `devlog.md`, and an
-> untracked **`tree.glb`**. See §1 above — the `.glb` is not a hypothetical risk, it is the exact
-> shape of mistake the asset-bake decision exists to prevent. All left alone rather than deleted
-> without asking.
+> **`tree.glb` is gone** — verified absent from disk on 2026-08-05. Any older note treating it as a
+> live risk is stale. An empty `devlog.md` (0 bytes) is still at the vault root, created by nobody
+> in any build session; left alone rather than deleted without asking.
 
 > `.claude/` also appears untracked in `git status`. That is this session's own harness state
 > (plugin/skill config), not project content — leave it alone; it is not part of the game.
@@ -601,6 +603,30 @@ New decisions from the Phase 07 session (2026-08-05):
     **and** `draw_building`, so there is one decision rather than three that can drift. Footprint
     tiles stay `solid`: collision and reachability are untouched, and `height` remains render-only.
 
+New decisions from the direction-change session (2026-08-05):
+
+40. **A prop drawn over the player FADES; the trees are not thinned and the sprites are not
+    rescaled.** The occlusion problem is real and confirmed by ablation, but it is a design problem
+    and not a depth-sort bug — see §0. Of the three candidate fixes the user chose the expensive one
+    deliberately: thinning `prop_at` further would strip the woodland that makes the island read as
+    inhabited, and scaling the sprites down would break the 48 px base unit the whole set was
+    authored against (§9). **Fading is the only option that fixes visibility without spending
+    either.** It is render-only by construction — the fade reads the player's screen position and
+    writes nothing back — so collision, reachability and the 50-seed proof cannot observe it.
+41. **The bush sprite's magenta base disc is stripped at BAKE time, and a real contact shadow is
+    drawn in code instead.** The disc is authored into the team's art and reads as a halo on grass.
+    Repainting the PNG by hand would silently fork the source from what the teammate has; stripping
+    a known key colour in `tools/bake.ps1` keeps the authored file canonical and the fix
+    reproducible on re-delivery. `draw_bush` and every other procedural prop **already draw contact
+    shadows**, so the replacement is the routine that exists, not a new one.
+42. **Rock outcrops keep their geometry; what changes is stone's VALUE.** They read as pale cubes
+    floating out of the fog because stone is still the lightest large surface in the world — the
+    same value-hierarchy fight [[Art Bible]] describes and Session 03 already had once. Deleting
+    them from the generator was considered and rejected: it would change open ground, which would
+    make the 50-seed reachability and playthrough proofs a re-argument rather than a re-run, to fix
+    what is actually a palette fault. **This is a render-only change, tuned live on the F3 overlay**
+    — explicitly not by rebuild-and-screenshot, which thrashed for three passes last time (§7).
+
 ---
 
 ## 7. Traps — each of these already cost time once
@@ -750,12 +776,15 @@ determinism; region graph invariants; reachability with a negative control; gati
 isometric rasterisation with a negative control; building placement invariants with two negative
 controls; audio callback timing; render cost). New this session:
 
-- **The game has been played by a human being, for the first time.** Four consecutive handovers
-  carried "nobody has played it by hand" as a standing, named risk. On 2026-08-04 the user played it
-  and reported: *"even though the gameplay is in early stage, it did feel slightly enjoyable."* This
-  is one datapoint from the person who wrote the design, not a QA pass, but the specific risk "we
-  have built something nobody has ever moved around in" is retired. [[QA Checklist]]'s "runs clean
-  on a machine without dev tools" — a *different* item — is still unchecked.
+- **The game has been played by several people, WITH the team's art in the build.** Four
+  consecutive handovers carried "nobody has played it by hand" as a standing risk; the 2026-08-05
+  art landing immediately replaced it with "nobody has played it *with the art in*". **Both are now
+  retired.** On 2026-08-04 the user played the pre-art build and reported *"even though the gameplay
+  is in early stage, it did feel slightly enjoyable"*; on 2026-08-05 the user **and several friends**
+  played the current build with the baked character, buildings and nature props. **The overall
+  verdict is explicitly still pending** — this retires the risk "nobody has moved around in it", not
+  the question "is it good". [[QA Checklist]]'s "runs clean on a machine without dev tools" is a
+  *different* item and is still unchecked.
 - **The island generator does not weaken the collision invariant.** `solid` is still the only thing
   `tile_blocked` reads; the full test suite, including the 50-seed reachability and playthrough
   tests, was re-run (not re-argued) after the generator was replaced and stayed green.
@@ -813,18 +842,18 @@ controls; audio callback timing; render cost). New this session:
 
 ### NOT verified — be honest about these
 
-- **THE PLAYER IS ROUTINELY HIDDEN BEHIND TREES, and this is the top open item.** Confirmed by
-  ablation: props off, she renders perfectly; props on, she is frequently invisible. The depth sort
-  is *correct* — a 96 px tree on a 24 px tile grid simply covers a 48 px character often. Needs a
-  decision (thin the trees, scale them down, or fade props over the player), not a bug fix.
+- **The player is routinely hidden behind trees. DECIDED, NOT YET BUILT** — props will fade over
+  the player, decision 40. Until that ships the defect is still in the build exactly as measured.
 - **The bush sprite carries a magenta base disc** authored into the art, which reads as a halo on
-  grass. Left alone rather than silently repainted — it is the teammates' art and should go back to
-  whoever drew it.
+  grass. **DECIDED, NOT YET BUILT** — stripped at bake time and replaced with the contact shadow
+  the procedural props already draw, decision 41.
 - **No test proves a sprite lands on the right tile in WORLD terms.** `--sprite-test` checks the
   anchor is bottom-centre of its own box; that `draw_building` passes the right screen point is
   screenshot-verified only.
-- **Nobody has played with the art in.** Every visual judgement this session is from screenshots,
-  including "the village reads as a village" and "the fog reveal looks better with real art".
+- **The overall verdict on the art is still pending**, but "nobody has played with the art in" is
+  **retired as of 2026-08-05** — see Verified. The user and several friends have now played the
+  build with the baked sprites in it. What is still unjudged is whether the *look* is right, not
+  whether anyone has seen it move.
 - **The waterfall drops are 3 px and nobody has judged them.** The steps are confirmed present in
   the data and the channel now reads as a channel with banks, but whether a 3 px drop reads as
   *falling water* to a player is unjudged. [[Phase 10 - Motion]]'s shimmer is what would sell it;
@@ -843,10 +872,10 @@ controls; audio callback timing; render cost). New this session:
 - **The user's verdict on the houses, 2026-08-05:** *"fine, not perfect but workable"*. The land is
   *"decent but lacks the pixelated game feel"* — see §9, that is a resolution/palette question and
   is still open.
-- **Rock outcrops read as scattered pale blocks under fog at the new scale.** More, smaller outcrops
-  are visible at once and stone is still the lightest large surface, so they pop out of the haze as
-  floating cubes. Same value-hierarchy fight [[Art Bible]] describes and Session 03 already had once
-  — and now exactly what the F3 overlay exists to settle.
+- **Rock outcrops read as scattered pale blocks under fog at the new scale. DECIDED, NOT YET BUILT**
+  — stone's value gets fixed so they recede into the haze; the outcrops themselves stay, so the
+  landform and its proofs are untouched. Decision 42, and exactly what the F3 overlay exists to
+  settle.
 - **The overlay's liveness is proven by construction, not by a scripted keypress.** `fog_lerp` reads
   the struct the keys write, but no automated run presses a key and diffs two frames.
 - **The camera ease runs per frame, not per simulation tick.** Stable while the frame cap holds;
@@ -887,7 +916,10 @@ controls; audio callback timing; render cost). New this session:
 | Building placement pattern | **RESOLVED, this session** — clustered village sites, not uniform scatter. See decision 17 |
 | Fog destination colour | **RESOLVED, this session, but tuned by eye and unmeasured** — light haze, `FOG_KEEP` contrast preservation. See decision 19 and Phase 05 |
 | Asset pipeline for team-authored art | **RESOLVED AND BUILT, 2026-08-05.** `tools/bake.ps1` → `src/art_data.h`, committed, compiled in, nothing loaded at runtime. 37 of the team's 130 sprites are wired; `magical/` (56 frames) is baked-out until something calls it. See decisions 37–39 and [[Phase 07 - Asset Seam]] |
-| **Player occlusion behind props** | **OPEN, and the top item.** A 96 px tree covers a 48 px character often enough to matter; the depth sort is correct. Thin the trees, scale them, or fade props over the player. See §0 |
+| **Player occlusion behind props** | **RESOLVED 2026-08-05 — props fade over the player.** Carried as the top open item by four handovers. The two cheap fixes (thin the trees, rescale the sprites) were rejected in favour of the one that costs neither the woodland nor the 48 px base unit. See decision 40. **Decided, not yet built** |
+| **The bush's magenta base disc** | **RESOLVED 2026-08-05** — stripped at bake time, replaced by the contact shadow the procedural props already draw. See decision 41. **Decided, not yet built** |
+| **Rock outcrops as pale floating cubes** | **RESOLVED 2026-08-05** — stone's value gets fixed, the outcrops stay, so no generator change and no re-argued proof. See decision 42. **Decided, not yet built** |
+| **A second biome** | **RESOLVED 2026-08-05 — new direction, approved and specced.** A portal in the `TERRAIN_DARK` region to a Lumiara-style dream realm, timeboxed into five separately shippable slices. See [[Phase 12 - Dream Realm]] |
 | **"Lacks the pixelated game feel"** | **LARGELY ANSWERED BY THE ART, 2026-08-05.** The worry was that 960×540 ×2 reads too smooth. In practice the delivered pixel art supplies the chunkiness the procedural shapes lacked, and it was authored against a 48 px diamond — the scale already shipped — so **no re-authoring was needed and no resolution change was required.** Dropping `LOGICAL_W`/`LOGICAL_H` remains available as a taste lever, but it is no longer blocking anything |
 | **Input orientation** | **RESOLVED, 2026-08-05** — screen-aligned, `dd8cfef`. See decision 28 |
 | Camera easing | **RESOLVED in mechanism, OPEN in feel** — deadzone + exponential ease shipped, but `CAM_DEADZONE`/`CAM_EASE` are first guesses nobody has driven by hand |
