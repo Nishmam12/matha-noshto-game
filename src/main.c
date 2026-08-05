@@ -2492,6 +2492,25 @@ static void tile_detail(SDL_Surface *fb, int ax, int ay, int h, Uint32 hash,
 #define BV_SIGN(v)   (((v) >> 20) & 3)
 
 /* Wall materials: plaster, timber-frame, stone, brick, log. */
+/* Stone, varied per tile. One flat grey over a whole outcrop was half of the "concrete slab"
+ * read — real rock has tonal variation across its face, and three shades is enough to get it.
+ *
+ * AT FILE SCOPE so --fog-test can read it. It used to be a static local inside tile_colour,
+ * which made the one thing worth asserting about it — where it sits in the value hierarchy —
+ * unreachable by any checker, so the ramp had already been retuned once by eye and was still
+ * wrong. See decision 42. */
+/* Luminance 54 / 63 / 74, against sage grass at 78. Stone now sits just UNDER the ground it
+ * stands in rather than 14% over it, so an outcrop recedes into the haze instead of floating out
+ * of it. The 20-point spread across the three steps is kept from the previous ramp — the tonal
+ * variation was never the problem, only where the whole ramp sat.
+ *
+ * This is the second retune. The first (0x5c5a68 -> 0x595764) was done by eye, moved the top step
+ * from 95 to 89, and left it above grass anyway; nothing could tell, because no checker could
+ * see this table. That is why it lives at file scope now. */
+static const Uint8 stone_ramp[3][3] = {
+    {0x36,0x34,0x42}, {0x40,0x3e,0x4a}, {0x4a,0x48,0x55}
+};
+
 static const Uint8 wall_pal[5][3] = {
     { 0xd8, 0xc8, 0xa8 }, { 0xc4, 0xb0, 0x90 }, { 0x9a, 0x96, 0x8c },
     { 0xa8, 0x70, 0x5c }, { 0x9c, 0x7c, 0x54 }
@@ -2679,17 +2698,46 @@ static void art_palette(SDL_Surface *fb, const ArtSprite *sp, float rev, Uint32 
     }
 }
 
-/* Blit a baked sprite with its anchor at (cx, by). Clipped per pixel-run against the target. */
-static void draw_sprite(SDL_Surface *fb, int id, int cx, int by, float rev)
+/* Does a prop standing in `band` cover the player, and therefore need to be drawn ghosted?
+ *
+ * Deliberately PURE, and deliberately not folded into the prop loop: the interesting half of
+ * decision 40 is the *selection* (which props fade), not the blend, and a predicate taking plain
+ * ints is something --fade-test can hit directly with a truth table instead of inferring from
+ * pixels. Boxes are screen-space, half-open: [x0,x1) x [y0,y1).
+ *
+ * `band <= pband` is the load-bearing clause. A prop level with or behind the player is drawn
+ * BEFORE her and cannot hide her, so ghosting it would flicker scenery for no reason — which is
+ * exactly what the negative control checks a band-blind version gets wrong. */
+static int prop_covers_player(int band, int pband,
+                              int sx0, int sy0, int sx1, int sy1,
+                              int px0, int py0, int px1, int py1)
+{
+    if (band <= pband)
+        return 0;
+    if (sx1 <= px0 || sx0 >= px1) return 0;
+    if (sy1 <= py0 || sy0 >= py1) return 0;
+    return 1;
+}
+
+/* Blit a baked sprite with its anchor at (cx, by). Clipped per pixel-run against the target.
+ *
+ * `fade` non-zero draws the sprite at half weight against what is already in the framebuffer,
+ * which is how decision 40's prop ghosting is expressed. The player is drawn in an earlier band,
+ * so "what is already there" IS her — no second pass and no z-buffer. */
+static void draw_sprite_fade(SDL_Surface *fb, int id, int cx, int by, float rev, int fade)
 {
     const ArtSprite *sp;
     Uint32 pal[ART_PAL_MAX];
+    Uint32 rmask, gmask, bmask;
     unsigned int i, n;
     int x0, y0, x, y;
 
     if (id < 0 || id >= ART_SPRITE_COUNT)
         return;
     sp = &ART_SPRITES[id];
+    rmask = fb->format->Rmask;
+    gmask = fb->format->Gmask;
+    bmask = fb->format->Bmask;
 
     x0 = cx - sp->anchor_x;
     y0 = by - sp->anchor_y;
@@ -2722,8 +2770,22 @@ static void draw_sprite(SDL_Surface *fb, int id, int cx, int by, float rev)
             unsigned char v = literal ? ART_DATA[i + k] : idx;
             if (v) {
                 int px = x0 + x, py = y0 + y;
-                if (px >= 0 && py >= 0 && px < fb->w && py < fb->h)
-                    *(Uint32 *)((Uint8 *)fb->pixels + py * fb->pitch + px * 4) = pal[v];
+                if (px >= 0 && py >= 0 && px < fb->w && py < fb->h) {
+                    Uint32 *d = (Uint32 *)((Uint8 *)fb->pixels + py * fb->pitch + px * 4);
+                    if (fade) {
+                        /* Per-channel floor average, done in packed space. Summing inside a
+                         * channel mask cannot carry into the neighbouring channel (the widest
+                         * sum is 2x the mask, and the >>1 brings it back), and the final AND
+                         * drops the half-bit the shift pushed below the channel. So this is
+                         * exactly (src+dst)/2 per channel with no unpacking. */
+                        Uint32 s = pal[v], o = *d;
+                        *d = ((((s & rmask) + (o & rmask)) >> 1) & rmask)
+                           | ((((s & gmask) + (o & gmask)) >> 1) & gmask)
+                           | ((((s & bmask) + (o & bmask)) >> 1) & bmask);
+                    } else {
+                        *d = pal[v];
+                    }
+                }
             }
             if (++x >= sp->w) { x = 0; y++; }
         }
@@ -2731,6 +2793,12 @@ static void draw_sprite(SDL_Surface *fb, int id, int cx, int by, float rev)
             i += count;
     }
     PERF_COUNT(sp->w * sp->h);
+}
+
+/* The opaque spelling, which is what almost every caller wants. */
+static void draw_sprite(SDL_Surface *fb, int id, int cx, int by, float rev)
+{
+    draw_sprite_fade(fb, id, cx, by, rev, 0);
 }
 
 /* The character's sprite table: [facing][walk frame].
@@ -3260,17 +3328,43 @@ static const PropArt prop_art[] = {
     { NULL,        0 }                                   /* PROP_STUMP   */
 };
 
-static void draw_prop(SDL_Surface *fb, int kind, int cx, int by, Uint32 h, float rev)
+/* `pbox` is the player's screen box as {x0,y0,x1,y1}, or NULL for callers that have no player to
+ * protect. Decision 40: a baked prop standing in front of her is drawn ghosted rather than
+ * thinned out of the world or shrunk. The decision is made HERE, where the sprite id is already
+ * chosen, so the box measured is the box drawn — computing it at the call site would mean
+ * re-deriving the variant pick and risking the two disagreeing. */
+static void draw_prop(SDL_Surface *fb, int kind, int cx, int by, Uint32 h, float rev,
+                      int band, int pband, const int *pbox)
 {
     if (kind > PROP_NONE && kind < (int)(sizeof prop_art / sizeof *prop_art)) {
         const PropArt *a = &prop_art[kind];
         if (a->n > 0) {
             /* Bits 24+ of the hash: the low bits are already spoken for by the procedural
              * routines' own jitter, and reusing them would correlate variant with size. */
-            draw_sprite(fb, a->ids[(h >> 24) % (Uint32)a->n], cx, by, rev);
+            int id = a->ids[(h >> 24) % (Uint32)a->n];
+            int fade = 0;
+            if (id >= 0 && id < ART_SPRITE_COUNT) {
+                const ArtSprite *sp = &ART_SPRITES[id];
+                int x0 = cx - sp->anchor_x, y0 = by - sp->anchor_y;
+                if (pbox)
+                    fade = prop_covers_player(band, pband, x0, y0, x0 + sp->w, y0 + sp->h,
+                                              pbox[0], pbox[1], pbox[2], pbox[3]);
+                /* Decision 41's other half. The procedural props have always drawn a contact
+                 * shadow here (see draw_tree) and the baked ones never did — the team's art
+                 * carried its own magenta disc instead, which is the halo now stripped at bake.
+                 * Same call, same colour, same reason: without it a prop floats, because an
+                 * isometric projection gives no other cue for where its base meets the tile. */
+                iso_diamond(fb, cx, by - 1, sp->w / 3, fog_lerp(fb, 0x24, 0x33, 0x22, rev));
+            }
+            draw_sprite_fade(fb, id, cx, by, rev, fade);
             return;
         }
     }
+
+    /* The procedural fallbacks (flower, crystal, stump) are all shorter than the character and
+     * have never been observed to hide her, so they stay opaque rather than growing a fade path
+     * that nothing needs. If one ever gets tall, it belongs in the baked branch above. */
+    (void)band; (void)pband;
 
     switch (kind) {
     case PROP_TREE:    draw_tree(fb, cx, by, h, rev);    break;
@@ -3343,18 +3437,8 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
         if (d > 3) d = 3;
         *cr = water_ramp[d][0]; *cg = water_ramp[d][1]; *cb = water_ramp[d][2];
     } else if (g->w.solid[ty][tx]) {
-        /* Stone ramp, varied per tile. One flat grey over a whole outcrop was
-         * the other half of the "concrete slab" read — real rock has tonal
-         * variation across its face, and three shades is enough to get it. */
-        /* Just above grass in value, and no further. Stone should catch more
-         * light than vegetation, but at the previous 0x5c5a68 it became the
-         * BRIGHTEST large surface in the world — under fog the outcrops read as
-         * white shapes floating in a dark field and pulled the eye away from
-         * the player and the lit ground. Walls are meant to be the lightest
-         * mass on screen; see the value hierarchy in design/Art Bible.md §4. */
-        static const Uint8 stone_ramp[3][3] = {
-            {0x44,0x42,0x4e}, {0x4e,0x4c,0x59}, {0x59,0x57,0x64}
-        };
+        /* stone_ramp is at file scope so --fog-test can assert where it sits in the value
+         * hierarchy — see decision 42 and the note on the table itself. */
         const Uint8 *p = stone_ramp[tile_hash(g->seed, tx, ty) % 3u];
         *cr = p[0]; *cg = p[1]; *cb = p[2];
     } else {
@@ -3375,6 +3459,22 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
     int ptx = (int)(g->p.x / TILE), pty = (int)(g->p.y / TILE);
     int pband = ptx + pty;
     Uint32 voidc = SDL_MapRGB(fb->format, VOID_R, VOID_G, VOID_B);
+    /* The player's screen anchor, computed ONCE. Both the prop-fade test (decision 40, which
+     * needs her box while drawing bands in front of her) and her own draw further down read
+     * these — deriving the box separately would be two expressions of one position, free to
+     * drift, which is the fault that put the roof half a tile off its walls for four sessions. */
+    int p_ax, p_ay;
+    int pbox[4];
+    const ArtSprite *p_sp = &ART_SPRITES[player_sprite_id(&g->p)];
+
+    world_to_iso(g->p.x, g->p.y, &p_ax, &p_ay);
+    p_ay -= height_at(&g->w, ptx, pty);
+    p_ax -= g->cam_x;
+    p_ay -= g->cam_y;
+    pbox[0] = p_ax - p_sp->anchor_x;
+    pbox[1] = (p_ay + PLAYER_SIZE / 2) - p_sp->anchor_y;
+    pbox[2] = pbox[0] + p_sp->w;
+    pbox[3] = pbox[1] + p_sp->h;
 
     /* Mandatory now, unlike in the flat renderer: outside the landmass and in
      * the ELEV_MAX strip above the north rim there is simply nothing to draw.
@@ -3507,7 +3607,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             /* The tile centre projects to (ax, ay + ISO_HH); lifting by the
              * tile's height puts the prop's feet on the surface. */
             by = ay + ISO_HH - g->w.height[ty][tx];
-            draw_prop(fb, kind, ax, by, hash, rev);
+            draw_prop(fb, kind, ax, by, hash, rev, band, pband, pbox);
         }
 
         /* Entities standing in this band. Scanned per band rather than per tile
@@ -3557,11 +3657,10 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
          * sort — a tree ahead of you occludes you, a tree behind you does not,
          * and there is no z-buffer anywhere. */
         if (band == pband) {
-            int px, py;
-            world_to_iso(g->p.x, g->p.y, &px, &py);
-            py -= height_at(&g->w, ptx, pty);
-            px -= g->cam_x;
-            py -= g->cam_y;
+            /* p_ax/p_ay were computed once at the top of render, and the prop pass in every
+             * band ahead of this one has already used the box derived from them. Recomputing
+             * here would be a second expression of the same position. */
+            int px = p_ax, py = p_ay;
 
             /* A ring on the ground under the player when something is close
              * enough to restore — the only affordance telling you the interact
@@ -5349,6 +5448,195 @@ static int art_test_decode(const Uint8 *s, int len, Uint8 *out, int cap)
     return n;
 }
 
+/* Decision 40: a prop drawn over the player is ghosted so she stays visible.
+ *
+ * Two independent claims, checked separately because they fail in completely different ways:
+ *
+ *   (a) SELECTION — WHICH props fade. A truth table over prop_covers_player. This is the half
+ *       that carries the design decision; a blend that works on the wrong props is worse than
+ *       no blend at all, because scenery would shimmer as you walk past it.
+ *   (b) BLEND — what a faded pixel BECOMES. The reference is computed through
+ *       SDL_GetRGB/SDL_MapRGB, deliberately NOT through the channel-mask arithmetic the blitter
+ *       uses. Two different routes to the same number, so the checker cannot agree with a broken
+ *       implementation by sharing its bug — that is the --font-test blind spot in Handover §7,
+ *       where the reference was derived from the table under test and two blank glyphs passed.
+ *
+ * Both have a negative control, per the project rule that a checker which has never rejected
+ * anything proves nothing. */
+static int prop_covers_player_bandblind(int band, int pband,
+                                        int sx0, int sy0, int sx1, int sy1,
+                                        int px0, int py0, int px1, int py1)
+{
+    (void)band; (void)pband;
+    if (sx1 <= px0 || sx0 >= px1) return 0;
+    if (sy1 <= py0 || sy0 >= py1) return 0;
+    return 1;
+}
+
+static int fade_selftest(void)
+{
+    int fails = 0, i;
+    /* The player's screen box is fixed; the prop's box and band are what vary. */
+    enum { PX0 = 0, PY0 = 0, PX1 = 10, PY1 = 10 };
+    static const struct {
+        int band, pband, sx0, sy0, sx1, sy1, want;
+        const char *what;
+    } cases[] = {
+        { 10, 10,  0,  0, 10, 10, 0, "level with the player (drawn before her)" },
+        {  9, 10,  0,  0, 10, 10, 0, "behind the player (drawn before her)" },
+        { 11, 10,  0,  0, 10, 10, 1, "in front, overlapping" },
+        { 11, 10,  4,  4,  6,  6, 1, "in front, prop box inside the player box" },
+        { 11, 10, 40,  0, 50, 10, 0, "in front, clear in x" },
+        { 11, 10,  0, 40, 10, 50, 0, "in front, clear in y" },
+        { 11, 10, 10,  0, 20, 10, 0, "in front, edge-touching only (boxes are half-open)" },
+        { 40, 10,  0,  0, 10, 10, 1, "far in front, overlapping" }
+    };
+    const int ncase = (int)(sizeof cases / sizeof *cases);
+
+    /* ---- (a) selection ---------------------------------------------------- */
+    {
+        int bad = 0;
+        for (i = 0; i < ncase; i++) {
+            int got = prop_covers_player(cases[i].band, cases[i].pband,
+                                         cases[i].sx0, cases[i].sy0,
+                                         cases[i].sx1, cases[i].sy1,
+                                         PX0, PY0, PX1, PY1);
+            if (got != cases[i].want) {
+                printf("FAIL  selection: %s -> %d, expected %d\n",
+                       cases[i].what, got, cases[i].want);
+                bad++;
+            }
+        }
+        if (bad) fails++;
+        else printf("selection: PASS  %d cases\n", ncase);
+    }
+
+    /* Negative control for (a): a predicate that ignores the band ghosts props that are BEHIND
+     * the player and cannot possibly hide her. If the truth table cannot catch that, it is not
+     * testing the clause that carries the decision. */
+    {
+        int caught = 0;
+        for (i = 0; i < ncase; i++)
+            if (prop_covers_player_bandblind(cases[i].band, cases[i].pband,
+                                             cases[i].sx0, cases[i].sy0,
+                                             cases[i].sx1, cases[i].sy1,
+                                             PX0, PY0, PX1, PY1) != cases[i].want)
+                caught++;
+        if (!caught) {
+            printf("FAIL  selection control: a band-blind predicate passed the truth table\n");
+            fails++;
+        } else {
+            printf("selection control: PASS  band-blind predicate rejected on %d of %d cases\n",
+                   caught, ncase);
+        }
+    }
+
+    /* ---- (b) the blend ---------------------------------------------------- */
+    {
+        enum { W = 160, H = 160, SPRITE = ART_TREE_DECIDUOUS_01 };
+        SDL_Surface *a = SDL_CreateRGBSurface(0, W, H, 32,
+                                              0x00FF0000, 0x0000FF00, 0x000000FF, 0);
+        SDL_Surface *b = SDL_CreateRGBSurface(0, W, H, 32,
+                                              0x00FF0000, 0x0000FF00, 0x000000FF, 0);
+        if (!a || !b) {
+            printf("FAIL  blend: could not allocate test surfaces\n");
+            fails++;
+        } else {
+            Uint32 bg = SDL_MapRGB(a->format, 0x20, 0x40, 0x60);
+            int x, y, drawn = 0, wrong = 0, differs = 0;
+
+            SDL_FillRect(a, NULL, bg);
+            SDL_FillRect(b, NULL, bg);
+            draw_sprite_fade(a, SPRITE, W / 2, H - 20, 1.0f, 0); /* opaque */
+            draw_sprite_fade(b, SPRITE, W / 2, H - 20, 1.0f, 1); /* ghosted */
+
+            for (y = 0; y < H; y++) {
+                for (x = 0; x < W; x++) {
+                    Uint32 pa = ((Uint32 *)((Uint8 *)a->pixels + y * a->pitch))[x];
+                    Uint32 pb = ((Uint32 *)((Uint8 *)b->pixels + y * b->pitch))[x];
+                    Uint8 ar, ag, ab, br, bg2, bb, gr, gg, gb;
+                    Uint32 want;
+                    if (pa == bg) {
+                        /* The sprite did not write here; the ghosted pass must not either. */
+                        if (pb != bg) wrong++;
+                        continue;
+                    }
+                    drawn++;
+                    SDL_GetRGB(pa, a->format, &ar, &ag, &ab);
+                    SDL_GetRGB(bg, a->format, &br, &bg2, &bb);
+                    gr = (Uint8)((ar + br) / 2);
+                    gg = (Uint8)((ag + bg2) / 2);
+                    gb = (Uint8)((ab + bb) / 2);
+                    want = SDL_MapRGB(a->format, gr, gg, gb);
+                    if (pb != want) wrong++;
+                    if (pb != pa) differs++;
+                }
+            }
+
+            if (drawn == 0) {
+                printf("FAIL  blend: the sprite wrote no pixels, so nothing was compared\n");
+                fails++;
+            } else if (wrong) {
+                printf("FAIL  blend: %d of %d px are not the half-blend of sprite and background\n",
+                       wrong, drawn);
+                fails++;
+            } else {
+                printf("blend: PASS  %d px are the exact half-blend of sprite over background\n",
+                       drawn);
+            }
+
+            /* Negative control for (b): a blitter that ignores `fade` produces the opaque image,
+             * so the ghosted pass would be pixel-identical to the opaque one. */
+            if (drawn > 0 && differs == 0) {
+                printf("FAIL  blend control: ghosted output is identical to opaque output\n");
+                fails++;
+            } else if (drawn > 0) {
+                printf("blend control: PASS  %d of %d px differ from the opaque draw\n",
+                       differs, drawn);
+            }
+        }
+        SDL_FreeSurface(a);
+        SDL_FreeSurface(b);
+    }
+
+    printf("%s\n", fails ? "fade  : FAIL" : "fade  : PASS");
+    return fails ? 1 : 0;
+}
+
+/* Decision 41. The team authored a magenta base disc under the bush, which reads as a halo on
+ * grass. tools/bake.ps1 drops it to transparent and draw_prop draws a real contact shadow.
+ *
+ * These are the four colours that disc is drawn from, measured off the delivered PNG:
+ * 125 of the bush's 163 magenta pixels sit in its bottom quarter, and NO other delivered sprite
+ * has a base disc at all.
+ *
+ * AN EXPLICIT LIST, NOT A COLOUR-FAMILY RULE — and that is the whole lesson here. The first
+ * attempt was the obvious heuristic, "magenta family and bright". It flagged the bridge's mauve
+ * stone (9C839C), a roof red (A51A35) and three purple-greys on the buildings, all of which are
+ * legitimate art. Saturation does not separate them either: the halo sits at 0.59 and a
+ * perfectly good building colour at 0.54. The populations genuinely overlap in RGB space, so no
+ * threshold exists to be found, and a heuristic here would quietly damage a teammate's work.
+ * That was discovered by watching this test fail, which is the entire argument for writing it
+ * before the fix rather than after.
+ *
+ * The cost of being explicit is that a re-delivery drawing the disc in a NEW colour would sail
+ * through. That is handled where it can actually be noticed: bake.ps1 prints how many pixels it
+ * stripped, so a silent zero is visible at bake time. */
+static const unsigned char ART_KEY_MAGENTA[4][3] = {
+    { 0x74, 0x30, 0x5E }, { 0x94, 0x41, 0x71 },
+    { 0x5E, 0x27, 0x51 }, { 0x69, 0x2A, 0x5A }
+};
+
+static int art_is_key_magenta(int r, int g, int b)
+{
+    int k;
+    for (k = 0; k < (int)(sizeof ART_KEY_MAGENTA / sizeof *ART_KEY_MAGENTA); k++)
+        if (ART_KEY_MAGENTA[k][0] == r && ART_KEY_MAGENTA[k][1] == g &&
+            ART_KEY_MAGENTA[k][2] == b)
+            return 1;
+    return 0;
+}
+
 static int sprite_selftest(void)
 {
     int fails = 0, id, i;
@@ -5457,6 +5745,41 @@ static int sprite_selftest(void)
                (ok_real && !ok_lie) ? "PASS" : "FAIL",
                ok_real ? "ok" : "rejected", ok_lie ? "ok" : "rejected");
         if (!(ok_real && !ok_lie)) fails++;
+    }
+
+    /* ---- (d) decision 41: no authored key colour survives the bake -------- */
+    {
+        int bad = 0;
+        for (id = 0; id < ART_SPRITE_COUNT; id++) {
+            const ArtSprite *sp = &ART_SPRITES[id];
+            for (i = 0; i < (int)sp->pal_n; i++) {
+                const unsigned char *c = &ART_PAL[(sp->pal_off + i) * 3];
+                if (art_is_key_magenta(c[0], c[1], c[2])) {
+                    printf("FAIL  sprite %d palette %d is key magenta %02X%02X%02X\n",
+                           id, i, c[0], c[1], c[2]);
+                    bad++;
+                }
+            }
+        }
+        fails += bad;
+        printf("key colour: %s  no bright magenta in any of %d baked palettes\n",
+               bad ? "FAIL" : "PASS", ART_SPRITE_COUNT);
+    }
+
+    /* Negative control for (d), deliberately THREE-SIDED. The risk in this fix was never only
+     * "fails to strip the halo" — it is "strips a teammate's real colour by mistake", and the
+     * first version of this rule did exactly that. So the control pins all three outcomes with
+     * real colours out of the delivered art, including the specific one that was got wrong. */
+    {
+        int halo    = art_is_key_magenta(0x74, 0x30, 0x5E); /* bush disc,        must be caught */
+        int outline = art_is_key_magenta(0x20, 0x01, 0x18); /* conifer outline,  must survive */
+        int stone   = art_is_key_magenta(0x9C, 0x83, 0x9C); /* bridge stone,     must survive */
+        printf("key colour control: %s  [halo %s, outline %s, stone %s]\n",
+               (halo && !outline && !stone) ? "PASS" : "FAIL",
+               halo ? "caught" : "MISSED",
+               outline ? "WRONGLY CAUGHT" : "kept",
+               stone ? "WRONGLY CAUGHT" : "kept");
+        if (!(halo && !outline && !stone)) fails++;
     }
 
     printf("\n%s (%d checks failed)\n", fails ? "FAIL" : "PASS", fails);
@@ -5588,6 +5911,47 @@ static int fog_selftest(void)
                (bad_unsep > 0 && bad_inv > 0) ? "PASS" : "FAIL",
                bad_unsep, bad_inv);
         if (!(bad_unsep > 0 && bad_inv > 0)) fails++;
+    }
+
+    /* ---- decision 42: stone must not out-value the ground it sits in ------ */
+    /* The rest of this checker asks whether fog PRESERVES the value hierarchy. It has never had
+     * an opinion on whether that hierarchy is RIGHT, which is exactly how the stone ramp got
+     * retuned by eye once and stayed wrong: outcrops read as pale cubes floating out of the haze
+     * because stone's lightest step outranked the grass around it.
+     *
+     * Grass, not walls, is the comparison. Walls are meant to be the lightest mass on screen
+     * (Art Bible §4) and stone is nowhere near them; the fault was always local — a raised
+     * outcrop sitting in a field brighter than the field. */
+    {
+        int grass_r, grass_g, grass_b;
+        int gl, sl, worst = 0, bad = 0;
+
+        terrain_colour(TERRAIN_NORMAL, &grass_r, &grass_g, &grass_b);
+        gl = (299 * grass_r + 587 * grass_g + 114 * grass_b) / 1000;
+        for (i = 0; i < 3; i++) {
+            sl = (299 * stone_ramp[i][0] + 587 * stone_ramp[i][1]
+                  + 114 * stone_ramp[i][2]) / 1000;
+            if (sl > worst) worst = sl;
+        }
+        if (worst > gl) {
+            printf("FAIL  value hierarchy: stone's lightest step is %d against grass at %d\n",
+                   worst, gl);
+            bad++;
+        } else {
+            printf("value hierarchy: PASS  stone tops out at %d, grass at %d\n", worst, gl);
+        }
+        fails += bad;
+
+        /* Negative control, and an unusually honest one: the rejected value is the ramp this
+         * project actually shipped, not an invented bad number. If the checker cannot reject
+         * what was on screen yesterday it is not testing the thing that was wrong. */
+        {
+            static const Uint8 old_ramp[3] = {0x59,0x57,0x64};
+            int ol = (299 * old_ramp[0] + 587 * old_ramp[1] + 114 * old_ramp[2]) / 1000;
+            printf("value hierarchy control: %s  [shipped ramp %d vs grass %d]\n",
+                   (ol > gl) ? "PASS" : "FAIL", ol, gl);
+            if (!(ol > gl)) fails++;
+        }
     }
 
     SDL_FreeSurface(s);
@@ -6199,6 +6563,8 @@ int main(int argc, char **argv)
             return fog_selftest();
         if (arg_flag(argc, argv, "--sprite-test"))
             return sprite_selftest();
+        if (arg_flag(argc, argv, "--fade-test"))
+            return fade_selftest();
         if (arg_flag(argc, argv, "--land-test")) {
             int n = arg_int(argc, argv, "--seeds", 20);
             int base = arg_int(argc, argv, "--seed", 1);

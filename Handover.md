@@ -33,12 +33,12 @@ character, 10 buildings, 11 nature props. Cost **+62,976 bytes** against 684,800
 retires four separate "does not exist" items at once — the orange square, the walk cycle, facing,
 and any animation at all.
 
-> **THE OCCLUSION QUESTION IS SETTLED — 2026-08-05. Props fade when they cover the player.** Four
-> handovers carried this as the top open item: with props disabled the character renders perfectly,
-> with props on she is frequently invisible, because a 96 px tree on a 24 px tile grid covers a
-> 48 px character often and **the depth sort is behaving correctly**. The user chose the real fix
-> over the two cheap ones — not thinning the trees, not scaling the sprites down, but **fading any
-> prop drawn over the player**. See decision 40. It is not yet built.
+> **THE OCCLUSION QUESTION IS SETTLED AND BUILT — 2026-08-05.** Four handovers carried this as the
+> top open item. The user chose the real fix over the two cheap ones — not thinning the trees, not
+> scaling the sprites down, but **fading any prop drawn over the player**. Shipped with
+> `--fade-test` (a selection truth table plus a pixel-exact blend check, two negative controls),
+> **+0 bytes**, and confirmed on screen: the character reads clearly through a ghosted canopy.
+> See decision 40. Two sibling art fixes landed with it — decisions 41 and 42.
 
 **Three habits this project runs on**, learned the expensive way:
 
@@ -835,6 +835,25 @@ controls; audio callback timing; render cost). New this session:
   checked against the baker's own output, which would repeat `--font-test`'s known blind spot.
   Both negative controls fire.
 - **All 37 baked streams decode to exactly `w*h`** with every index inside their own palette.
+- **Decisions 40–42 shipped for +0 bytes, and the full suite was re-run after them.** 755,200
+  before and after: the four palette entries the bake stopped emitting paid for the new code
+  almost exactly. Re-**run**, not re-argued, even though all three changes are render-only —
+  fade, sprite, fog, iso, font, rng, move(20), land(30 + both controls), village(30 + both
+  controls), region(30), reach(50 + control), gating(30), bridge(**200/200**), **play 50/50**.
+- **The prop fade is proven in two independent halves, each with a negative control.**
+  `--fade-test` checks SELECTION (an 8-case truth table over `prop_covers_player`) separately from
+  the BLEND (1,808 px compared against a reference computed through `SDL_GetRGB`/`SDL_MapRGB`,
+  deliberately not through the channel-mask arithmetic the blitter uses). The selection control is
+  a band-blind predicate, rejected on exactly the 2 cases that carry the decision; the blend
+  control catches a blitter that ignores `fade`. **Seen working on screen**, not only measured.
+- **The bush's magenta halo is gone: 163 px stripped, from that sprite alone.** The count matches
+  an independent measurement of the source PNG exactly, and no other sprite lost a pixel.
+  `--sprite-test` now fails if any of the four disc colours reaches a baked palette, with a
+  three-sided control proving it catches the halo while keeping both the conifer's dark outline
+  and the bridge's mauve stone.
+- **Stone no longer out-values the ground it sits in**: the ramp tops out at luminance 74 against
+  sage grass at 78, where it was 89. `--fog-test`'s new control rejects the ramp that actually
+  shipped, so the checker is known to catch the real fault rather than an invented one.
 - **The art bake costs 62,976 shipping bytes and did not weaken anything.** Re-**run**, not
   re-argued, after the seam landed: sprite, iso, font, fog, rng, move, land (30 + both controls),
   village (30 + both controls), region (30), reach (50 + control), gating (30), bridge (200/200),
@@ -842,11 +861,11 @@ controls; audio callback timing; render cost). New this session:
 
 ### NOT verified — be honest about these
 
-- **The player is routinely hidden behind trees. DECIDED, NOT YET BUILT** — props will fade over
-  the player, decision 40. Until that ships the defect is still in the build exactly as measured.
-- **The bush sprite carries a magenta base disc** authored into the art, which reads as a halo on
-  grass. **DECIDED, NOT YET BUILT** — stripped at bake time and replaced with the contact shadow
-  the procedural props already draw, decision 41.
+- **Whether a ghosted prop looks RIGHT in motion.** The fade is proven to fire and was seen firing
+  in a capture, but nobody has walked under a canopy and watched it blend in and out. The whole
+  sprite ghosts, not just the overlapping pixels — deliberate, since masking the overlap alone
+  cuts a hard-edged hole in the canopy — but whether that pops distractingly as you walk is a
+  judgement no test makes.
 - **No test proves a sprite lands on the right tile in WORLD terms.** `--sprite-test` checks the
   anchor is bottom-centre of its own box; that `draw_building` passes the right screen point is
   screenshot-verified only.
@@ -872,10 +891,10 @@ controls; audio callback timing; render cost). New this session:
 - **The user's verdict on the houses, 2026-08-05:** *"fine, not perfect but workable"*. The land is
   *"decent but lacks the pixelated game feel"* — see §9, that is a resolution/palette question and
   is still open.
-- **Rock outcrops read as scattered pale blocks under fog at the new scale. DECIDED, NOT YET BUILT**
-  — stone's value gets fixed so they recede into the haze; the outcrops themselves stay, so the
-  landform and its proofs are untouched. Decision 42, and exactly what the F3 overlay exists to
-  settle.
+- **The `rock_small_01` PROP is still pale**, and it is a different thing from the terrain outcrops
+  decision 42 fixed. Its colour comes from the team's baked sprite, not from `stone_ramp`, so no
+  palette constant reaches it — it would need re-authoring or a bake-time recolour. Noticed while
+  verifying decision 42; not in scope for it.
 - **The overlay's liveness is proven by construction, not by a scripted keypress.** `fog_lerp` reads
   the struct the keys write, but no automated run presses a key and diffs two frames.
 - **The camera ease runs per frame, not per simulation tick.** Stable while the frame cap holds;
@@ -916,9 +935,9 @@ controls; audio callback timing; render cost). New this session:
 | Building placement pattern | **RESOLVED, this session** — clustered village sites, not uniform scatter. See decision 17 |
 | Fog destination colour | **RESOLVED, this session, but tuned by eye and unmeasured** — light haze, `FOG_KEEP` contrast preservation. See decision 19 and Phase 05 |
 | Asset pipeline for team-authored art | **RESOLVED AND BUILT, 2026-08-05.** `tools/bake.ps1` → `src/art_data.h`, committed, compiled in, nothing loaded at runtime. 37 of the team's 130 sprites are wired; `magical/` (56 frames) is baked-out until something calls it. See decisions 37–39 and [[Phase 07 - Asset Seam]] |
-| **Player occlusion behind props** | **RESOLVED 2026-08-05 — props fade over the player.** Carried as the top open item by four handovers. The two cheap fixes (thin the trees, rescale the sprites) were rejected in favour of the one that costs neither the woodland nor the 48 px base unit. See decision 40. **Decided, not yet built** |
-| **The bush's magenta base disc** | **RESOLVED 2026-08-05** — stripped at bake time, replaced by the contact shadow the procedural props already draw. See decision 41. **Decided, not yet built** |
-| **Rock outcrops as pale floating cubes** | **RESOLVED 2026-08-05** — stone's value gets fixed, the outcrops stay, so no generator change and no re-argued proof. See decision 42. **Decided, not yet built** |
+| **Player occlusion behind props** | **RESOLVED AND SHIPPED 2026-08-05** — props fade over the player, `--fade-test`, +0 bytes, seen on screen. Carried as the top open item by four handovers. See decision 40 |
+| **The bush's magenta base disc** | **RESOLVED AND SHIPPED 2026-08-05** — 163 px stripped at bake, real contact shadow drawn instead, guarded by `--sprite-test`. See decision 41 |
+| **Rock outcrops as pale floating cubes** | **RESOLVED AND SHIPPED 2026-08-05** — stone tops out at luminance 74 against grass at 78, guarded by `--fog-test`. Outcrops kept, so no generator change and no re-argued proof. See decision 42 |
 | **A second biome** | **RESOLVED 2026-08-05 — new direction, approved and specced.** A portal in the `TERRAIN_DARK` region to a Lumiara-style dream realm, timeboxed into five separately shippable slices. See [[Phase 12 - Dream Realm]] |
 | **"Lacks the pixelated game feel"** | **LARGELY ANSWERED BY THE ART, 2026-08-05.** The worry was that 960×540 ×2 reads too smooth. In practice the delivered pixel art supplies the chunkiness the procedural shapes lacked, and it was authored against a 48 px diamond — the scale already shipped — so **no re-authoring was needed and no resolution change was required.** Dropping `LOGICAL_W`/`LOGICAL_H` remains available as a taste lever, but it is no longer blocking anything |
 | **Input orientation** | **RESOLVED, 2026-08-05** — screen-aligned, `dd8cfef`. See decision 28 |

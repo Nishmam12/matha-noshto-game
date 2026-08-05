@@ -48,6 +48,17 @@ param(
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 
+# Decision 41. The four colours the bush's magenta base disc is drawn from, measured off the
+# delivered PNG: 125 of its 163 magenta pixels sit in the bottom quarter, and no other delivered
+# sprite has a base disc at all. Kept in sync BY TEST, not by discipline - src/main.c holds the
+# same four and --sprite-test fails if one reaches a baked palette.
+#
+# If a future art delivery draws the disc in a different colour this list will silently strip
+# nothing. That is why the strip count is PRINTED per sprite: a quiet zero is the signal.
+$script:KeyMagenta = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]@("116,48,94", "148,65,113", "94,39,81", "105,42,90"))
+$script:TotalStripped = 0
+
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrEmpty($AssetRoot)) { $AssetRoot = Join-Path $root "..\assets" }
 if ([string]::IsNullOrEmpty($OutFile))   { $OutFile   = Join-Path $root "..\src\art_data.h" }
@@ -82,6 +93,33 @@ function ConvertTo-Sprite {
 
     $img = Get-PixelData -Path $Path
     $w = $img.Width; $h = $img.Height; $stride = $img.Stride; $b = $img.Bytes
+
+    # Decision 41: knock out the authored magenta base disc, BEFORE the bounding box is measured.
+    # Order matters. The disc sits under the bush's real base, so removing it afterwards would
+    # leave the trimmed box - and therefore the bottom-centre anchor - sitting on a halo that is
+    # no longer drawn, and the bush would float. Stripping first lets the anchor land on the art.
+    #
+    # An explicit colour list, not a "magenta-ish" test. The heuristic version of this flagged the
+    # bridge's mauve stone (9C839C), a roof red (A51A35) and three purple-greys on the buildings;
+    # those overlap the disc in RGB space and no threshold separates them. src/main.c's
+    # art_is_key_magenta carries the same four colours as an independent second copy, and
+    # --sprite-test fails if any of them ever reaches a baked palette.
+    $stripped = 0
+    for ($y = 0; $y -lt $h; $y++) {
+        $row = $y * $stride
+        for ($x = 0; $x -lt $w; $x++) {
+            $o = $row + $x * 4
+            if ($b[$o + 3] -lt 128) { continue }
+            if ($script:KeyMagenta.Contains("$($b[$o+2]),$($b[$o+1]),$($b[$o])")) {
+                $b[$o + 3] = 0
+                $stripped++
+            }
+        }
+    }
+    if ($stripped -gt 0) {
+        Write-Host ("  key colour: stripped {0} px from {1}" -f $stripped, $Name)
+        $script:TotalStripped += $stripped
+    }
 
     # Opaque bounding box.
     $minX = $w; $minY = $h; $maxX = -1; $maxY = -1
