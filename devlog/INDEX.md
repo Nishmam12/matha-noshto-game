@@ -12,8 +12,8 @@ session-logging rules. Picking this up cold? Start with [[Handover]].
 overlay (self-test-only, +0 shipping bytes), the whole world **rescaled to 24 px tiles on a 108×60
 grid** with all art routed through `PX()`, **screen-aligned input** (`W` finally moves up) and an
 eased follow camera. No animation, no character, no audio.
-**Forward plan:** see [[Phase Roadmap]] — **Phases 00–06 all done.** Next is Phase 07, the
-build-time asset bake
+**Forward plan:** see [[Phase Roadmap]] — **Phases 00–07 all done**, and 07 absorbed most of 09.
+Next: the player-occlusion decision, then Phase 08 (save/load)
 **Headroom:** 747,776 bytes under the 1,440,000 ship target
 
 ## Sessions
