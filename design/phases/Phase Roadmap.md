@@ -11,6 +11,10 @@ sits where it does in the sequence, what "done" means, exactly which functions a
 and how it gets verified. Read the phase file before starting its work — don't re-derive the plan
 from memory each session.
 
+> **Picking this up cold? Finish Phase 06 first.** It is the only phase in a half-done state, and
+> the item it is missing (the bridge-suppression negative control) is the one this project's own
+> rules care most about. Do not start Phase 07 on top of it.
+
 **Deadline: 2026-09-04.** Today: 2026-08-05. **Hard stop on art/backbone work: 2026-08-14** — Phase
 11 (ship-critical) begins on that date regardless of how much of Phases 03–10 is finished, because
 [[Overview]] and [[Handover]] both name the judging order as **finished → under size → fun**, and a
@@ -28,7 +32,7 @@ beautiful, unfinished game scores worse than a plain, complete one.
 | 04 | [[Phase 04 - Traversal]] | **DONE** — `dd8cfef`, +512 bytes | 03 | Screen-aligned input is a simulation change and needs isolation from every render-only phase around it, per [[Agent Prompt]]'s rule on flagging architectural changes |
 | — | **House geometry fix** (unplanned) | **DONE** — `b4bf446`, +512 bytes | — | Not a planned phase. The user reported the houses as "wrong size and wrong geometry, a mess overall". The roof had been drawn half a tile off its own walls since buildings landed, which also put the windows on the roof; walls were half the height the footprints needed |
 | 05 | [[Phase 05 - Verification Debt]] | **DONE** — `4847bf5`, +0 bytes | 01, 02 | `--land-test` and `--fog-test` didn't exist. Cheapest to write while the systems they test are still fresh, and before more is built on top of them |
-| 06 | [[Phase 06 - Water And Bridges]] | **NEXT** | 01, 05 | Needs the island's water body to exist (01) and needs its own reachability extension tested (05's discipline) before rivers can cut through walkable ground |
+| 06 | [[Phase 06 - Water And Bridges]] | **HALF DONE** — `e42f2f4`. Rivers + bridges in; **waterfalls and the bridge negative control still owed** | 01, 05 | Needs the island's water body to exist (01) and needs its own reachability extension tested (05's discipline) before rivers can cut through walkable ground |
 | 07 | [[Phase 07 - Asset Seam]] | Planned | 03 | The bake pipeline's output needs to be *judged* against something, which means the tuning overlay (03) should exist first |
 | 08 | [[Phase 08 - Save Load]] | Planned | — | Independent of the art work; scheduled here because it's cheap, high-value for a team, and Week 5 work worth pulling forward |
 | 09 | [[Phase 09 - Placeholder Art]] | Planned | 03, 07 | The actual art pass (buildings, restoration rebuild, player, paths) — needs the seam (07) to exist so it's placed correctly relative to the team's future handoff |

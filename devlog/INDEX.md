@@ -7,16 +7,28 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 691,200 bytes
+**Current `.exe` size:** 692,224 bytes
 **Current status:** verified — island landform, clustered villages, a bitmap font and F3 fog-tuning
 overlay (self-test-only, +0 shipping bytes), the whole world **rescaled to 24 px tiles on a 108×60
 grid** with all art routed through `PX()`, **screen-aligned input** (`W` finally moves up) and an
 eased follow camera. No animation, no character, no audio.
-**Forward plan:** see [[Phase Roadmap]] — **Phases 00–05 all done**, Phase 06 (water and bridges)
-next. Every generator and render contract now has a checker with a working negative control
-**Headroom:** 748,800 bytes under the 1,440,000 ship target
+**Forward plan:** see [[Phase Roadmap]] — Phases 00–05 done, **Phase 06 is HALF done**: rivers and
+bridges work; waterfalls and the bridge-suppression negative control are still owed. Finish those
+before starting Phase 07
+**Headroom:** 747,776 bytes under the 1,440,000 ship target
 
 ## Sessions
+
+- [[2026-08-05-session-01]] *(Session 04)* — **Rivers reach the sea, and the chat handed over.**
+  [[Phase 06 - Water And Bridges]] part 1: rivers descend a BFS **distance-to-sea** field rather
+  than the height field, which designs out the local-minima trap the phase file flagged — a BFS
+  field has none, so the walk provably terminates at water. Bridges **clear `solid`** rather than
+  special-casing `tile_blocked`, so collision, the region graph, the verifier and the autopilot all
+  see a crossable tile through the path they already used; the phase adds **zero** new collision
+  inputs. Completability re-run not re-argued: play 50/50, reach 50/50. Also answered the team's
+  asset question (PNGs are bake *inputs*, never shipped) and flagged that "lacks the pixelated
+  feel" is a resolution/palette question, not an asset one. **Left half-done on purpose**:
+  waterfalls and the bridge-suppression negative control are both still owed.
 
 - [[2026-08-05-session-01]] *(Session 03)* — **The houses were a mess, and the rule debt is paid.**
   Three defects in `draw_building`, all present since buildings landed: the roof was drawn half a
@@ -134,7 +146,8 @@ next. Every generator and render contract now has a checker with a working negat
 | 08-05 | 690,176 | −512 | world rescale: `PX()`, `TILE` 32→24, grid 108×60 — *saved* bytes |
 | 08-05 | 690,688 | +512 | screen-aligned input, eased camera, 8-direction speed test + control |
 | 08-05 | 691,200 | +512 | houses: roof back on the box, windows back on the wall, taller storeys |
-| 08-05 | **691,200** | +0 | `--land-test` and `--fog-test`, both with negative controls |
+| 08-05 | 691,200 | +0 | `--land-test` and `--fog-test`, both with negative controls |
+| 08-05 | **692,224** | +1,024 | rivers via BFS-to-sea, bridges that clear `solid`, river/plank colours |
 
 Self-test builds (`wayfarer-selftest.exe`) are not deliverables and are deliberately excluded
 from this table and from the budget gate.

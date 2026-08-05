@@ -1,7 +1,7 @@
 ---
 tags: [process, handover, wayfarer]
 updated: 2026-08-05
-exe_size_bytes: 690688
+exe_size_bytes: 692224
 ---
 
 # Handover — Wayfarer
@@ -14,6 +14,35 @@ Hub: [[Wayfarer MOC]] · Rules of engagement: [[Agent Prompt]] · Game plan: [[O
 Visual identity (provisional): [[Art Bible]] · Build environment: [[Toolchain Setup]] ·
 Renderer: [[Isometric Rendering]] · **Forward roadmap, phase by phase:** [[Phase Roadmap]] ·
 Running log: [[INDEX]]
+
+---
+
+## 0. Start here — the ninety-second version
+
+| | |
+|---|---|
+| **State** | 692,224 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
+| **Deadline** | 2026-09-04. **Hard stop on art/backbone work 2026-08-14** — nine days from now |
+| **Do first** | **Finish [[Phase 06 - Water And Bridges]].** It is the only half-done phase |
+| **Then** | Phase 07 (asset bake) → 08 (save/load) → 09 (art) → 10 (motion) → **11 is non-negotiable** |
+| **Biggest risk** | **Audio does not exist at all.** A softsynth from zero, plus save/load and a HUD, all still ahead of a 30-day deadline |
+
+**The two things Phase 06 still owes**, in priority order:
+
+1. **The bridge-suppression negative control.** Regenerate seeds with bridges disabled; confirm the
+   verifier rejects the ones that were only solvable via a bridge. The phase file calls this its
+   single most important test. Until it exists, "bridges are load-bearing" is argued, not measured.
+2. **Waterfalls.** Blocked on one missing array — see §2 and the phase file for the exact fix.
+
+**Three habits this project runs on**, learned the expensive way:
+
+- **Look at the screen.** Every visual bug of consequence here was found by a screenshot, never by a
+  test: lollipop trees, ziggurat roofs, a checkerboard, a roof half a tile off its own walls for
+  four sessions. `--shot` is in §10.
+- **Re-run the proof, never re-argue it.** Any change touching generation or `solid` means the full
+  suite, especially `--play-test --seeds 50`.
+- **A checker that has never rejected anything proves nothing.** Every test here has a negative
+  control. New ones must too.
 
 ---
 
@@ -40,12 +69,17 @@ back that opens terrain you couldn't cross before → explore further.
 
 "1.44 MB" has three definitions in common use. We build against the smallest.
 
-> **The size constraint is not the binding one, and has never been.** The entire isometric pivot —
-> projection, elevation, upscaling, surface detail, seven kinds of procedural prop, mix-and-match
-> buildings, an island generator, village clustering, roof face shading and a fog rewrite — has cost
-> **21,536 bytes** against 785,408 free. All game logic ever written for this project is a rounding
-> error next to SDL2's ~664 KB. **Plan against *authoring effort*, and against *judgement* — the
-> renderer being byte-cheap does not make it look right on the first attempt, and it hasn't yet.**
+> **The size constraint is not the binding one, and has never been.** Everything ever built for this
+> game — the isometric renderer, elevation, seven kinds of procedural prop, mix-and-match buildings,
+> an island generator, village clustering, the fog rewrite, a bitmap font, a live tuning overlay,
+> screen-aligned input, an eased camera, rivers and bridges, and five test harnesses with negative
+> controls — comes to **22,528 bytes against 747,776 free**. All game logic ever written is a
+> rounding error next to SDL2's ~664 KB. Two whole phases (03 and 05) cost **+0 bytes**.
+>
+> **Plan against *authoring effort*, and against *judgement*.** Every expensive thing this project
+> has hit was a judgement call or a wrong assumption, never a byte count: three fog-tuning passes, a
+> roof drawn half a tile off its walls for four sessions, an autopilot livelock. Budget your
+> attention accordingly.
 
 ### The project's framing — read this before touching anything
 
@@ -72,11 +106,14 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 | | |
 |---|---|
-| **`build\wayfarer.exe`** | **691,200 bytes** — 748,800 under the ship target |
-| `build\wayfarer-selftest.exe` | 726,528 bytes — **not a deliverable**, never shipped |
-| `src\main.c` | ~5,400 lines, single translation unit |
+| **`build\wayfarer.exe`** | **692,224 bytes** — 747,776 under the ship target |
+| `build\wayfarer-selftest.exe` | 727,552 bytes — **not a deliverable**, never shipped |
+| `src\main.c` | 5,382 lines, single translation unit |
 | Warnings | zero, under `-Wall -Wextra` |
-| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–05 all done** — see [[Phase Roadmap]]. Phase 06 (water and bridges) is next. Audio, save and UI are all still untouched |
+| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–05 done; Phase 06 is HALF done** — rivers and bridges work, waterfalls and the bridge negative control do not exist. See [[Phase Roadmap]]. Audio, save and UI are all still untouched |
+
+> **If you are starting here: the first job is finishing Phase 06.** Two named items,
+> both listed under §2 "What does NOT exist yet". Do not start Phase 07 on top of a half-done phase.
 
 ### What actually works right now
 
@@ -86,13 +123,19 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 - **Screen-aligned input** — `W` moves up on screen, verified per direction, with a negative control
   that rejects the old world-aligned mapping. See [[Phase 04 - Traversal]]
 - **An eased follow camera** with a deadzone, replacing the per-frame hard snap
+- **Rivers and bridges.** Rivers descend a BFS distance-to-sea field from the interior to the
+  coast; bridges deck them. **A bridge is not a collision special case** — it clears `solid`, so
+  collision, the region graph and the verifier all see a crossable tile through the path they
+  already used. See decisions 32–33 and [[Phase 06 - Water And Bridges]]
 - **Isometric 2.5D renderer**: 2:1 diamonds, elevation with cliff faces, band-sweep depth sort
 - **Procedural scenery**: layered trees with round `fill_ellipse` canopies (not the earlier
   axis-aligned lollipops), bushes, rocks, reeds, flowers, crystals, stumps — all from a per-tile
   hash, none stored. Every prop casts a ground-contact shadow
-- **Procedural buildings**: clustered into up to 3 village sites rather than scattered over every
-  open plot, mean ~12 per world, 640,000 mix-and-match combinations. Roofs now have a left/right
-  face split (`iso_diamond_lr`) so they read as pitched rather than as flat plates
+- **Procedural buildings**: clustered into up to 4 village sites rather than scattered over every
+  open plot, **mean 21 per world**, 640,000 mix-and-match combinations. Roofs have a left/right face
+  split (`iso_diamond_lr`) so they read as pitched; the whole facade (windows per storey, doors on
+  the ground line) is derived from the wall-top diamond. User's verdict: *"fine, not perfect but
+  workable"*
 - **Fog rewrite**: unrevealed land resolves toward a light cool haze that keeps a fixed fraction of
   its own luminance contrast, rather than crushing to a dark, cave-like grey. This — not the
   camera — was the cause of "traversal feels suffocating"; see [[Fog and Reveal]]
@@ -107,7 +150,7 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
   re-argued, after every generation change so far, because collision only ever reads `solid` and
   `regions[].terrain`
 - Restoration loop, Found Soul states, win condition, 4-stage world-growth read
-- Restore confirm beat (audio), real-time safe: 0.141 ms worst case against a 21.333 ms deadline
+- Restore confirm beat (audio), real-time safe: 0.136 ms worst case against a 21.333 ms deadline
 - Debug overlay, 12-seed grid view, title-bar stats, render instrumentation
 - **A 5×7 bitmap font** (`draw_text`, `draw_text_shadow`) and an **F3 live tuning overlay** for the
   fog constants — `TAB` cycles rows, `-`/`=` adjust. **Both are self-test-only and cost the shipping
@@ -127,7 +170,19 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 - **The player is still an orange square** (18×18 at the current tile size). No layered character,
   no walk cycle, no facing
 - **Buildings do not respond to restoration.** The ruin→whole rebuild is designed but not built
-- **No rivers, no bridges, no waterfalls.** Water is currently ocean only, with no inland flow
+- **NO WATERFALLS — Phase 06 item 1 of 2 outstanding.** River tiles sit at one flat depth.
+  Terracing them so the river steps down to the coast would make `iso_tile` draw a water-coloured
+  side face at each drop — a waterfall, essentially free, using the rasteriser that already exists.
+  The blocker is that `world_heights`' local `dist` array is the chamfer distance *into solid
+  masses*, which is 1 along the whole length of a one-tile-wide river. It needs the
+  distance-to-sea field carried out of `place_rivers` in a new per-tile array (~6.5 KB of `World`,
+  zero exe bytes)
+- **NO BRIDGE-SUPPRESSION NEGATIVE CONTROL — Phase 06 item 2 of 2, and the more important one.**
+  [[Phase 06 - Water And Bridges]] calls it *"the single most important test in this phase"*:
+  regenerate a batch of seeds with bridge placement disabled and confirm the reachability verifier
+  rejects every one that was only solvable via a bridge. Until it exists, "bridges are
+  load-bearing" is **argued, not measured** — and this project's own rule is that a checker which
+  has never rejected anything proves nothing
 - **No worn paths between buildings.** The village reads as buildings-in-a-field, not as inhabited
 - Idle sway/breathe for Found Souls
 - Audio-layer-per-restore (the hook is wired; the layers are not)
@@ -137,14 +192,14 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 Remote: **`https://github.com/Nishmam12/matha-noshto-game`** — private, branch `main`.
 
 ```
+e42f2f4  Phase 06, part 1: rivers that reach the sea, and bridges that cross them
+66222b6  docs: the house fix and Phase 05, and the rule debt closes
 4847bf5  Phase 05: --land-test and --fog-test, paying down three sessions of rule debt
 b4bf446  Houses: put the roof back on the box, and the windows back on the wall
 037936c  docs: the rescale and Phase 04, plus the traps both cost
 dd8cfef  Phase 04: screen-aligned input, and an eased follow camera
 e03138d  Rescale the world: TILE 32 -> 24, and make TILE an honest knob
 60b4e3a  Bitmap font and a live fog-tuning overlay, both at +0 shipping bytes
-a2e87a4  Handover rewrite, and a phase-by-phase roadmap for the next chat
-e5c8942  Roof face shading, and rewrite the fog so distance reads as haze
 ```
 
 **Everything is committed.** Nothing is pushed to the remote yet — check before assuming.
@@ -224,10 +279,12 @@ $e = ".\build\wayfarer-selftest.exe"
 & $e --frames 60 --seed 4 --overlay --shot out.bmp   # scripted screenshot — see the recipe in §10
 ```
 
-**All currently pass.** Last full run, 2026-08-05, after the Phase 03 work:
+**All currently pass.** Last full run, 2026-08-05, after `e42f2f4` (rivers and bridges) — re-run
+fresh for this handover rather than carried forward:
 
 ```
-land    : PASS  100 seeds; both controls (drowned map, shattered island) fire
+land    : PASS  30 seeds (100 also clean); both controls (drowned map,
+                shattered island) fire
 fog     : PASS  0 collapsed ramps; 45 colours x 5 reveals, 0 inversions,
                 3 collapses; control (contrast-crushing blend) caught
 font    : PASS  2,316 lit px expected from the glyph table and 2,316 rendered;
@@ -241,9 +298,13 @@ region  : PASS (0 failures across 30 seeds)
 reach   : PASS (0 failures across 50 seeds); negative control PASS; gating relaxed on 0/50
 gating  : PASS (0 failures across 30 seeds)
 play    : PASS (0 seeds could not be completed) — still 50/50 after the landform rewrite
-audio   : worst case 0.122 ms of a 21.333 ms deadline; 0 partial writes, 0 NaN, 0 out of range
-perf    : render 0.749–0.844 ms, present ~1.3–1.4 ms, ~72,445 calls/frame, ~59.2–60.4 fps
+audio   : worst case 0.136 ms of a 21.333 ms deadline; 0 partial writes
+perf    : render 0.865 ms mean (2.190 ms max), frame 16.613 ms = 60.2 fps
 ```
+
+**`--play-test` now takes ~2 minutes at 50 seeds** — the world is 1.8× the tiles it was. Do not
+assume a long-running run has hung; and note that piping it through `Select-Object -Last N` hides
+all progress until it finishes, which has already caused one wasted diagnosis (§7).
 
 **The rule debt is paid.** `--land-test` and `--fog-test` landed in [[Phase 05 - Verification
 Debt]] (`4847bf5`), each with its own negative control, so every generator and render contract in
@@ -272,38 +333,38 @@ held, so it can be screenshotted without a human at the keyboard.
 
 ## 5. Code map — `src/main.c`, in order
 
-Line numbers below were current as of the Phase 03 work and have **drifted by roughly +20 to +250**
-since the rescale and Phase 04. Treat them as a map of the file's *order*, not as addresses —
-trust the grep, not this table.
+Line numbers below were re-measured at `e42f2f4` (2026-08-05). They drift with every edit — treat
+this as a map of the file's *order* and trust the grep, not the table.
 
 | Line | Section | What lives there |
 |---|---|---|
 | 23 | Tunables | All `#define`s. Everything designers would touch is here |
 | ~85 | **Isometric projection** | `ISO_*`, `ELEV_*`, `FACE_*`, `ROOF_L`, void colour |
-| 186 | RNG | PCG32, three independent streams (terrain / entities / audio) |
-| 279 | Audio | Callback, device open, restore confirm beat |
-| 410 | Args | `arg_int`, `arg_flag`, `arg_val` |
-| 436 | World | Region/World/Scratch/**Building**/**SURF_\*** structs, terrain enums |
+| 216 | RNG | PCG32, three independent streams (terrain / entities / audio) |
+| 309 | Audio | Callback, device open, restore confirm beat |
+| 440 | Args | `arg_int`, `arg_flag`, `arg_val` |
+| 466 | World | Region/World/Scratch/Building/**SURF_\*** structs, terrain enums; `RIVER_*`/`BRIDGE_SPACING` at 587 |
 | ~95 | **Fog** | `FOG_TINT_*`, `FOG_KEEP`, and the **`FOG_*_V` / `FogTune` indirection** that makes them F3-adjustable in self-test builds and literal in the shipping one |
-| 595 | **Island generation** | `solid_at`, `land_lattice`, `land_noise`, `world_gen` (678) — the island height field |
-| 737 | **Building placement** | `place_buildings` — village-site clustering, runs *before* the reachability verifier |
-| 832 | Regions | `bfs_open`, `regions_build`, `regions_depth`, `regions_assign_terrain` |
-| 1004 | Reachability | `regions_reachable`, `world_solvable`, entity placement, generate-then-verify |
-| 1175 | Movement | `tile_blocked`, `player_blocked`, `move_axis`, `sim_step` |
-| 1266 | Input | `input_poll` — **world-aligned, see Phase 04** |
-| 1279 | Restoration | `entity_in_reach`, `try_restore`, `game_complete`, `world_stage` |
-| 1434 | **Heights** | `world_heights` (derived elevation, island- and rock-aware), `height_at` |
-| 1527 | World init | `game_init` — wipe, generate, place, flood-fill spawn, verify, derive heights |
-| 1623 | **Perf** | `Perf`, counters, `perf_report`. All behind `WAYFARER_PERF` |
-| 1689 | Graphics | `fill_rect` (1694), `vspan`, `iso_tile`, `iso_diamond`, `iso_diamond_lr` (2136), `iso_ring`, `fill_ellipse`, `blit_scale` (1854), `tile_hash`, `fog_lerp` (2015), `tile_detail` |
-| 1737 | **Bitmap font** (new) | `FONT_*` constants, the flat `FONT_5X7` table (1747), `draw_glyph` (1808), `draw_text` (1825), `draw_text_shadow` (1837). All inside `#if WAYFARER_SELFTEST` |
-| 2075 | **House parts** | `BV_*` variant accessors, wall/roof palettes; `draw_building` (2451, roof face-split) |
-| 2189 | **Props** | palettes (canopy pruned to 8 live entries), `draw_tree`/`bush`/`rock`/`reed`/`flower`/`crystal`/`stump` (all with contact shadows), `prop_at`, `draw_prop` |
-| 2583 | Render | `tile_reveal`, `tile_colour`, `render` (2643) — the band sweep; `render_grid` (2863), `camera_follow` (2935, **still unsmoothed**) |
-| 2949 | Window | `pick_scale`, `backbuffer_new`, `present` |
-| 3024 | **Tuning overlay** (new) | `tune_adjust` (3047), `tune_draw` (3065) — F3/TAB/`-`/`=`, fog constants only. Self-test-only |
-| 3099 | Self-test | Everything else under `#if WAYFARER_SELFTEST` — `font_selftest` at 4288 |
-| 4609 | `main` | Fixed-timestep loop, input, debug keys, frame cap |
+| 620 | **Island generation** | `solid_at`, `land_lattice`, `land_noise`, `world_gen` (742) — the island height field |
+| 819 | **Rivers and bridges** (new) | `place_rivers` — BFS distance-to-sea descent, bridges clear `solid`. Runs *before* buildings and the verifier |
+| 956 | **Building placement** | `place_buildings` — village-site clustering, also *before* the verifier |
+| 1051 | Regions | `bfs_open`, `regions_build`, `regions_depth`, `regions_assign_terrain` |
+| 1223 | Reachability | `regions_reachable`, `world_solvable`, entity placement, generate-then-verify |
+| 1394 | Movement | `tile_blocked`, `player_blocked`, `move_axis`, `sim_step` — **reads `solid` and `regions[].terrain` only, still** |
+| 1485 | Input | `input_poll` — screen-aligned since Phase 04 |
+| 1498 | Restoration | `entity_in_reach`, `try_restore`, `game_complete`, `world_stage` |
+| 1679 | **Heights** | `world_heights` — derived, render-only; island/rock/ocean/**river** branches |
+| 1785 | World init | `game_init` — wipe, generate, **rivers**, buildings, flood-fill spawn, verify, derive heights |
+| 1883 | **Perf** | `Perf`, counters, `perf_report`. All behind `WAYFARER_PERF` |
+| 1949 | Graphics | `fill_rect` (1954), `vspan`, `iso_tile` (2232), `iso_diamond`, `iso_diamond_lr`, `iso_ring`, `fill_ellipse`, `blit_scale`, `tile_hash`, `fog_lerp` (2275), `tile_detail` |
+| 1997 | **Bitmap font** | `FONT_*` constants, the flat `FONT_5X7` table (2007), `draw_glyph` (2068), `draw_text`, `draw_text_shadow`. All inside `#if WAYFARER_SELFTEST` |
+| 2560 | **House parts** | `BV_*` variant accessors, wall/roof palettes; `draw_building` (2715) — roof face-split, facade derived from the wall-top diamond |
+| 2380 | **Props** | palettes, `draw_tree`/`bush`/`rock`/`reed`/`flower`/`crystal`/`stump` (all with contact shadows), `prop_at`, `draw_prop` |
+| 2921 | Render | `tile_reveal`, `tile_colour` (2921), `render` (2975) — the band sweep; `render_grid` (3195), `camera_follow` (3267, **now eased**) |
+| 3329 | Window | `pick_scale`, `backbuffer_new`, `present` |
+| ~3400 | **Tuning overlay** | `tune_adjust`, `tune_draw` (3431) — F3/TAB/`-`/`=`, fog constants only. Self-test-only |
+| 3470 | Self-test | `move_selftest` onward. `fog_selftest` 4791, `land_check` 4952, `font_selftest` 5141 |
+| 5462 | `main` | Fixed-timestep loop, input, debug keys, frame cap |
 
 ### Tunables worth knowing — current values, several changed this session
 
@@ -326,7 +387,9 @@ trust the grep, not this table.
 | `ELEV_WATER` / `ELEV_LEDGE` | −6 / 16 | Unchanged in value; `ELEV_WATER` now also drives a 4-step sea-floor ramp, see `world_heights` |
 | `LAND_SEA` | **0.24 (new)** | Height-field threshold below which a tile is ocean. Lower = bigger island |
 | `LAND_ROUGH` | **0.55 (new)** | How far coastline noise pushes the shore in and out |
-| `LAND_ROCK_T` | **0.74 (new)** | Outcrop threshold. Raised once already — 0.68 covered ~40% of frame in rock |
+| `LAND_ROCK_T` | **0.74** | Outcrop threshold. Raised once already — 0.68 covered ~40% of frame in rock. `--land-test` now bounds this at 40% |
+| `RIVER_COUNT` / `RIVER_SRC_MIN` | **2 / 10 (new)** | Rivers per world; a source must be ≥10 BFS hops from the sea or the "river" is a puddle on the beach |
+| `BRIDGE_SPACING` | **9 (new)** | River tiles between bridge attempts. A bridge is taken only where there is open ground on both sides, with a fallback sweep so a spacing accident does not burn a whole world |
 | `VILLAGE_SITES` / `VILLAGE_RADIUS` / `VILLAGE_SPACING` | **4 / 12 / 29** | All in *tiles*, so all re-derived by hand for `TILE` 24. Radius/spacing × 32/24 keeps a village the same physical size; sites raised because 3 in a 1.8× larger world read as an empty island |
 | `BUILDING_TARGET` / `BUILDING_MAX` | **22** / 40 | Raised with the world size; mean is 21 per world. `BUILDING_MAX` stays the array bound |
 | `STOREY_H` / `WALL_BASE` | 14 / 10 | Unchanged |
@@ -426,6 +489,28 @@ New decisions from the rescale + traversal session (2026-08-05):
     `(ax, ay + ISO_HH)`, which is exactly what `world_to_iso` returns for the tile's centre point.
     **Projection and rasteriser already agree**, which is why props, entities and the player need
     no correction anywhere. Anything that adds one is wrong — that was the roof bug.
+32. **Rivers descend a BFS distance-to-SEA field, not the height field.** [[Phase 06 - Water And
+    Bridges]] proposed steepest descent and flagged its own trap: a height field has local minima
+    that are not the coast, so a descent can wedge in a landlocked dip and needs a policy. A BFS
+    field has **no local minima by construction** — every tile with a finite distance has a
+    neighbour exactly one closer — so a walk stepping to `dist-1` strictly decreases and must
+    terminate at water. The trap is designed out rather than handled. Meander comes from choosing
+    randomly among the equally-good candidates.
+33. **A bridge clears `solid`; it is NOT a collision special case.** This is a deliberate deviation
+    from that phase's task 3, which called for `tile_blocked` to return not-blocked on a bridge.
+    That would make collision read a second signal — and then `bfs_open`, `flood_open`,
+    `regions_build` and `walk_regions` would all have to learn about bridges too, or walk-reachable
+    and graph-reachable would disagree and `--gating-test` would be right to fail. Clearing `solid`
+    instead means collision, the region graph, the verifier and the autopilot all see a crossable
+    tile through the code path they already used. `bridge[][]` exists only so the renderer can draw
+    planks. **This phase therefore adds ZERO new inputs to collision** — stronger than the "exactly
+    one" the plan allowed, and decision 12's invariant survives untouched.
+34. **Team art bakes into a compiled-in header at BUILD time; PNGs are source, never shipped.**
+    Asked directly on 2026-08-05 ("should I add PNG assets?"). The answer is yes to PNGs *as bake
+    inputs* — `SDL_image` is compiled out and zero external files may ship, so nothing decodes a
+    PNG at runtime. A 32×32 sprite at 4 bpp is 512 bytes baked against 747,776 free, so **bytes are
+    not the constraint**; authoring effort and pixel density are. See §9 for the size-and-scale
+    advice given, and [[Phase 07 - Asset Seam]] for the pipeline.
 
 ---
 
@@ -442,7 +527,7 @@ background processes; `FindWindow(null, ...)` failing from PowerShell; PowerShel
 being an exact multiple of the logical size; the screen clear being mandatory now) **are all still
 true and are not repeated in full here — see git history at `545598f` for verbatim text.**
 
-**New this session:**
+**From the 2026-08-04 sessions:**
 
 - **A running `wayfarer.exe` blocks the release relink with `Permission denied`**, not a build error.
   This happened because the user was actively playing the game while a rebuild was attempted.
@@ -568,13 +653,28 @@ controls; audio callback timing; render cost). New this session:
 - **The island generator's coverage and connectivity hold over 100 seeds**, with both negative
   controls firing. Includes an assumption `place_buildings` had always made silently: that some
   buildable ground exists at all.
+- **Rivers and bridges did not weaken the completability proof.** Rivers make tiles solid and
+  bridges make them open, both *before* the verifier, so the guarantee was re-**run** not re-argued:
+  reach 50/50 with its control, gating 30/30, play **50/50**, land 30/30.
+- **River pathfinding terminates.** Not by testing but by construction — see decision 32. There is
+  no seed on which the descent can fail to reach water.
 
 ### NOT verified — be honest about these
 
+- **THAT BRIDGES ARE LOAD-BEARING IS ARGUED, NOT MEASURED.** No test suppresses bridge placement
+  and confirms the verifier then rejects the seeds that needed one. The suite passing proves rivers
+  didn't *break* anything; it does not prove a bridge is ever the thing making a world solvable.
+  This is the highest-value single test left in the project — see §2.
 - **Nobody has played at the new scale, or driven the new camera.** The screenshots say the world is
   denser and better-proportioned; whether 24 px tiles are *nice to walk around* is a different
   question. `CAM_DEADZONE`/`CAM_EASE` are first guesses and "does the easing feel right" cannot be
   claimed from here.
+- **Rivers have been seen on one seed.** Seed 7 was screenshotted and reads correctly. There is no
+  sweep of how often a river is scenic vs. a straight line across the map, no check that two rivers
+  never merge into a lake, and no measurement of how often a river forces a long detour.
+- **The user's verdict on the houses, 2026-08-05:** *"fine, not perfect but workable"*. The land is
+  *"decent but lacks the pixelated game feel"* — see §9, that is a resolution/palette question and
+  is still open.
 - **Rock outcrops read as scattered pale blocks under fog at the new scale.** More, smaller outcrops
   are visible at once and stone is still the lightest large surface, so they pop out of the haze as
   floating cubes. Same value-hierarchy fight [[Art Bible]] describes and Session 03 already had once
@@ -618,7 +718,8 @@ controls; audio callback timing; render cost). New this session:
 | Landform generation method | **RESOLVED, this session** — radial height field + layered noise, not a cave. See decision 16 |
 | Building placement pattern | **RESOLVED, this session** — clustered village sites, not uniform scatter. See decision 17 |
 | Fog destination colour | **RESOLVED, this session, but tuned by eye and unmeasured** — light haze, `FOG_KEEP` contrast preservation. See decision 19 and Phase 05 |
-| Asset pipeline for team-authored art | **RESOLVED, this session** — build-time bake to a compiled-in header, never runtime load. See decision 20, [[Art Bible]] §8, Phase 07 |
+| Asset pipeline for team-authored art | **RESOLVED in principle** — build-time bake to a compiled-in header, never runtime load (decisions 20 and 34, [[Art Bible]] §8, Phase 07). **The bake script does not exist yet.** Nothing has been baked and no asset has been received |
+| **"Lacks the pixelated game feel"** | **OPEN, and probably not an asset problem.** Raised by the user 2026-08-05. The renderer draws 960×540 upscaled ×2 — a fairly *fine* pixel grid, so the world reads smooth rather than chunky. The cheapest lever is dropping `LOGICAL_W`/`LOGICAL_H` (e.g. 640×360 at ×3) so every pixel is physically bigger, plus tighter palette discipline. **Try that before anyone draws art**, or the art gets authored against the wrong pixel density and has to be redrawn |
 | **Input orientation** | **RESOLVED, 2026-08-05** — screen-aligned, `dd8cfef`. See decision 28 |
 | Camera easing | **RESOLVED in mechanism, OPEN in feel** — deadzone + exponential ease shipped, but `CAM_DEADZONE`/`CAM_EASE` are first guesses nobody has driven by hand |
 | **Art scale** | **RESOLVED, 2026-08-05** — `TILE` 24 with everything authored through `PX()`. Whether 24 is the *right* number is still a judgement call; it is now a one-line change to try another |
@@ -629,6 +730,26 @@ controls; audio callback timing; render cost). New this session:
 
 [[Cut List]] is pre-committed if time runs short. **Never cut:** the fog-reveal core feel, the
 reachability guarantee, staying under the byte limit, a defined completable end state.
+
+### What the team can and cannot hand over — answer given 2026-08-05
+
+The user asked directly whether to add PNG assets. The answer, recorded here so it does not have to
+be re-derived:
+
+- **Yes, send PNGs — as *bake inputs*.** They are source files on a build machine. They never ship.
+  `SDL_image` is compiled out and the zero-external-files rule is absolute, so nothing can decode a
+  PNG at runtime.
+- **Indexed pixel art, small.** A 32×32 sprite at 4 bpp bakes to 512 bytes. Against 747,776 bytes
+  free that is room for well over a thousand. **Bytes are not the constraint** — authoring effort
+  and pixel density are.
+- **Authored against the tile.** Diamonds are 48×24 at `TILE 24`; anything hand-drawn should be
+  sized to that, and its dimensions wrapped in `PX()` so it survives another scale change.
+- **A shared fixed palette** across assets is what keeps the bake small and the look coherent.
+- The bake script is a build-time PNG→`src/assets.h` converter (.NET's `System.Drawing` reads PNG
+  fine from PowerShell, and this project already uses it for screenshots). **It does not exist
+  yet** — that is Phase 07.
+- **The untracked `tree.glb` at the vault root is exactly the mistake this prevents.** It can be a
+  bake input if someone renders it to sprite frames. It can never ship.
 
 ### The size finding, restated with current numbers
 
@@ -696,19 +817,25 @@ This handover intentionally does **not** duplicate the forward plan. `design/pha
 per phase — what it is, why it's sequenced where it is, its definition of done, exactly which
 functions and lines it touches, and its verification gate. The index is [[Phase Roadmap]].
 
-**Current position, in one paragraph:** **Phases 00–05 are all done.** 00–02 (memory + skill policy
-+ Art Bible; island landform + village clustering; roof shading + the fog rewrite) as `5ffdb38` and
-`e5c8942`; **Phase 03** (bitmap font + F3 fog-tuning overlay, +0 bytes) as `60b4e3a`, its
-human-usability gate discharged the same day; **Phase 04** (screen-aligned input + eased camera) as
-`dd8cfef`; **Phase 05** (`--land-test`, `--fog-test`, both with negative controls, +0 bytes) as
-`4847bf5`. Two unplanned pieces landed alongside them, both from the user looking at the screen:
-the world was **rescaled** (`e03138d`, `TILE` 32→24 with every authored dimension routed through
-`PX()`, grid grown to 108×60), and the **houses were fixed** (`b4bf446` — the roof had been drawn
-half a tile off its own walls since buildings landed, which put the windows on the roof). **Phase
-06 (water and bridges)** is next. After that: the asset bake pipeline, save/load, the remaining
-placeholder art, and motion (Phases 07–10) — all timeboxed, with a **hard stop on 2026-08-14**
-before the ship-critical remainder (Phase 11: audio, font-dependent HUD, QA, submission) takes over
-regardless of how much of the art work is finished.
+**Current position, in one paragraph:** **Phases 00–05 are done; Phase 06 is half done.** 00–02
+(memory + skill policy + Art Bible; island landform + village clustering; roof shading + the fog
+rewrite) as `5ffdb38` and `e5c8942`; **Phase 03** (bitmap font + F3 fog-tuning overlay, +0 bytes) as
+`60b4e3a`, its human-usability gate discharged the same day; **Phase 04** (screen-aligned input +
+eased camera) as `dd8cfef`; **Phase 05** (`--land-test`, `--fog-test`, both with negative controls,
++0 bytes) as `4847bf5`; **Phase 06 part 1** (rivers + bridges) as `e42f2f4`. Two unplanned pieces
+landed alongside them, both from the user looking at the screen: the world was **rescaled**
+(`e03138d`, `TILE` 32→24 with every authored dimension routed through `PX()`, grid grown to
+108×60), and the **houses were fixed** (`b4bf446` — the roof had been drawn half a tile off its own
+walls since buildings landed, which also put the windows on the roof).
+
+**Start here: finish Phase 06.** Waterfalls, then the bridge-suppression negative control — the
+second is the more important and the phase file calls it its single most important test. After
+that: the asset bake pipeline, save/load, the remaining placeholder art, and motion (Phases 07–10),
+all timeboxed, with a **hard stop on 2026-08-14** before the ship-critical remainder (Phase 11:
+audio, font-dependent HUD, QA, submission) takes over regardless of how much art work is finished.
+
+**Nine days to that hard stop.** Audio is a softsynth from zero and is completely untouched; so are
+save/load and any on-screen HUD. If something has to give, take it from [[Cut List]].
 
 **Schedule reality, unchanged in substance from the last handover:** today is 2026-08-05; the
 deadline is 2026-09-04. Audio (a softsynth from zero) and the rest of Week 5 (save/load, HUD, win
