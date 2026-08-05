@@ -18,6 +18,20 @@ Next: the player-occlusion decision, then Phase 08 (save/load)
 
 ## Sessions
 
+- [[2026-08-05-session-01]] *(Session 06)* — **The team's art arrives, and the seam it goes through.**
+  [[Phase 07 - Asset Seam]] done: `tools/bake.ps1` turns authored PNGs into a committed, compiled-in
+  `src/art_data.h`, and **37 real sprites are wired** — a 4-direction 4-frame walking character, 10
+  buildings, 11 nature props — retiring four "does not exist" items at once. **+62,976 bytes**, the
+  first time art has cost more than all game logic ever written (~23 KB), though still 8% of free
+  space. The Art Bible's ≤16-entry palette spec **did not survive measurement** (7–49 colours, mean
+  18), so the format is 8-bit per-sprite palettes with no quantisation, trimmed to the opaque box
+  because 71% of canvas is transparent. **Walked into this phase's own named trap**: wired the
+  decoder before writing its round-trip, then spent a screenshot loop suspecting a palette bug that
+  `--sprite-test` disproved in one run. Also: prop density had to be retuned (22%→12.5%) because
+  sprites are far bigger than the blobs they replaced, and a building sprite is the *whole*
+  building, so `world_heights` must flatten its footprint. **Open: the player is routinely hidden
+  behind trees** — confirmed by ablation, correct depth sort, needs a design decision.
+
 - [[2026-08-05-session-01]] *(Session 05)* — **The waterfalls, and bridges stop being an argument.**
   [[Phase 06 - Water And Bridges]] closed at **+0 bytes**. `--bridge-test` regenerates each seed
   twice, once with decking suppressed, and compares the player's spawn component: **200/200
