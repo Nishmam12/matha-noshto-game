@@ -287,6 +287,70 @@ in it — just no shards and no Well.
   follows the player, so no ordinary capture can ever show both landmasses; without this there is
   no way to look at the shape of a two-sector world without a human holding F2.
 
+## Evidence — slice 2 (the portal)
+
+**Landed 2026-08-06. Grid + portal + travel come to +1,536 bytes total** (755,200 → 756,736;
+683,264 still free). Render 1.016 ms mean, 59.5 fps.
+
+- **`--gating-test` PASS 30/30 with the portal edge live.** This is the slice's real proof:
+  walk-reachable == graph-reachable across all four ability tiers, through an edge that is not a
+  tile adjacency. It is what `tile_neighbours` exists for.
+- **`--portal-test` PASS, 100/100 seeds shrank** when the portal was suppressed, plus travel
+  assertions both ways and a control proving `E` does nothing away from a portal.
+- **`--sector-test` PASS at 100 seeds**, now including a spawn-sector assertion.
+- **`--land-test` PASS at 30 and 100 seeds**, re-aimed twice (see below), both controls firing.
+- **Full suite:** village(30), region(30), reach(50 + control), move(20), rng, iso, fog, fade,
+  sprite, bridge(**200/200**, back up from 198), **play 50/50**.
+
+### Four faults this slice found, three of them in code the plan called finished
+
+1. **The spec undercounted the traversals — twice.** It said four readers of `portal_link`; the
+   plan found `walk_regions` and made it five; the refactor found **`bfs_gated`** and made it six;
+   and `--land-test`'s own **`land_flood`** is a seventh. Six now route through `tile_neighbours`.
+   `land_flood` deliberately does **not**: it asks whether each sector is a real place on its own,
+   which is a question about landmass shape and must stay independent of the graph.
+2. **The player could spawn in the dream realm.** `game_init` picked the largest open component
+   across the whole grid — correct with one island, a way to start the game past the portal with
+   two. Fixing pass 1 was not enough: once the portal exists `flood_open` crosses it, so the spawn
+   component spans both sectors and its **centroid lands in the void band**, putting the nearest
+   component tile in the dream sector anyway. Measured at row 69 on seed 15 of 30. Both the
+   centroid and the spawn search are now confined to the overworld. **Nothing else catches this** —
+   `--land-test` measures the spawn component from wherever the spawn is, so a dream spawn looks
+   perfectly healthy.
+3. **`--portal-test` initially reported 97/100, not 100/100.** The overworld end was placed on any
+   open tile, which on ~3% of seeds is a detached lobe the player cannot reach — exactly the rate
+   decision 30 records for detached lobes. Both ends now sample inside their sector's **largest**
+   component. The 3 anomalous seeds were a real defect, not test noise.
+4. **`autopilot_tick` returned 1 for a portal step**, so `--play-test` printed `restored 20/19` —
+   more restorations than there are entities. Its contract is "1 if it RESTORED something, 0 if it
+   MOVED", and a portal step is locomotion. Harmless to the run, and precisely the sort of quietly
+   wrong number this project has been bitten by before. Caught only because the total exceeded a
+   bound that cannot legitimately be exceeded.
+
+### `--land-test` was re-aimed twice, and never loosened
+
+Both times the *threshold* was untouched and only the *denominator* changed, because `total` now
+spans two landmasses:
+
+- **50% reachability bound** → measured against the player's own sector. Fired on seed 16 at
+  1,557 of 3,583 purely because that seed's dream sector is larger than its overworld.
+- **12.5% landmass bound** → measured against the player's sector area. Fired on seed 16 at
+  1,137 of 11,232, while 1,137 is a healthy 17.5% of the 6,480-tile overworld.
+- A **new** far-sector assertion requires the dream sector's largest component to be ≥6.25% of its
+  own area, since the portal needs somewhere worth landing.
+
+### NOT verified by slice 2
+
+- **Nothing draws the portal**, so nobody has seen it. Travel is proven by assertion, not by eye.
+  The visual gate moves to slice 3, which is when the FX frames get a caller.
+- **`--play-test` 50/50 does not exercise travel.** Every entity still lives in the overworld, so
+  the autopilot has no reason to cross. The portal's effect on *reachability* is measured
+  (100/100), but its effect on *completability* is not tested until Task 9 puts fragments in the
+  dream sector. Slice 1's note applies again, one level up.
+- **Where the portal lands is arbitrary within the largest component.** It is not yet in a
+  `TERRAIN_DARK` region — regions do not exist when `place_portal` runs — so the Kindle framing
+  is still fiction rather than mechanism.
+
 ## Open, and deliberately not decided here
 
 - **Whether the void reads better as recoloured `SURF_OCEAN` or needs a real `SURF_VOID`.** Decided

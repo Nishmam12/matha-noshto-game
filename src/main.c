@@ -1212,19 +1212,45 @@ static void place_buildings(World *w, Rng *rng)
  * flood_open reads `solid` while walk_regions reads tile_blocked against an ability mask. Merging
  * those was never on the table — see decision 33 on why a bridge clears `solid` instead of
  * becoming a second signal collision has to read. */
+/* --portal-test regenerates each seed twice, once with the portal never placed, and compares the
+ * size of the component the player spawns in. Same shape as g_suppress_bridges (decision 36):
+ * self-test only, so the shipping build has no way to set it and the branch folds away. */
+#if WAYFARER_SELFTEST
+static int g_suppress_portal = 0;
+#define PORTAL_SUPPRESSED g_suppress_portal
+#else
+#define PORTAL_SUPPRESSED 0
+#endif
+
+/* The paired tile for a portal end, or -1 if `idx` is not one. Read by tile_neighbours — and so
+ * by every traversal at once — and by the E interact in sim_step. */
+static int portal_link(const World *w, int idx)
+{
+    if (w->portal[0] < 0 || w->portal[1] < 0)
+        return -1;
+    if (idx == w->portal[0]) return w->portal[1];
+    if (idx == w->portal[1]) return w->portal[0];
+    return -1;
+}
+
 static int tile_neighbours(const World *w, int idx, int *out)
 {
     static const int dx[4] = { 1, -1, 0, 0 };
     static const int dy[4] = { 0, 0, 1, -1 };
-    int x = idx % WORLD_W, y = idx / WORLD_W, d, n = 0;
+    int x = idx % WORLD_W, y = idx / WORLD_W, d, n = 0, linked;
 
-    (void)w;
     for (d = 0; d < 4; d++) {
         int nx = x + dx[d], ny = y + dy[d];
         if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
             continue;
         out[n++] = ny * WORLD_W + nx;
     }
+
+    /* The portal edge. One line, one place, six readers. */
+    linked = portal_link(w, idx);
+    if (linked >= 0)
+        out[n++] = linked;
+
     return n;
 }
 
@@ -1339,6 +1365,22 @@ static int regions_build(World *w, Scratch *sc, int spawn_tile)
                     w->regions[b].adj |= 1u << a;
                 }
             }
+        }
+    }
+
+    /* The portal edge, in the graph as well as in the walk.
+     *
+     * The sweep above only ever tests tile ADJACENCY, so it can never see a portal however
+     * carefully tile_neighbours is written — the two ends are 40 rows apart and share no edge.
+     * This is the sixth and last reader, and the one that keeps regions_reachable agreeing with
+     * walk_regions. Without it --gating-test would fail on every seed, correctly: the player
+     * could walk somewhere the model says is unreachable. */
+    if (w->portal[0] >= 0 && w->portal[1] >= 0) {
+        Uint8 a = w->region[w->portal[0] / WORLD_W][w->portal[0] % WORLD_W];
+        Uint8 b = w->region[w->portal[1] / WORLD_W][w->portal[1] % WORLD_W];
+        if (a != REGION_NONE && b != REGION_NONE && a != b) {
+            w->regions[a].adj |= 1u << b;
+            w->regions[b].adj |= 1u << a;
         }
     }
 
@@ -1671,6 +1713,58 @@ static void input_poll(Input *in)
     in->down = keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN];
     in->left = keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT];
     in->right = keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT];
+}
+
+/* Which portal end the player is standing at, or -1. Same proximity shape as entity_in_reach,
+ * deliberately — a portal is another thing you walk up to and press E on, not a new verb. */
+#define PORTAL_REACH PXF(34.0f)
+
+static int portal_in_reach(const Game *g)
+{
+    int i;
+    for (i = 0; i < 2; i++) {
+        int t = g->w.portal[i];
+        float ex, ey, dx, dy;
+        if (t < 0)
+            continue;
+        ex = (float)(t % WORLD_W) * TILE + TILE * 0.5f;
+        ey = (float)(t / WORLD_W) * TILE + TILE * 0.5f;
+        dx = ex - g->p.x;
+        dy = ey - g->p.y;
+        if (dx * dx + dy * dy <= PORTAL_REACH * PORTAL_REACH)
+            return i;
+    }
+    return -1;
+}
+
+/* Travel. Returns 1 if it happened.
+ *
+ * AN INTERACT, NOT A MOVEMENT, and that is the whole reason the completability proof stayed a
+ * re-run rather than a re-argument: tile_blocked is untouched, so collision still reads `solid`
+ * and regions[].terrain and nothing else (decision 12). It also removes the arrival ping-pong a
+ * step-on trigger would need a latch to suppress — you land ON the far end, and nothing fires
+ * until you press the key again.
+ *
+ * Kindle is NOT checked here. The ability gates the route to the portal, through the TERRAIN_DARK
+ * region collision already refuses without it; checking again at the portal would be a second
+ * collision input wearing a disguise. */
+static int try_portal(Game *g)
+{
+    int i = portal_in_reach(g);
+    int other;
+
+    if (i < 0)
+        return 0;
+    other = g->w.portal[1 - i];
+    if (other < 0)
+        return 0;
+
+    g->p.x = (float)(other % WORLD_W) * TILE + TILE * 0.5f;
+    g->p.y = (float)(other / WORLD_W) * TILE + TILE * 0.5f;
+    /* Snap rather than ease. The eased camera would otherwise slide across 40 rows of void to
+     * catch up, which reads as the map scrolling past rather than as arriving somewhere else. */
+    g->cam_ready = 0;
+    return 1;
 }
 
 /* Nearest un-restored entity within reach, or -1. Proximity + a keypress is the
@@ -2034,6 +2128,83 @@ static int height_at(const World *w, int tx, int ty)
     return w->height[ty][tx];
 }
 
+/* Both ends of the portal, on open ground, with the dream end inside the LARGEST dream-sector
+ * component.
+ *
+ * That last rule is load-bearing rather than tidy. DREAM_ROUGH deliberately cuts a ragged coast,
+ * and measurement shows it genuinely fragments the sector into several islands — on seed 16 its
+ * 2,026 open tiles split into components none of which reaches the overworld's 1,557. A portal
+ * dropped on whichever islet came first would strand every fragment placed beyond it, and the
+ * reachability verifier would reject that seed forever.
+ *
+ * Runs AFTER world_gen, place_rivers and place_buildings but BEFORE regions_build and the
+ * verifier, so the region graph and the completability proof both see the portal as an ordinary
+ * edge — exactly the ordering rivers and buildings already use, and for the same reason. */
+/* A random open tile inside the LARGEST walkable component of rows [y0, y1), or -1.
+ *
+ * Both ends of the portal need this, for the same reason and by measurement. An earlier version
+ * dropped the overworld end on any open tile at all, and --portal-test reported 97 of 100 seeds
+ * shrinking rather than 100: on the other three the end had landed on a detached lobe the player
+ * cannot walk to, so the portal joined the dream realm to somewhere already unreachable. Decision
+ * 30 puts detached lobes at about 3% of seeds, which is exactly the rate observed.
+ *
+ * Sampled within the component rather than taking its lowest tile index, because the lowest index
+ * is its top-left corner — a deterministic but consistently bad place to stand a landmark. */
+static int biggest_component_tile(World *w, Rng *rng, Uint8 *seen, int *stack, int y0, int y1)
+{
+    int best_first = -1, best_n = 0, i, x, y;
+
+    for (i = 0; i < WORLD_W * WORLD_H; i++)
+        seen[i] = 0;
+    for (y = y0; y < y1; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            int first, sx, sy, n;
+            if (w->solid[y][x] || seen[y * WORLD_W + x])
+                continue;
+            n = flood_open(w, seen, stack, x, y, &first, &sx, &sy);
+            if (n > best_n) { best_n = n; best_first = first; }
+        }
+    if (best_first < 0)
+        return -1;
+
+    /* Re-flood just that component so `seen` marks exactly its tiles, then sample inside it. */
+    for (i = 0; i < WORLD_W * WORLD_H; i++)
+        seen[i] = 0;
+    {
+        int first, sx, sy;
+        (void)flood_open(w, seen, stack, best_first % WORLD_W, best_first / WORLD_W,
+                         &first, &sx, &sy);
+    }
+    for (i = 0; i < 4000; i++) {
+        x = (int)rng_below(rng, WORLD_W);
+        y = y0 + (int)rng_below(rng, (Uint32)(y1 - y0));
+        if (seen[y * WORLD_W + x])
+            return y * WORLD_W + x;
+    }
+    return best_first; /* sampling failed on a tiny component; the corner will do */
+}
+
+static void place_portal(World *w, Rng *rng, Uint8 *seen, int *stack)
+{
+    w->portal[0] = -1;
+    w->portal[1] = -1;
+    if (PORTAL_SUPPRESSED)
+        return;
+
+    /* Regions do not exist yet, so the overworld end cannot prefer a TERRAIN_DARK one. The
+     * fiction is served by slice 3 drawing the arch here, and by the Kindle-gated dark region
+     * that already sits between the player and the deep interior. */
+    w->portal[0] = biggest_component_tile(w, rng, seen, stack, 1, OVERWORLD_H - 1);
+    w->portal[1] = biggest_component_tile(w, rng, seen, stack, DREAM_Y0, WORLD_H);
+
+    /* A portal with only one end is not a portal. portal_link would return -1 for a half-pair
+     * anyway; zeroing both makes that explicit rather than incidental. */
+    if (w->portal[0] < 0 || w->portal[1] < 0) {
+        w->portal[0] = -1;
+        w->portal[1] = -1;
+    }
+}
+
 /* Spawn in the LARGEST open region, not merely the nearest open tile.
  * Measured: nearest-tile spawning dropped the player into a sealed one-tile
  * pocket on 3 of 20 seeds, where movement and therefore the whole reveal
@@ -2060,10 +2231,23 @@ static int game_init(Game *g, Rngs *rngs)
      * either of them walls off. */
     place_rivers(&g->w, &rngs->terrain, sc.dist, sc.queue);
     place_buildings(&g->w, &rngs->terrain);
+    /* And the portal, for the same reason and in the same window: before the flood fill and the
+     * verifier, so a layout it cannot serve is rejected and regenerated by machinery that already
+     * exists (decision 13). From here on, tile_neighbours reports the portal edge to every
+     * traversal, so the spawn fill, the region graph and the completability proof all see it. */
+    place_portal(&g->w, &rngs->terrain, sc.seen, sc.stack);
     SDL_memset(seen, 0, sizeof(sc.seen));
 
     /* Pass 1: find the largest open region. */
-    for (y = 1; y < WORLD_H - 1; y++) {
+    /* IN THE OVERWORLD. The row bound is not cosmetic: this swept the whole grid, which was
+     * correct while the grid held one island — but the dream sector is a second landmass, and on
+     * a seed where its largest component beats the overworld's, the player would have spawned in
+     * the dream realm, before any portal, in a sector with no entities and no way home.
+     *
+     * Nothing caught it. --land-test measures `home` from wherever the spawn lands, so a dream
+     * spawn looks perfectly healthy, and --sector-test had no opinion about where the player
+     * starts. It does now. */
+    for (y = 1; y < OVERWORLD_H - 1; y++) {
         for (x = 1; x < WORLD_W - 1; x++) {
             int first = -1, sx = 0, sy = 0;
             int n = flood_open(&g->w, seen, stack, x, y, &first, &sx, &sy);
@@ -2102,10 +2286,32 @@ static int game_init(Game *g, Rngs *rngs)
         SDL_memset(seen, 0, sizeof(sc.seen));
         (void)flood_open(&g->w, seen, stack, biggest_first % WORLD_W,
                          biggest_first / WORLD_W, &first, &sum_x, &sum_y);
-        cx = sum_x / biggest;
-        cy = sum_y / biggest;
 
-        for (y = 0; y < WORLD_H; y++) {
+        /* CENTROID OVER THE OVERWORLD PART OF THE COMPONENT ONLY, and re-counted here rather than
+         * reusing flood_open's totals.
+         *
+         * Once the portal exists, tile_neighbours reports it to flood_open too — which is exactly
+         * what we want for the region graph and the verifier, but it means this component now
+         * spans BOTH landmasses. Its true centroid sits in the void band between them, and the
+         * nearest component tile to that point is frequently in the dream sector: measured, the
+         * player spawned at row 69 on seed 15 of 30. She must start in the overworld, so both the
+         * centre-of-mass and the search that follows are confined to it.
+         *
+         * Found by the spawn-sector assertion in --sector-test, which was written for the simpler
+         * version of this bug (pass 1 sweeping the whole grid) and caught the subtler one. */
+        sum_x = 0;
+        sum_y = 0;
+        {
+            int n_home = 0;
+            for (y = 0; y < OVERWORLD_H; y++)
+                for (x = 0; x < WORLD_W; x++)
+                    if (seen[y * WORLD_W + x]) { sum_x += x; sum_y += y; n_home++; }
+            if (n_home < 1) n_home = 1;
+            cx = sum_x / n_home;
+            cy = sum_y / n_home;
+        }
+
+        for (y = 0; y < OVERWORLD_H; y++) {
             for (x = 0; x < WORLD_W; x++) {
                 int d;
                 if (!seen[y * WORLD_W + x])
@@ -4478,6 +4684,23 @@ static int autopilot_tick(Game *g, Scratch *sc)
         }
     }
 
+    /* If the shortest path's next step is the portal's far end, the path CROSSES the portal, and
+     * steering toward a tile 40 rows away would drive her into the void until the step cap. Take
+     * the portal instead.
+     *
+     * This is the same class of fault as decision 29's livelock — the autopilot faithfully
+     * following a signal that means something other than "walk this way" — and it presents the
+     * same way, as a hang rather than a failure. */
+    if (next >= 0 && next == portal_link(&g->w, here)) {
+        /* 0, not 1. This function's contract is "1 if it RESTORED something, 0 if it MOVED", and
+         * stepping through a portal is locomotion. Returning 1 made --play-test report
+         * "restored 20/19" — more restorations than there are entities — which is harmless to the
+         * run and exactly the kind of quietly wrong number this project has been bitten by
+         * before. Caught because the total exceeded a bound that cannot legitimately be exceeded. */
+        if (try_portal(g))
+            return 0;
+    }
+
     SDL_zero(in);
     {
         /* Aim at the next tile centre, or the entity itself on the last leg. */
@@ -5746,6 +5969,8 @@ static int sector_selftest(Uint64 seed, int nseeds)
         rngs_init(&rngs, seed + (Uint64)s);
         SDL_zerop(g);
         world_gen(&g->w, &rngs.terrain);
+        g->w.portal[0] = -1;
+        g->w.portal[1] = -1;
 
         for (y = 0; y < WORLD_H; y++)
             for (x = 0; x < WORLD_W; x++) {
@@ -5797,6 +6022,35 @@ static int sector_selftest(Uint64 seed, int nseeds)
         SDL_free(g); SDL_free(sc);
     }
 
+    /* The player must START in the overworld, on every seed.
+     *
+     * This assertion exists because the code was wrong. game_init picked the largest open
+     * component across the WHOLE grid — correct while the grid held one island, and a way to
+     * spawn the player in the dream realm the moment it held two. Nothing else catches it:
+     * --land-test measures the spawn component from wherever the spawn is, so a dream spawn
+     * looks perfectly healthy, and a player who starts past the portal has no entities, no
+     * village and no way back. Uses the real game_init, portal and all. */
+    {
+        int bad = 0;
+        for (s = 0; s < nseeds; s++) {
+            Game *g = (Game *)SDL_malloc(sizeof(Game));
+            Rngs rngs;
+            int ty;
+            if (!g) { printf("FAIL  out of memory\n"); return 1; }
+            rngs_init(&rngs, seed + (Uint64)s);
+            game_init(g, &rngs);
+            ty = (int)(g->p.y / TILE);
+            if (dream_sector(ty)) {
+                printf("FAIL  seed %d: player spawned in the dream sector, at row %d\n", s, ty);
+                bad++;
+            }
+            SDL_free(g);
+        }
+        if (bad) fails++;
+        else printf("spawn sector: PASS  player starts in the overworld on all %d seeds\n",
+                    nseeds);
+    }
+
     {
         int bad = 0, y;
         for (y = 0; y < WORLD_H; y++)
@@ -5807,6 +6061,127 @@ static int sector_selftest(Uint64 seed, int nseeds)
         if (!bad) fails++;
     }
 
+    printf("%s (%d checks failed)\n", fails ? "FAIL" : "PASS", fails);
+    return fails ? 1 : 0;
+}
+
+/* Decision 36's shape, applied to the portal.
+ *
+ * There is no broken world to build here. flood_open is exact and cannot "pass when it
+ * shouldn't", so the usual negative control — construct a fault, confirm the checker rejects it —
+ * has nothing to construct. What is being verified is the CLAIM that the portal is load-bearing:
+ * that it is the only way into the dream realm. So each seed is generated twice, once with the
+ * portal suppressed, and the test fails only if it NEVER observes the reachable component shrink.
+ *
+ * Written before the portal drew a single pixel. Phase 07 named a test to write first, it was
+ * written second, and a screenshot loop then spent a stretch suspecting a decoder bug that the
+ * test disproved in one run. */
+static int portal_selftest(Uint64 seed, int nseeds)
+{
+    int fails = 0, s, shrank = 0;
+
+    for (s = 0; s < nseeds; s++) {
+        int with = 0, without = 0, pass;
+        for (pass = 0; pass < 2; pass++) {
+            Game    *g  = (Game *)SDL_malloc(sizeof(Game));
+            Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+            Rngs rngs;
+            int first, sx, sy, i, n;
+
+            if (!g || !sc) {
+                printf("FAIL  out of memory\n");
+                SDL_free(g); SDL_free(sc);
+                return 1;
+            }
+            g_suppress_portal = pass;   /* pass 0 = normal, pass 1 = no portal */
+            rngs_init(&rngs, seed + (Uint64)s);
+            game_init(g, &rngs);
+            for (i = 0; i < WORLD_W * WORLD_H; i++)
+                sc->seen[i] = 0;
+            n = flood_open(&g->w, sc->seen, sc->stack,
+                           (int)(g->p.x / TILE), (int)(g->p.y / TILE), &first, &sx, &sy);
+            if (pass) without = n; else with = n;
+            SDL_free(g); SDL_free(sc);
+        }
+        g_suppress_portal = 0;
+
+        if (with > without) {
+            shrank++;
+        } else if (with < without) {
+            printf("FAIL  seed %d: suppressing the portal GREW the component, %d -> %d\n",
+                   s, with, without);
+            fails++;
+        }
+    }
+
+    if (!shrank) {
+        printf("FAIL  the portal never changed reachability across %d seeds - it is decoration\n",
+               nseeds);
+        fails++;
+    } else {
+        printf("negative control (portal is load-bearing): PASS  "
+               "[%d/%d seeds shrank when suppressed]\n", shrank, nseeds);
+    }
+
+    /* Travel. Asserted on the player's POSITION rather than on try_portal's return value: "it
+     * returned 1" would pass just as happily with her teleported into a wall, or into the void
+     * band, or nowhere at all. */
+    {
+        Game *g = (Game *)SDL_malloc(sizeof(Game));
+        Rngs rngs;
+        if (!g) { printf("FAIL  out of memory\n"); return 1; }
+        rngs_init(&rngs, seed);
+        game_init(g, &rngs);
+
+        if (g->w.portal[0] < 0 || g->w.portal[1] < 0) {
+            printf("FAIL  travel: seed %.0f placed no portal\n", (double)seed);
+            fails++;
+        } else {
+            g->p.x = (float)(g->w.portal[0] % WORLD_W) * TILE + TILE * 0.5f;
+            g->p.y = (float)(g->w.portal[0] / WORLD_W) * TILE + TILE * 0.5f;
+            if (!try_portal(g)) {
+                printf("FAIL  travel: standing on the overworld end, E did nothing\n");
+                fails++;
+            } else {
+                int tx = (int)(g->p.x / TILE), ty = (int)(g->p.y / TILE);
+                if (ty * WORLD_W + tx != g->w.portal[1]) {
+                    printf("FAIL  travel: landed on tile %d, expected %d\n",
+                           ty * WORLD_W + tx, g->w.portal[1]);
+                    fails++;
+                } else if (!dream_sector(ty)) {
+                    printf("FAIL  travel: landed at row %d, outside the dream sector\n", ty);
+                    fails++;
+                } else if (g->w.solid[ty][tx]) {
+                    printf("FAIL  travel: landed inside a solid tile\n");
+                    fails++;
+                } else {
+                    printf("travel: PASS  overworld end -> dream row %d, on open ground\n", ty);
+                }
+            }
+
+            /* And back again, which a one-way implementation would fail. */
+            if (!try_portal(g)) {
+                printf("FAIL  travel: the return trip did nothing\n");
+                fails++;
+            } else if (dream_sector((int)(g->p.y / TILE))) {
+                printf("FAIL  travel: the return trip stayed in the dream sector\n");
+                fails++;
+            } else {
+                printf("travel return: PASS  dream end -> overworld\n");
+            }
+
+            /* Negative control: away from either end, E must do nothing at all. */
+            g->p.x = TILE * 1.5f;
+            g->p.y = TILE * 1.5f;
+            if (try_portal(g)) {
+                printf("FAIL  travel control: E teleported from a non-portal tile\n");
+                fails++;
+            } else {
+                printf("travel control: PASS  E does nothing away from a portal\n");
+            }
+        }
+        SDL_free(g);
+    }
     printf("%s (%d checks failed)\n", fails ? "FAIL" : "PASS", fails);
     return fails ? 1 : 0;
 }
@@ -6222,6 +6597,10 @@ static int land_check(const World *w, int spawn_tile, Uint8 *seen, int *stack,
      * component in the other one, which is what the portal needs somewhere to land on. */
     int open_home = 0, big_dream = 0;
     const int spawn_dream = (spawn_tile >= 0) ? dream_sector(spawn_tile / WORLD_W) : 0;
+    /* Tile areas of the two sectors, which are the honest denominators now that `total` spans
+     * both. The void band belongs to neither and is excluded from both on purpose. */
+    const int home_area = spawn_dream ? WORLD_W * DREAM_H : WORLD_W * OVERWORLD_H;
+    const int far_area  = spawn_dream ? WORLD_W * OVERWORLD_H : WORLD_W * DREAM_H;
     int i, bad = 0;
 
     for (i = 0; i < total; i++) {
@@ -6293,9 +6672,18 @@ static int land_check(const World *w, int spawn_tile, Uint8 *seen, int *stack,
      *    component the player is actually standing in, as a fraction of the
      *    WHOLE MAP — absolute, per Handover §7's warning that relative
      *    assertions compare counts to counts and prove nothing. */
-    if (home * 8 < total) {
-        printf("  seed %.0f: player's landmass is %d of %d map tiles (<12.5%%)\n",
-               (double)seed, home, total);
+    /* AGAINST THE PLAYER'S OWN SECTOR, not the whole map. Same re-aiming as 2b below and for the
+     * same reason: `total` now spans two landmasses, so measuring one against both asks whether
+     * the overworld is half the world — which it is not, by design. Measured, this fired on seed
+     * 16 at 1137 of 11232 while 1137 is a perfectly healthy 17.5% of the 6480-tile overworld.
+     *
+     * Note that land_flood, unlike flood_open, deliberately does NOT cross the portal. That is
+     * the right call for this checker: it asks whether each sector is a real place on its own,
+     * which is a question about landmass shape and must stay independent of the graph. It is the
+     * seventh traversal in the file and the only one that stays portal-blind on purpose. */
+    if (home * 8 < home_area) {
+        printf("  seed %.0f: player's landmass is %d of %d tiles in their sector (<12.5%%)\n",
+               (double)seed, home, home_area);
         bad++;
     }
     /* 2b. A loose fragmentation bound, purely to catch a shattered world: if
@@ -6317,9 +6705,9 @@ static int land_check(const World *w, int spawn_tile, Uint8 *seen, int *stack,
      *     is dropped in the largest component there, so if that component is tiny the dream realm
      *     is a rock in the void and the fragments placed in it are unreachable. Absolute, as a
      *     fraction of the whole map, per the rule at the top of this function. */
-    if (big_dream * 32 < total) {
-        printf("  seed %.0f: far sector's largest landmass is %d of %d map tiles (<3.1%%)\n",
-               (double)seed, big_dream, total);
+    if (big_dream * 16 < far_area) {
+        printf("  seed %.0f: far sector's largest landmass is %d of %d of its tiles (<6.25%%)\n",
+               (double)seed, big_dream, far_area);
         bad++;
     }
     /* 3. The sea is one body that reaches the map edge, not inland puddles. */
@@ -6817,6 +7205,9 @@ int main(int argc, char **argv)
         if (arg_flag(argc, argv, "--sector-test"))
             return sector_selftest((Uint64)arg_int(argc, argv, "--seed", 1),
                                    arg_int(argc, argv, "--seeds", 10));
+        if (arg_flag(argc, argv, "--portal-test"))
+            return portal_selftest((Uint64)arg_int(argc, argv, "--seed", 1),
+                                   arg_int(argc, argv, "--seeds", 30));
         if (arg_flag(argc, argv, "--land-test")) {
             int n = arg_int(argc, argv, "--seeds", 20);
             int base = arg_int(argc, argv, "--seed", 1);
@@ -7035,7 +7426,12 @@ int main(int argc, char **argv)
                     break;
                 case SDLK_e:
                 case SDLK_SPACE:
-                    if (!grid && try_restore(&game) >= 0)
+                    /* Portal first. A portal end and an unrestored entity are never on the same
+                     * tile, so the order cannot actually matter — but fixing it makes the
+                     * interaction unambiguous rather than dependent on that staying true. */
+                    if (!grid && try_portal(&game))
+                        SDL_AtomicAdd(&audio.sfx_fire, 1);
+                    else if (!grid && try_restore(&game) >= 0)
                         SDL_AtomicAdd(&audio.sfx_fire, 1);
                     break;
                 case SDLK_r: /* regenerate with the next seed */
