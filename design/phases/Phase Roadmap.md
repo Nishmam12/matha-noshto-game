@@ -37,6 +37,7 @@ beautiful, unfinished game scores worse than a plain, complete one.
 | 08 | [[Phase 08 - Save Load]] | Planned | — | Independent of the art work; scheduled here because it's cheap, high-value for a team, and Week 5 work worth pulling forward |
 | 09 | [[Phase 09 - Placeholder Art]] | **MOSTLY ABSORBED BY 07** — buildings, player and props are real art already. Remaining: restoration rebuild (ruin→whole), worn paths, **and the player-occlusion decision** | 03, 07 | The actual art pass — the team's handoff arrived early, so 07 did the placement work this phase was holding |
 | 10 | [[Phase 10 - Motion]] | Planned | 09 | Motion on unfinished art just animates the wrong thing; static art should be right first |
+| 12 | [[Phase 12 - Dream Realm]] | **Planned — new direction, 2026-08-05.** Sequenced between 08 and 10; numbered 12 only because renumbering would break every wikilink | 01, 05, 06, 07 | A portal in the `TERRAIN_DARK` region to a second biome in the team's Lumiara style. Resolves three things at once: the dark region had no reason to visit, Kindle had no reason to exist, and 56 delivered magical FX frames had no caller. **Timeboxed into five separately shippable slices** — it does not move the 2026-08-14 hard stop |
 | 11 | [[Phase 11 - Ship Critical]] | **Begins 2026-08-14 regardless** | — | Audio, font-dependent HUD, save wiring, QA, submission. Not negotiable against the deadline |
 
 ## How to read a phase file
