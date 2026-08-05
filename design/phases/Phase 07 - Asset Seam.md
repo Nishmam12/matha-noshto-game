@@ -1,13 +1,15 @@
 ---
 tags: [design, phase, wayfarer]
 phase: 7
-status: planned
-updated: 2026-08-04
+status: done
+updated: 2026-08-05
 ---
 
 # Phase 07 — Asset Seam
 
-**Status:** Planned.
+**Status:** **DONE**, and it went further than planned — the team's real art arrived the same day,
+so this phase built the pipeline *and* pushed 37 sprites through it, which was scheduled as
+[[Phase 09 - Placeholder Art]]. See Evidence.
 **Depends on:** [[Phase 03 - Legibility Tools]] (baked sprite output needs to be judged with the
 tuning overlay available, not by rebuild-and-screenshot).
 **Blocks:** [[Phase 09 - Placeholder Art]] — the placeholder art built in that phase should go
@@ -31,27 +33,23 @@ It can't. This phase is what makes that possible in a way that still ships.
 
 ## Definition of done
 
-- [ ] `tools/bake.ps1` reads `art/*.png`, produces `src/art_data.h` — indexed-palette (≤16 entries),
-      RLE-encoded, with a per-sprite record of `{ w, h, anchor_x, anchor_y, pal_off, data_off }`.
-- [ ] `src/art_data.h` is **committed to the repo**, so a clean build never requires running the bake
+- [x] `tools/bake.ps1` reads the PNGs under `assets/`, produces `src/art_data.h` — indexed-palette,
+      RLE-encoded, with a per-sprite record of `{ w, h, anchor_x, anchor_y, pal_off, pal_n,
+      data_off, data_len }`. **≤16 entries did not survive contact with the real art** — see Evidence.
+- [x] `src/art_data.h` is **committed to the repo**, so a clean build never requires running the bake
       tool — only regenerate it when art actually changes.
-- [ ] A `draw_sprite` routine decodes and blits a baked sprite, respecting its anchor as the
+- [x] A `draw_sprite` routine decodes and blits a baked sprite, respecting its anchor as the
       ground-contact point so it drops into the existing band-sweep depth sort correctly.
-- [ ] Fog applies to a sprite's **palette**, once per sprite per reveal level — not per pixel — so
-      `fog_lerp` remains the single path from true colour to screen colour without becoming a
-      per-pixel-per-sprite cost.
-- [ ] Every drawable that should eventually accept team art (`draw_tree`, `draw_building`,
-      `draw_player` once it exists) goes through one named entry point that can dispatch to either
-      the existing procedural routine or a baked sprite, controlled by a single flag or table entry
-      — not a scattered set of call-site changes.
-- [ ] `--sprite-test` exists: a round-trip test (encode a known image, decode it, confirm pixel-exact
-      match), an anchor-placement test (a sprite's anchor lands on the correct tile), and a negative
-      control (a corrupted RLE stream must be rejected, not silently misdrawn).
-- [ ] Terrain, cliffs, and water remain procedural — this phase does not convert them to sprites,
-      because they need to tile seamlessly and respond to per-tile elevation and fog in a way a
-      fixed sprite can't.
-- [ ] The byte cost of the first real baked sprite is measured and reported, turning "a 32×32
-      indexed+RLE sprite costs ~200–600 bytes" from an estimate in [[Art Bible]] §8 into a fact.
+- [x] Fog applies to a sprite's **palette**, once per sprite per draw — not per pixel.
+- [x] Every drawable that accepts team art goes through one named entry point that dispatches to
+      either the procedural routine or a baked sprite: `prop_art[]` for props,
+      `building_sprite_id()` for buildings, `player_frames[][]` for the character.
+- [x] `--sprite-test` exists: round-trip, real-data validation, anchor placement, and **two**
+      negative controls.
+- [x] Terrain, cliffs, and water remain procedural.
+- [x] The byte cost is measured: **+63,488 bytes for 37 sprites**, against an [[Art Bible]] §8
+      estimate of 200–600 bytes for a 32×32. See Evidence — the estimate was right per-sprite and
+      irrelevant in aggregate.
 
 ## Concrete tasks
 
@@ -103,4 +101,102 @@ confirmation via screenshot that a baked sprite composites correctly into the ex
 
 ## Evidence
 
-Not yet started.
+Built 2026-08-05. **`wayfarer.exe` 755,200 bytes, +62,976** (692,224 → 755,200). Zero warnings.
+684,800 bytes still under the ship target. Full suite green including **play 50/50**.
+
+### The team's art arrived mid-phase, so this phase did Phase 09's job too
+
+An untracked `assets/` appeared the same day: 130 PNGs plus 81 Godot `.import` sidecars. That
+turned this phase from "build a pipeline and prove it with one placeholder" into "build a pipeline
+and run the real art through it". **37 sprites are baked and wired**: 16 player frames
+(4 directions × 4), 11 nature props, 10 buildings. `magical/` (56 portal and crystal frames) is
+deliberately NOT baked — nothing calls it, and baking a sprite nothing draws is pure byte cost.
+Same rule that kept the bitmap font at +0 bytes until it had a caller.
+
+### The format estimate was wrong, and measuring caught it
+
+[[Art Bible]] §8 specified **≤16 palette entries** (4 bpp). Measured across the real art: **7–49
+colours per sprite, mean 18, with 36 of 93 sprites over 16.** 4 bpp was never viable. The format is
+8-bit indices against a per-sprite palette with **no quantisation**, so every authored colour
+survives — quantising toward a shared table to save a few KB would have been trading visible
+fidelity for bytes this project does not need.
+
+**71% of the authored canvas is transparent**, so sprites are trimmed to their opaque bounding box
+before encoding. That is the single biggest saving, and it also makes the anchor honest: a sprite
+padded with empty rows would otherwise float above its own feet.
+
+Per-sprite the Art Bible's estimate held (a 48×48 character frame lands in the hundreds of bytes);
+in aggregate 37 sprites cost 63,488 bytes. **Against 747,776 free, bytes remain a non-issue** —
+consistent with every previous phase.
+
+### Writing the round-trip late cost a detour
+
+This file's own trap section says the round-trip must be written **before** the decoder is trusted
+with anything visual. It was not: the sprites were wired first, a screenshot showed bushes
+rendering paler than their source, and the next twenty minutes went on suspecting a palette
+off-by-one in the decoder. `--sprite-test` then proved the decoder **pixel-exact**, and the real
+causes were mundane (authored art, and fog doing its job). **The test would have ruled out the
+decoder in one run instead of several screenshots.** The trap was correct and ignoring it was the
+mistake.
+
+### Density had to follow the art, and nothing warned about it
+
+`prop_at`'s thresholds were tuned when a tree was a ~20 px procedural blob: 22% of open tiles got a
+tree. A baked tree is 64×96 — wider than a tile, four tile-heights tall — so the identical density
+closed into a solid canopy that hid the terrain, the buildings and the player. Retuned to 12.5%
+tree / 9.4% bush. **Render-only, so solvability cannot move; but it changes what the reveal
+mechanic has to show, which is the actual reason to care.** Only visible on screen — no test has an
+opinion about it.
+
+### A building sprite is the WHOLE building, which reaches outside the renderer
+
+Walls were never drawn by `draw_building`: footprint tiles are given a wall height by
+`world_heights` and the tile rasteriser extrudes them. A sprite includes its own walls, so the
+ground under it must go **flat** — otherwise a 96 px cottage stands on a 42 px plinth.
+`building_sprite_id()` is therefore consulted by `world_heights` and `tile_colour` as well as
+`draw_building`, so there is **one decision rather than three that can drift**. Footprint tiles
+stay `solid`, so collision and reachability are untouched.
+
+The footprint maths came out clean by design, not luck: a `w×h` plot spans `(w+h)*TILE` screen px,
+so a 2×2 plot is exactly 96 px — exactly the width of the small-house sprites. The team authored
+against a 48 px diamond, which is the scale the renderer already used.
+
+Freed ground under the sprites is drawn as **packed earth**, which starts paying off the "the
+village reads as buildings-in-a-field, not as inhabited" note in [[Handover]] §2.
+
+## Verification
+
+```
+sprite  : PASS  round-trip 700 px -> 283 bytes -> 700 px pixel-exact;
+                37 sprites, 91,049 px from 60,029 RLE bytes (1.52x);
+                anchors all bottom-centre; BOTH negative controls fire
+                (over-long run rejected, wrong frame size rejected)
+iso/font/fog/rng/move/region/village : PASS, unchanged
+land    : PASS 30 seeds, both controls fire
+reach   : PASS 50 seeds + control; gating relaxed 0/50
+gating  : PASS 30 seeds
+bridge  : PASS 200/200 seeds shrank when suppressed
+play    : PASS 50/50
+perf    : render 1.065 ms mean (was 0.865), frame 16.875 ms = 59.3 fps
+```
+
+Render cost rose 0.2 ms — about 6% of the frame budget — for every prop, building and the
+character becoming a decoded sprite. Palette-level fog is why it is 0.2 and not 2.
+
+## Still not verified
+
+- **THE PLAYER IS ROUTINELY HIDDEN BEHIND TREES.** Confirmed, not suspected: with props disabled
+  the character renders correctly (feet on the bridge deck, correct facing); with props on she is
+  frequently invisible. A 96 px tree on a 24 px tile grid occludes a 48 px character often enough
+  to matter, and the depth sort is behaving *correctly* — this is a design problem, not a bug.
+  Needs a decision: thin the trees further, draw them smaller, or fade props that cover the player.
+  **This is the highest-value open item in the project right now.**
+- **The bush sprite has a magenta base disc** authored into it, which reads as a halo on grass. It
+  is the teammates' art, so it was left alone rather than silently repainted — but it looks like an
+  error in-world and should go back to whoever drew it.
+- **Nobody has played this.** Every judgement above is from screenshots.
+- The `.import` sidecars are Godot editor metadata; they are ignored by the bake and should
+  probably not be committed at all.
+- No test covers whether a sprite lands on the *right tile* in world terms — `--sprite-test` checks
+  the anchor is bottom-centre of its own box, not that `draw_building`'s call site passes the right
+  screen point. That is still screenshot-verified only.

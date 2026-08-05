@@ -1741,6 +1741,40 @@ static int flood_open(const World *w, Uint8 *seen, int *stack, int sx, int sy,
     return count;
 }
 
+/* ---- the building art seam ------------------------------------------------
+ *
+ * Which baked sprite, if any, stands in for this building. Returns ART_NONE to fall back to the
+ * procedural mix-and-match house, so deleting a row here is a complete, reversible undo.
+ *
+ * Chosen by FOOTPRINT AREA, because a sprite has one fixed size and the footprint decides how
+ * much ground it has to cover. In this projection a w*h footprint spans (w+h)*TILE screen px, so
+ * at TILE 24 a 2x2 plot is exactly 96 px — which is exactly how wide the small-house sprites are.
+ * That is not luck: the team authored to a 48 px diamond, the same scale the renderer already
+ * uses. Bigger plots take the 128 px sprites and run slightly narrow, which reads as a building
+ * standing in its own yard rather than as an error.
+ *
+ * Read by BOTH draw_building and world_heights, and it must give them the same answer — see the
+ * wall-height note in world_heights below. */
+static const short art_bld_small[] = {
+    ART_BLD_HOUSE_SMALL_01, ART_BLD_HOUSE_SMALL_02,
+    ART_BLD_HOUSE_SMALL_03, ART_BLD_HOUSE_SMALL_04,
+    ART_BLD_MARKET_STALL
+};
+static const short art_bld_large[] = {
+    ART_BLD_LARGE_BUILDING, ART_BLD_WINDMILL
+};
+
+static int building_sprite_id(const Building *b)
+{
+    /* Bits 12+ of the variant: the low bits already drive the procedural wall/roof choices, and
+     * reusing them would tie which sprite appears to a palette that is no longer drawn. */
+    Uint32 pick = (b->variant >> 12) & 0xFFu;
+
+    if (b->w * b->h <= 4)
+        return art_bld_small[pick % (Uint32)(sizeof art_bld_small / sizeof *art_bld_small)];
+    return art_bld_large[pick % (Uint32)(sizeof art_bld_large / sizeof *art_bld_large)];
+}
+
 /* Draw height per tile, derived from `solid` plus the region's terrain. Rock
  * rises in terraces toward the interior of a mass, via a two-pass chamfer
  * distance transform, so a cliff edge gets a rounded rim rather than a slab
@@ -1782,10 +1816,23 @@ static void world_heights(World *w)
         for (x = 0; x < WORLD_W; x++) {
             int h;
             if (w->bld_at[y][x]) {
-                /* Walls, not rock. The tile rasteriser then draws this tile's
-                 * front faces at wall height, which IS the wall — no separate
-                 * wall-drawing code exists anywhere. */
-                h = WALL_BASE + w->bld[w->bld_at[y][x] - 1].levels * STOREY_H;
+                /* Walls, not rock. The tile rasteriser then draws this tile's front faces at
+                 * wall height, which IS the wall — no separate wall-drawing code exists
+                 * anywhere.
+                 *
+                 * UNLESS the building is drawn as a baked sprite, in which case the sprite is
+                 * the entire building and the ground under it must stay FLAT. Leaving the
+                 * extrusion in place stood a 96 px house on top of a 42 px block, which read as
+                 * a cottage on a plinth. This is the one place the art seam reaches outside the
+                 * renderer, and it has to agree with draw_building exactly — both ask
+                 * building_sprite_id, so there is one decision, not two that can drift.
+                 *
+                 * Still render-only: `height` has never been a collision input, and the tiles
+                 * remain `solid` either way, so nothing about reachability moves. */
+                const Building *bb = &w->bld[w->bld_at[y][x] - 1];
+                h = (building_sprite_id(bb) == ART_NONE)
+                        ? WALL_BASE + bb->levels * STOREY_H
+                        : 0;
             } else if (w->surf[y][x] == SURF_OCEAN) {
                 /* Sea floor, stepping down away from the shore. Without this the
                  * chamfer below would read open water as the deep interior of a
@@ -2954,10 +3001,21 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
     case TERRAIN_DARK:   return (roll < 7) ? PROP_CRYSTAL : PROP_NONE;
     case TERRAIN_LEDGE:  return (roll < 4) ? PROP_ROCK    : PROP_NONE;
     default:
-        return (roll <  7) ? PROP_TREE
-             : (roll < 12) ? PROP_BUSH
-             : (roll < 14) ? PROP_STUMP
-             : (roll < 19) ? PROP_FLOWER : PROP_NONE;
+        /* Cumulative thresholds over a 0..31 roll, so each band is the gap to the previous one.
+         *
+         * RETUNED when props became baked sprites (Phase 07). These were 7/12/14/19 — a 22%
+         * tree rate — which read as scattered woodland when a tree was a ~20 px procedural
+         * blob. A baked tree is 64x96: wider than a tile and four tile-heights tall, so the
+         * same rate closed into a solid canopy that hid the terrain, the buildings and the
+         * player. Density had to follow the art, and nothing warned about it — the change was
+         * only visible on screen.
+         *
+         * Density is not a collision input, so this cannot alter solvability; but it does
+         * change what the reveal mechanic has to show, which is the actual reason to care. */
+        return (roll <  4) ? PROP_TREE     /* 12.5% */
+             : (roll <  7) ? PROP_BUSH     /*  9.4% */
+             : (roll <  9) ? PROP_STUMP    /*  6.3% */
+             : (roll < 15) ? PROP_FLOWER : PROP_NONE;
     }
 }
 
@@ -2998,6 +3056,22 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
     cy -= cam_y;
     if (cx < -400 || cx > fb->w + 400)
         return;
+
+    /* The art seam. A baked sprite is the WHOLE building — walls included — so it replaces this
+     * routine outright rather than being drawn over it, and world_heights has already flattened
+     * the footprint so there is no extrusion underneath.
+     *
+     * Anchored at the footprint's ground centre: world_to_iso returns the tile centre's visual
+     * position, and draw_sprite wants the ground-contact point, so (cx, cy) IS the anchor with
+     * no correction. Anything that adds one here is wrong — that is exactly the +ISO_HH mistake
+     * described above, which put every roof half a tile off its own walls for four sessions. */
+    {
+        int art = building_sprite_id(b);
+        if (art != ART_NONE) {
+            draw_sprite(fb, art, cx, cy, rev);
+            return;
+        }
+    }
 
     /* Half-width of the footprint's diamond, plus a small eave overhang.
      *
@@ -3234,8 +3308,21 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
     Uint8 bi = g->w.bld_at[ty][tx];
 
     if (bi) {
-        const Uint8 *p = wall_pal[BV_WALL(g->w.bld[bi - 1].variant)];
-        *cr = p[0]; *cg = p[1]; *cb = p[2];
+        const Building *bb = &g->w.bld[bi - 1];
+        if (building_sprite_id(bb) != ART_NONE) {
+            /* Packed earth, not wall colour. When a sprite is the whole building, world_heights
+             * has flattened this tile, so it is now GROUND the house stands on rather than the
+             * wall's own top face — and leaving it wall-coloured left a pale slab spreading out
+             * from under every cottage.
+             *
+             * Deliberately a worn dirt yard: it is what a footprint bigger than its sprite has
+             * to be, and it starts paying off the "the village reads as buildings-in-a-field,
+             * not as inhabited" note in Handover section 2. */
+            *cr = 0x8f; *cg = 0x7d; *cb = 0x5e;
+        } else {
+            const Uint8 *p = wall_pal[BV_WALL(bb->variant)];
+            *cr = p[0]; *cg = p[1]; *cb = p[2];
+        }
     } else if (g->w.bridge[ty][tx]) {
         /* Planks. Checked before `solid`, because a bridge tile is deliberately
          * NOT solid — that is the whole mechanism by which it is crossable. */
@@ -4286,7 +4373,7 @@ static int autoplay_selftest(Uint64 seed, int ms, const char *shot, int overlay)
     Rngs rngs;
     Scratch sc;
     SDL_Window *win;
-    SDL_Surface *fb, *back = NULL, *draw;
+    SDL_Surface *fb, *back = NULL, *draw, *last = NULL;
     void *back_px = NULL;
     Uint32 end;
     int restores = 0, scale;
@@ -4347,8 +4434,15 @@ static int autoplay_selftest(Uint64 seed, int ms, const char *shot, int overlay)
                 shot = NULL;
             }
         }
+        last = draw;
         SDL_Delay(4); /* faster than real time; this is a capture aid */
     }
+
+    /* Never crossed a bridge on this seed — capture the final frame anyway. Without this the
+     * run silently produces no file, which cost a round trip once: a missing screenshot reads
+     * as "the shot is broken" rather than "the condition never fired". */
+    if (shot && last)
+        SDL_SaveBMP(last, shot);
 
     printf("restored %d  fragments %d/%d  souls %d/%d  stage %d\n",
            restores, g.frags_restored, FRAGMENT_COUNT, g.souls_restored,

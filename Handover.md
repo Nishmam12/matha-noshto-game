@@ -21,20 +21,25 @@ Running log: [[INDEX]]
 
 | | |
 |---|---|
-| **State** | 692,224 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
+| **State** | 755,200 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
 | **Deadline** | 2026-09-04. **Hard stop on art/backbone work 2026-08-14** — nine days from now |
-| **Do first** | **[[Phase 07 - Asset Seam]]** — the bake pipeline. Phases 00–06 are all done |
-| **Then** | 08 (save/load) → 09 (art) → 10 (motion) → **11 is non-negotiable** |
+| **Do first** | **Decide the player-occlusion question** (below), then [[Phase 08 - Save Load]] |
+| **Then** | 10 (motion) → **11 is non-negotiable**. Phases 00–07 are done and 07 absorbed most of 09 |
 | **Biggest risk** | **Audio does not exist at all.** A softsynth from zero, plus save/load and a HUD, all still ahead of a 30-day deadline |
 
-**Phase 06 closed 2026-08-05.** Both outstanding items landed, at +0 shipping bytes:
+**The team's art is in the build as of 2026-08-05.** [[Phase 07 - Asset Seam]] built the
+PNG→header bake and pushed **37 real sprites** through it: a 4-direction 4-frame walking
+character, 10 buildings, 11 nature props. Cost **+62,976 bytes** against 684,800 still free. That
+retires four separate "does not exist" items at once — the orange square, the walk cycle, facing,
+and any animation at all.
 
-1. **The bridge-suppression negative control** (`--bridge-test`) — **200/200 bridge-bearing seeds
-   shrank the player's reachable component when bridges were suppressed.** "Bridges are
-   load-bearing" is now measured rather than argued.
-2. **Waterfalls** — river beds terrace by a new render-only `sea_dist` field, and `iso_tile`'s
-   existing side-face draw makes each step a water-coloured drop. The drops are 3 px and subtle;
-   see §8.
+> **ONE THING NEEDS A DECISION BEFORE MORE ART WORK.** The player is **routinely hidden behind
+> trees**. This is confirmed by experiment, not suspected: with props disabled the character
+> renders perfectly; with props on she is frequently invisible. A 96 px tree on a 24 px tile grid
+> occludes a 48 px character often, and **the depth sort is behaving correctly** — this is a design
+> problem, not a bug. Three options, none yet chosen: thin the trees further (a one-line change to
+> `prop_at`), draw tree sprites scaled down, or fade props that cover the player (a real feature,
+> and the one that actually solves it). See [[Phase 07 - Asset Seam]] "still not verified".
 
 **Three habits this project runs on**, learned the expensive way:
 
@@ -108,14 +113,15 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 | | |
 |---|---|
-| **`build\wayfarer.exe`** | **692,224 bytes** — 747,776 under the ship target |
-| `build\wayfarer-selftest.exe` | 727,552 bytes — **not a deliverable**, never shipped |
-| `src\main.c` | 5,382 lines, single translation unit |
+| **`build\wayfarer.exe`** | **755,200 bytes** — 684,800 under the ship target |
+| `build\wayfarer-selftest.exe` | 793,600 bytes — **not a deliverable**, never shipped |
+| `src\main.c` | ~6,500 lines, single translation unit |
+| `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. 37 sprites, 63,600 bytes of const data. Never edit by hand |
 | Warnings | zero, under `-Wall -Wextra` |
-| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–06 all done.** See [[Phase Roadmap]]. Audio, save and UI are all still untouched |
+| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–07 all done**; 07 absorbed most of 09. See [[Phase Roadmap]]. Audio, save and UI are all still untouched |
 
-> **If you are starting here: the first job is [[Phase 07 - Asset Seam]]**, the build-time PNG→header
-> bake. Nothing is half-finished behind you.
+> **If you are starting here: settle the player-occlusion question in §0, then start
+> [[Phase 08 - Save Load]].** Nothing is half-finished behind you.
 
 ### What actually works right now
 
@@ -133,9 +139,16 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
   from the rasteriser that already existed. See decisions 32–33, 35 and
   [[Phase 06 - Water And Bridges]]
 - **Isometric 2.5D renderer**: 2:1 diamonds, elevation with cliff faces, band-sweep depth sort
-- **Procedural scenery**: layered trees with round `fill_ellipse` canopies (not the earlier
-  axis-aligned lollipops), bushes, rocks, reeds, flowers, crystals, stumps — all from a per-tile
-  hash, none stored. Every prop casts a ground-contact shadow
+- **The team's baked art, through a swap seam.** `tools/bake.ps1` turns authored PNGs into
+  `src/art_data.h` at build time; nothing decodes a PNG at runtime. **A walking character**
+  (4 directions × 4 frames, driven by screen-space intent), **10 building sprites**, **11 nature
+  props**. Each category dispatches through one table — `prop_art[]`, `building_sprite_id()`,
+  `player_frames[][]` — and deleting a row falls straight back to the procedural routine, which is
+  what makes the swap reversible. See decisions 37–39 and [[Phase 07 - Asset Seam]]
+- **Procedural scenery, still present as the fallback**: layered trees with round `fill_ellipse`
+  canopies (not the earlier axis-aligned lollipops), bushes, rocks, reeds, flowers, crystals,
+  stumps — all from a per-tile hash, none stored. Flowers, crystals and stumps are *still drawn
+  this way*, because no delivered sprite matches them
 - **Procedural buildings**: clustered into up to 4 village sites rather than scattered over every
   open plot, **mean 21 per world**, 640,000 mix-and-match combinations. Roofs have a left/right face
   split (`iso_diamond_lr`) so they read as pitched; the whole facade (windows per storey, doors on
@@ -171,9 +184,8 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
   Phase 09/11. Un-gating is a one-line change once a real caller exists, and the gate is what keeps
   the +0-byte property true by construction rather than by remembering
 - **Save/load**
-- **Any animation at all.** Nothing sways, shimmers, bobs or smokes. The world is static
-- **The player is still an orange square** (18×18 at the current tile size). No layered character,
-  no walk cycle, no facing
+- **Any ambient animation.** Nothing sways, shimmers, bobs or smokes. The *character* now walks
+  (4 frames per direction), but the world around her is static
 - **Buildings do not respond to restoration.** The ruin→whole rebuild is designed but not built
 - **No worn paths between buildings.** The village reads as buildings-in-a-field, not as inhabited
 - Idle sway/breathe for Found Souls
@@ -203,21 +215,19 @@ never need saying again.
 `build/` and `.obsidian/` are gitignored. `wayfarer.exe` is therefore not in the repo — attach it
 to a GitHub Release if a playable download is wanted.
 
-> **THE TEAM'S ART HAS ARRIVED, and it is untracked and undecided.** An `assets/` directory appeared
-> during the 2026-08-05 Phase 06 part 2 session: **130 PNGs across `buildings/`, `nature/`,
-> `player/`, `magical/`, `generated/`, plus 81 Godot `.import` sidecars, 1.2 MB total.** Left
-> untracked and out of that session's commit on purpose — what to do with it is [[Phase 07 - Asset
-> Seam]]'s whole job and a decision the user has not yet been asked to make. Three things the next
-> session needs to know before touching it:
-> - **These are exactly the right kind of input** (PNG, small, pixel art) — the answer given in §9
->   was "yes, send PNGs as *bake inputs*", and this is that.
-> - **The `.import` files are Godot editor metadata and are not wanted** in any form — not shipped,
->   not baked, and probably not even committed.
-> - **The sprites are authored at 96–128 px** (`bld_house_small_01.png` is 96×96,
->   `bld_large_building.png` 128×128). Diamonds are **48×24** at `TILE 24`, so these are roughly 2–4×
->   the tile footprint. That is not necessarily wrong for a building that stands several tiles tall,
->   but **the pixel-density question in §9 is now live and blocking**: it should be settled before
->   anything is baked, or the whole set gets re-authored later.
+> **THE TEAM'S ART IS IN THE BUILD.** `assets/` holds **130 PNGs** across `buildings/`, `nature/`,
+> `player/`, `magical/`, `generated/`, plus 81 Godot `.import` sidecars, 1.2 MB total. **37 of them
+> are baked and wired** (player, nature, buildings) via `tools/bake.ps1` → `src/art_data.h`.
+> What is deliberately NOT baked, and why:
+> - **`magical/`** — 56 portal and crystal effect frames with no caller in the renderer. Baking a
+>   sprite nothing draws is pure byte cost; same rule that kept the bitmap font at +0 bytes.
+> - **`generated/`** — duplicates of the building sprites plus two sprite *sheets*.
+> - **The `.import` files** are Godot editor metadata: not shipped, not baked, and arguably should
+>   not be committed at all. That is still undecided.
+>
+> **The scale worry turned out to be unfounded**: the base unit across the set is 48 px, exactly one
+> diamond width at `TILE 24`. The team authored against the scale already shipping, so nothing
+> needed re-authoring and no resolution change was required. See §9.
 >
 > Two files at the vault root that nobody in any build session created: an empty `devlog.md`, and an
 > untracked **`tree.glb`**. See §1 above — the `.glb` is not a hypothetical risk, it is the exact
@@ -250,7 +260,13 @@ free. Full setup commands are in [`README.md`](README.md).
 .\build.ps1               # the game -> build\wayfarer.exe, prints size + delta + headroom
 .\build.ps1 -SelfTest     # separate build\wayfarer-selftest.exe with the test harness
 .\build.ps1 -Map          # also emit build\wayfarer.map (~1.5 MB) for size forensics
+
+powershell -File tools\bake.ps1   # ONLY when the art changes -> regenerates src\art_data.h
 ```
+
+**`tools\bake.ps1` is not part of a normal build.** `src\art_data.h` is committed, so a clean
+checkout compiles without ever running it. Re-run it only when a PNG under `assets\` changes, then
+commit the regenerated header. It prints the sprite count and the exact const-data byte total.
 
 `build.ps1` **exits non-zero if the binary goes over budget** — the size limit is enforced by the
 build, not by remembering to check. Self-test builds are excluded from budget tracking.
@@ -279,6 +295,7 @@ $e = ".\build\wayfarer-selftest.exe"
 & $e --region-test --seeds 30 --seed 1      # region graph structure + coverage
 & $e --reach-test  --seeds 50 --seed 1      # reachability invariant + negative control
 & $e --bridge-test --seeds 200 --seed 1     # bridges are load-bearing (suppression control)
+& $e --sprite-test                          # RLE round-trip, baked data, anchors + 2 controls
 & $e --gating-test --seeds 30 --seed 1      # walk-reachable == graph-reachable, all 4 tiers
 & $e --play-test   --seeds 50 --seed 1      # full headless playthroughs to completion
 & $e --audio-test 3000 --sfx                # callback timing under restore-beat load
@@ -292,6 +309,9 @@ $e = ".\build\wayfarer-selftest.exe"
 `--bridge-test`) — re-run fresh for this handover rather than carried forward:
 
 ```
+sprite  : PASS  round-trip 700 px -> 283 bytes -> 700 px pixel-exact; 37 sprites,
+                91,049 px from 60,029 RLE bytes (1.52x); anchors all bottom-centre;
+                both controls fire (over-long run, wrong frame size)
 bridge  : PASS  200/200 bridge-bearing seeds shrank the player's reachable
                 component when bridge decking was suppressed
 land    : PASS  30 seeds (100 also clean); both controls (drowned map,
@@ -310,7 +330,9 @@ reach   : PASS (0 failures across 50 seeds); negative control PASS; gating relax
 gating  : PASS (0 failures across 30 seeds)
 play    : PASS (0 seeds could not be completed) — still 50/50 after the waterfall terracing
 audio   : worst case 0.136 ms of a 21.333 ms deadline; 0 partial writes
-perf    : render 0.865 ms mean (2.190 ms max), frame 16.613 ms = 60.2 fps
+perf    : render 1.065 ms mean (1.931 ms max), frame 16.875 ms = 59.3 fps
+          — up 0.2 ms from 0.865 now every prop, building and the player is a
+            decoded sprite. Palette-level fog is why it is 0.2 and not 2
 ```
 
 **`--play-test` now takes ~2 minutes at 50 seeds** — the world is 1.8× the tiles it was. Do not
@@ -367,7 +389,10 @@ this as a map of the file's *order* and trust the grep, not the table.
 | 1679 | **Heights** | `world_heights` — derived, render-only; island/rock/ocean/**bridge**/**river (terraced)** branches. Bridge is checked *before* river; see decision 35 |
 | 1785 | World init | `game_init` — wipe, generate, **rivers**, buildings, flood-fill spawn, verify, derive heights |
 | 1883 | **Perf** | `Perf`, counters, `perf_report`. All behind `WAYFARER_PERF` |
-| 1949 | Graphics | `fill_rect` (1954), `vspan`, `iso_tile` (2232), `iso_diamond`, `iso_diamond_lr`, `iso_ring`, `fill_ellipse`, `blit_scale`, `tile_hash`, `fog_lerp` (2275), `tile_detail` |
+| 1949 | Graphics | `fill_rect`, `vspan`, `iso_tile`, `iso_diamond`, `iso_diamond_lr`, `iso_ring`, `fill_ellipse`, `blit_scale`, `tile_hash`, `fog_lerp`, `tile_detail` |
+| ~2545 | **Baked sprites** | `art_stream_ok` (self-test only), `art_palette`, `draw_sprite`. Anchor = bottom-centre; fog applied to the palette once per draw |
+| ~1745 | **Building art seam** | `art_bld_small`/`art_bld_large`, `building_sprite_id` — read by `world_heights`, `tile_colour` AND `draw_building`, deliberately one decision |
+| ~3140 | **Prop art seam** | `prop_art[]` table; `draw_prop` dispatches to a baked sprite or falls back to the procedural routine |
 | 1997 | **Bitmap font** | `FONT_*` constants, the flat `FONT_5X7` table (2007), `draw_glyph` (2068), `draw_text`, `draw_text_shadow`. All inside `#if WAYFARER_SELFTEST` |
 | 2560 | **House parts** | `BV_*` variant accessors, wall/roof palettes; `draw_building` (2715) — roof face-split, facade derived from the wall-top diamond |
 | 2380 | **Props** | palettes, `draw_tree`/`bush`/`rock`/`reed`/`flower`/`crystal`/`stump` (all with contact shadows), `prop_at`, `draw_prop` |
@@ -401,6 +426,8 @@ this as a map of the file's *order* and trust the grep, not the table.
 | `LAND_ROCK_T` | **0.74** | Outcrop threshold. Raised once already — 0.68 covered ~40% of frame in rock. `--land-test` now bounds this at 40% |
 | `RIVER_COUNT` / `RIVER_SRC_MIN` | **2 / 10 (new)** | Rivers per world; a source must be ≥10 BFS hops from the sea or the "river" is a puddle on the beach |
 | `BRIDGE_SPACING` | **9 (new)** | River tiles between bridge attempts. A bridge is taken only where there is open ground on both sides, with a fallback sweep so a spacing accident does not burn a whole world |
+| `WALK_FRAMES` / `WALK_FPS` | **4 / 8.0 (new)** | Character walk cycle. `anim` resets to 0 on key release so a standing player shows frame 0 rather than freezing mid-stride |
+| Prop density (`prop_at`) | **tree 12.5%, bush 9.4%, stump 6.3%, flower 18.8%** | Was 22/15.6/6.3/15.6 — **retuned because baked sprites are far bigger than the procedural props they replaced.** Cumulative thresholds on a 0..31 roll |
 | `RIVER_FALL_STEPS` / `RIVER_FALL_EVERY` | **4 / 5 (new)** | Waterfall terracing: 4 drops between a source and the mouth, one per 5 BFS hops of `sea_dist`. **`EVERY` was measured, not guessed** — at 8 a river reached only 2–3 of its 4 steps. Read as *depth*, see decision 35 |
 | `VILLAGE_SITES` / `VILLAGE_RADIUS` / `VILLAGE_SPACING` | **4 / 12 / 29** | All in *tiles*, so all re-derived by hand for `TILE` 24. Radius/spacing × 32/24 keeps a village the same physical size; sites raised because 3 in a 1.8× larger world read as an empty island |
 | `BUILDING_TARGET` / `BUILDING_MAX` | **22** / 40 | Raised with the world size; mean is 21 per world. `BUILDING_MAX` stays the array bound |
@@ -545,6 +572,27 @@ New decisions from the Phase 06 part 2 session (2026-08-05):
     and fails only if it never once observes the reachable component shrink. Same "a check that has
     never rejected anything proves nothing" bar, applied to a measurement.
 
+New decisions from the Phase 07 session (2026-08-05):
+
+37. **Baked sprites use an 8-bit index against a PER-SPRITE palette with NO quantisation, not the
+    ≤16-entry 4 bpp [[Art Bible]] §8 specified.** Measured on the real art: 7–49 colours per
+    sprite, mean 18, with 36 of 93 over 16. 4 bpp was never viable. Quantising toward a shared
+    table would have saved a few KB and cost visible fidelity on pixel art — the wrong trade when
+    684,800 bytes are free. Sprites are also **trimmed to their opaque bounding box** before
+    encoding, since 71% of the authored canvas is transparent; that is the biggest single saving
+    and it makes the anchor honest.
+38. **The anchor is the ground-contact point: bottom-centre of the trimmed box.** Deliberately the
+    same `(cx, by)` convention `draw_tree`/`draw_prop` already used, so a caller never needs to
+    know whether it is calling a procedural routine or a sprite. **This is a contract** — a
+    teammate authors against it, and changing it means re-baking and possibly re-authoring.
+39. **A building sprite is the WHOLE building, so the ground under it must be flattened — and that
+    decision is consulted in three places from ONE function.** Walls were never drawn by
+    `draw_building`; footprint tiles get a wall height from `world_heights` and the tile rasteriser
+    extrudes them. A sprite carries its own walls, so leaving the extrusion stood a 96 px cottage
+    on a 42 px plinth. `building_sprite_id()` is therefore read by `world_heights`, `tile_colour`
+    **and** `draw_building`, so there is one decision rather than three that can drift. Footprint
+    tiles stay `solid`: collision and reachability are untouched, and `height` remains render-only.
+
 ---
 
 ## 7. Traps — each of these already cost time once
@@ -659,6 +707,29 @@ true and are not repeated in full here — see git history at `545598f` for verb
   wrong — only 2–3 of 4 steps materialised — and that showed up instantly in the numbers and not at
   all by eye. **Probe the data for existence, use the screenshot for judgement.**
 
+**New in the Phase 07 session (2026-08-05):**
+
+- **Writing the decoder's round-trip test AFTER wiring it visually cost a detour, exactly as that
+  phase file predicted.** Sprites were wired first; a screenshot showed bushes rendering paler than
+  their source; the next stretch went on suspecting a palette off-by-one. `--sprite-test` then
+  proved the decoder pixel-exact in one run, and the real causes were mundane. **When a phase file
+  names a test to write first, write it first** — the cost of ignoring it is paid in
+  screenshot round trips, which are the slowest debugging loop this project has.
+- **Retuning art means retuning everything that was calibrated against the OLD art's size.**
+  `prop_at`'s 22% tree rate read as scattered woodland with ~20 px procedural blobs and as a solid
+  canopy with 64×96 sprites — hiding the terrain, the buildings and the player. Nothing warns
+  about this: density is not a collision input, so no test has an opinion, and it is only visible
+  on screen.
+- **"The sprite isn't drawing" and "the sprite is behind something" look identical.** The character
+  was invisible in several captures. Rather than keep zooming, one build with props skipped settled
+  it instantly: she rendered perfectly, so the depth sort was right and the trees were simply in
+  front. **A one-build ablation beats a third screenshot** when the question is "is it absent or
+  occluded".
+- **A running or just-exited `wayfarer.exe` still blocks the relink**, and it fired again this
+  session with no game open — the previous `--frames` run had not fully released the file. It is
+  transient: `Get-Process -Name wayfarer` showed nothing and an immediate retry linked fine. Do not
+  go looking for a code fault.
+
 ---
 
 ## 8. Verified vs NOT verified
@@ -721,8 +792,31 @@ controls; audio callback timing; render cost). New this session:
   `world_heights` has never been a collision input, but the guarantee was re-**run** not re-argued:
   bridge 200/200, land 30/30 + both controls, reach 50/50 + control, gating 30/30, play **50/50**.
 
+- **The sprite decoder is pixel-exact, proven independently of the bake tool.** `--sprite-test`
+  builds a pattern in C (a >128 run, alternating singles, an exactly-128 run, a lone tail pixel),
+  encodes it, decodes it through the same walk `draw_sprite` uses, and compares. Deliberately not
+  checked against the baker's own output, which would repeat `--font-test`'s known blind spot.
+  Both negative controls fire.
+- **All 37 baked streams decode to exactly `w*h`** with every index inside their own palette.
+- **The art bake costs 62,976 shipping bytes and did not weaken anything.** Re-**run**, not
+  re-argued, after the seam landed: sprite, iso, font, fog, rng, move, land (30 + both controls),
+  village (30 + both controls), region (30), reach (50 + control), gating (30), bridge (200/200),
+  **play 50/50**.
+
 ### NOT verified — be honest about these
 
+- **THE PLAYER IS ROUTINELY HIDDEN BEHIND TREES, and this is the top open item.** Confirmed by
+  ablation: props off, she renders perfectly; props on, she is frequently invisible. The depth sort
+  is *correct* — a 96 px tree on a 24 px tile grid simply covers a 48 px character often. Needs a
+  decision (thin the trees, scale them down, or fade props over the player), not a bug fix.
+- **The bush sprite carries a magenta base disc** authored into the art, which reads as a halo on
+  grass. Left alone rather than silently repainted — it is the teammates' art and should go back to
+  whoever drew it.
+- **No test proves a sprite lands on the right tile in WORLD terms.** `--sprite-test` checks the
+  anchor is bottom-centre of its own box; that `draw_building` passes the right screen point is
+  screenshot-verified only.
+- **Nobody has played with the art in.** Every visual judgement this session is from screenshots,
+  including "the village reads as a village" and "the fog reveal looks better with real art".
 - **The waterfall drops are 3 px and nobody has judged them.** The steps are confirmed present in
   the data and the channel now reads as a channel with banks, but whether a 3 px drop reads as
   *falling water* to a player is unjudged. [[Phase 10 - Motion]]'s shimmer is what would sell it;
@@ -784,8 +878,9 @@ controls; audio callback timing; render cost). New this session:
 | Landform generation method | **RESOLVED, this session** — radial height field + layered noise, not a cave. See decision 16 |
 | Building placement pattern | **RESOLVED, this session** — clustered village sites, not uniform scatter. See decision 17 |
 | Fog destination colour | **RESOLVED, this session, but tuned by eye and unmeasured** — light haze, `FOG_KEEP` contrast preservation. See decision 19 and Phase 05 |
-| Asset pipeline for team-authored art | **RESOLVED in principle** — build-time bake to a compiled-in header, never runtime load (decisions 20 and 34, [[Art Bible]] §8, Phase 07). **The bake script still does not exist and nothing has been baked — but the art has now ARRIVED**: 130 PNGs in an untracked `assets/`, see §2. This is no longer hypothetical work |
-| **"Lacks the pixelated game feel"** | **OPEN, and now BLOCKING.** Raised by the user 2026-08-05. The renderer draws 960×540 upscaled ×2 — a fairly *fine* pixel grid, so the world reads smooth rather than chunky. The cheapest lever is dropping `LOGICAL_W`/`LOGICAL_H` (e.g. 640×360 at ×3) so every pixel is physically bigger, plus tighter palette discipline. The advice was "try that before anyone draws art" — **art has since arrived anyway** (§2), authored at 96–128 px against 48×24 diamonds. **Settle this before baking**, or the whole set gets re-authored later |
+| Asset pipeline for team-authored art | **RESOLVED AND BUILT, 2026-08-05.** `tools/bake.ps1` → `src/art_data.h`, committed, compiled in, nothing loaded at runtime. 37 of the team's 130 sprites are wired; `magical/` (56 frames) is baked-out until something calls it. See decisions 37–39 and [[Phase 07 - Asset Seam]] |
+| **Player occlusion behind props** | **OPEN, and the top item.** A 96 px tree covers a 48 px character often enough to matter; the depth sort is correct. Thin the trees, scale them, or fade props over the player. See §0 |
+| **"Lacks the pixelated game feel"** | **LARGELY ANSWERED BY THE ART, 2026-08-05.** The worry was that 960×540 ×2 reads too smooth. In practice the delivered pixel art supplies the chunkiness the procedural shapes lacked, and it was authored against a 48 px diamond — the scale already shipped — so **no re-authoring was needed and no resolution change was required.** Dropping `LOGICAL_W`/`LOGICAL_H` remains available as a taste lever, but it is no longer blocking anything |
 | **Input orientation** | **RESOLVED, 2026-08-05** — screen-aligned, `dd8cfef`. See decision 28 |
 | Camera easing | **RESOLVED in mechanism, OPEN in feel** — deadzone + exponential ease shipped, but `CAM_DEADZONE`/`CAM_EASE` are first guesses nobody has driven by hand |
 | **Art scale** | **RESOLVED, 2026-08-05** — `TILE` 24 with everything authored through `PX()`. Whether 24 is the *right* number is still a judgement call; it is now a one-line change to try another |
@@ -819,11 +914,21 @@ be re-derived:
 
 ### The size finding, restated with current numbers
 
-Everything built across both sessions this cycle — the island generator, village clustering,
-`fill_ellipse`, contact shadows, the roof face split, and the fog rewrite — cost **1,536 bytes**
-(689,152 → 690,688). All game logic ever written for this project remains a rounding error next to
-SDL2. **Bytes are still not the constraint.** Authoring judgement is — see the traps section on
-tuning by guess-and-rebuild, which cost real session time this cycle for zero byte cost.
+**The picture changed on 2026-08-05, and in the expected direction.** All game *logic* ever written
+— the island generator, village clustering, elevation, seven kinds of procedural prop,
+mix-and-match buildings, the fog rewrite, a bitmap font, a tuning overlay, screen-aligned input, an
+eased camera, rivers, bridges, waterfalls, and six test harnesses with negative controls — still
+comes to about **23 KB**, a rounding error next to SDL2's ~664 KB.
+
+**Art is the first thing to cost real bytes: 62,976 for 37 sprites**, roughly 2.7× everything else
+ever written. It is still only 8% of the free space, and the remaining 93 unbaked sprites would fit
+several times over. So the conclusion is unchanged in substance — **bytes are not the constraint** —
+but the *shape* is now worth knowing: if anything ever threatens the limit it will be assets, not
+code, and the lever is which sprites get baked, not how the game is written.
+
+Authoring judgement remains the real cost. This session's expensive mistakes were writing a test
+after the code it was meant to de-risk, and forgetting that constants calibrated against small
+procedural props do not survive being handed 96 px sprites. Neither cost a byte.
 
 ---
 
@@ -895,11 +1000,14 @@ routed through `PX()`, grid grown to 108×60), and the **houses were fixed** (`b
 had been drawn half a tile off its own walls since buildings landed, which also put the windows on
 the roof).
 
-**Start here: [[Phase 07 - Asset Seam]]** — the build-time PNG→`src/assets.h` bake, which does not
-exist yet and which nothing has been baked through. After that: save/load, the remaining placeholder
-art, and motion (Phases 08–10), all timeboxed, with a **hard stop on 2026-08-14** before the
-ship-critical remainder (Phase 11: audio, font-dependent HUD, QA, submission) takes over regardless
-of how much art work is finished.
+**Phase 07** (the bake pipeline **and** 37 of the team's real sprites, +62,976 bytes) landed the
+same day the art arrived, which absorbed most of what Phase 09 was holding.
+
+**Start here: settle the player-occlusion question** (§0 — a 96 px tree hides a 48 px character,
+and the depth sort is correct), then **[[Phase 08 - Save Load]]**. After that: motion (Phase 10) and
+the rest of the art work — the restoration rebuild and worn paths are what remain of Phase 09 —
+all timeboxed, with a **hard stop on 2026-08-14** before the ship-critical remainder (Phase 11:
+audio, font-dependent HUD, QA, submission) takes over regardless of how much art work is finished.
 
 **Nine days to that hard stop.** Audio is a softsynth from zero and is completely untouched; so are
 save/load and any on-screen HUD. If something has to give, take it from [[Cut List]].

@@ -11,7 +11,9 @@ sits where it does in the sequence, what "done" means, exactly which functions a
 and how it gets verified. Read the phase file before starting its work — don't re-derive the plan
 from memory each session.
 
-> **Picking this up cold? Phases 00–06 are all DONE. Start at Phase 07.**
+> **Picking this up cold? Phases 00–07 are all DONE, and 07 absorbed most of 09.** The team's real
+> art is in the build. Start at Phase 08 (save/load) — but read Phase 07's "still not verified"
+> first: the player is routinely hidden behind trees, and that needs a decision.
 
 **Deadline: 2026-09-04.** Today: 2026-08-05. **Hard stop on art/backbone work: 2026-08-14** — Phase
 11 (ship-critical) begins on that date regardless of how much of Phases 03–10 is finished, because
@@ -31,9 +33,9 @@ beautiful, unfinished game scores worse than a plain, complete one.
 | — | **House geometry fix** (unplanned) | **DONE** — `b4bf446`, +512 bytes | — | Not a planned phase. The user reported the houses as "wrong size and wrong geometry, a mess overall". The roof had been drawn half a tile off its own walls since buildings landed, which also put the windows on the roof; walls were half the height the footprints needed |
 | 05 | [[Phase 05 - Verification Debt]] | **DONE** — `4847bf5`, +0 bytes | 01, 02 | `--land-test` and `--fog-test` didn't exist. Cheapest to write while the systems they test are still fresh, and before more is built on top of them |
 | 06 | [[Phase 06 - Water And Bridges]] | **DONE** — `e42f2f4` (rivers + bridges) + part 2 (waterfalls, `--bridge-test`), +0 bytes | 01, 05 | Needs the island's water body to exist (01) and needs its own reachability extension tested (05's discipline) before rivers can cut through walkable ground |
-| 07 | [[Phase 07 - Asset Seam]] | Planned | 03 | The bake pipeline's output needs to be *judged* against something, which means the tuning overlay (03) should exist first |
+| 07 | [[Phase 07 - Asset Seam]] | **DONE** — bake pipeline + 37 real sprites wired, +62,976 bytes | 03 | The bake pipeline's output needs to be *judged* against something, which means the tuning overlay (03) should exist first |
 | 08 | [[Phase 08 - Save Load]] | Planned | — | Independent of the art work; scheduled here because it's cheap, high-value for a team, and Week 5 work worth pulling forward |
-| 09 | [[Phase 09 - Placeholder Art]] | Planned | 03, 07 | The actual art pass (buildings, restoration rebuild, player, paths) — needs the seam (07) to exist so it's placed correctly relative to the team's future handoff |
+| 09 | [[Phase 09 - Placeholder Art]] | **MOSTLY ABSORBED BY 07** — buildings, player and props are real art already. Remaining: restoration rebuild (ruin→whole), worn paths, **and the player-occlusion decision** | 03, 07 | The actual art pass — the team's handoff arrived early, so 07 did the placement work this phase was holding |
 | 10 | [[Phase 10 - Motion]] | Planned | 09 | Motion on unfinished art just animates the wrong thing; static art should be right first |
 | 11 | [[Phase 11 - Ship Critical]] | **Begins 2026-08-14 regardless** | — | Audio, font-dependent HUD, save wiring, QA, submission. Not negotiable against the deadline |
 
