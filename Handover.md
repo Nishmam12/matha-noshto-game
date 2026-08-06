@@ -1,7 +1,7 @@
 ---
 tags: [process, handover, wayfarer]
 updated: 2026-08-06
-exe_size_bytes: 768000
+exe_size_bytes: 774144
 ---
 
 # Handover — Wayfarer
@@ -43,7 +43,7 @@ expected, not a regression.
 | | |
 |---|---|
 | **State** | 774,144 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
-| **Branch** | **`feat/phase-12-dream-realm`**. `main` is at `ae788b4`. Working tree has this handover's own edits plus a `.gitignore` fix — see the Agent Log note above before committing broadly |
+| **Branch** | **`feat/phase-12-dream-realm`**, pushed through `367a4f9` (this handover's own commit may be one ahead — check `git log`). `main` is at `ae788b4`. Working tree clean |
 | **Deadline** | 2026-09-04. **Hard stop on art/backbone work 2026-08-14** — eight days from now |
 | **Do first** | **Phase 12 is DONE — all 11 tasks, all 5 slices.** Next real work is [[Phase 08 - Save Load]], or Phase 09's three leftover items (restoration rebuild, worn paths, ground marks) if another agent hasn't already started them — check the Agent Log above first |
 | **Then** | Phase 08 → 10 (motion) → **11 is non-negotiable** |
@@ -174,12 +174,17 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 ### What actually works right now
 
-- **TWO landmasses in one grid, and a portal between them** — [[Phase 12 - Dream Realm]] slices
-  1–2. The grid is **108×104**: overworld rows 0–59, an always-solid void band 60–63, dream
-  archipelago 64–103. `world_gen` runs `gen_sector` twice, normalising `fy` *inside* each row
-  range so the radial term makes two islands rather than one lobed one, and giving each its own
-  water rim so they share no tile edge. `dream_sector(ty)` is the only thing that knows where the
-  sector is
+- **TWO landmasses in one grid, and a portal between them** — [[Phase 12 - Dream Realm]], now
+  **entirely done, all 5 slices**. The grid is **108×104**: overworld rows 0–59, an always-solid
+  void band 60–63, dream archipelago 64–103. `world_gen` runs `gen_sector` twice, normalising `fy`
+  *inside* each row range so the radial term makes two islands rather than one lobed one, and
+  giving each its own water rim so they share no tile edge. `dream_sector(ty)` is the only thing
+  that knows where the sector is
+- **8 DREAM SHARDS FEED A DREAM WELL THAT UNLOCKS ITS OWN FOUND SOUL.** Shards live in their own
+  array — never `ents[]`, so `game_complete`'s all-entities mask is untouched. Feeding
+  `SHARD_REQUIRED` (6 of 8) makes the Well's Soul redeemable, which is a pure function of
+  `shards_held` rather than a stored lock bit. `--play-test` is 50/50 with her unlocked and
+  redeemed on every seed. See decisions 53–56 and [[Phase 12 - Dream Realm]] Evidence, slice 5
 - **THE DREAM REALM LOOKS LIKE A DIFFERENT PLACE, and it cost almost nothing.** `dream_shift()` is
   the one definition of the biome's colour; `tools/bake.ps1` carries the same formula because a
   sprite palette is recoloured at *bake* time, and `--sprite-test` checks every baked `_DREAM`
@@ -276,13 +281,15 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 Remote: **`https://github.com/Nishmam12/matha-noshto-game`** — private, branch `main`.
 
-**Current branch: `feat/phase-12-dream-realm`.** Pushed through `87fcbd3`. Everything from
-`50e8427` (task 8) onward — task 9, slice 5, and this handover's own commit — is **local only as
-of this session**; push before assuming it is backed up anywhere. `main` is at `ae788b4`, pushed.
+**Current branch: `feat/phase-12-dream-realm`, pushed through `367a4f9`.** `main` is at `ae788b4`,
+also pushed. Working tree is clean as of this handover's own commit — verify with `git status`
+before trusting that, since this note has needed correcting before.
 
 ```
-[slice 5 + this handover's commit go here once made]
-87fcbd3  Handover for slice 4: the travel gap is closed  <- last PUSHED commit
+367a4f9  Phase 12 task 10: the first UI, and the gate it exposed  <- HEAD, PUSHED
+                          (title undersells it - the body covers tasks 8, 9, 10 AND 11.
+                           Not amended; ask first if you want the title fixed.)
+87fcbd3  Handover for slice 4: the travel gap is closed
 3d03421  Phase 12 task 9: the dream realm stops being scenery
 50e8427  Phase 12 task 8: the first UI, and the gate it exposed
 cb74bf2  Handover and devlog for slice 3, and the trap it taught
@@ -297,8 +304,9 @@ ae788b4  Handover for a fresh chat: the art is in, and one decision is waiting  
 `.import` sidecars. The sidecars are editor metadata that nothing reads; whether they should be in
 the repo at all is still undecided.
 
-**Do not assume pushed == committed.** This handover has twice needed correcting on exactly this
-point. Check `git log origin/feat/phase-12-dream-realm..HEAD` before claiming anything is backed up.
+**Do not assume pushed == committed, or committed == pushed.** This handover has needed correcting
+on exactly this point more than once. Check `git log origin/feat/phase-12-dream-realm..HEAD` before
+claiming anything is backed up, and `git status` before claiming the tree is clean.
 
 **Do not add `Co-Authored-By` trailers to commits.** This was asked for explicitly and one had to
 be stripped and force-pushed once already. It is recorded in persistent memory (§10) so it should
@@ -1456,11 +1464,11 @@ controls; audio callback timing; render cost). New this session:
 | Landform generation method | **RESOLVED, this session** — radial height field + layered noise, not a cave. See decision 16 |
 | Building placement pattern | **RESOLVED, this session** — clustered village sites, not uniform scatter. See decision 17 |
 | Fog destination colour | **RESOLVED, this session, but tuned by eye and unmeasured** — light haze, `FOG_KEEP` contrast preservation. See decision 19 and Phase 05 |
-| Asset pipeline for team-authored art | **RESOLVED AND BUILT, 2026-08-05.** `tools/bake.ps1` → `src/art_data.h`, committed, compiled in, nothing loaded at runtime. 37 of the team's 130 sprites are wired; `magical/` (56 frames) is baked-out until something calls it. See decisions 37–39 and [[Phase 07 - Asset Seam]] |
+| Asset pipeline for team-authored art | **RESOLVED AND BUILT, 2026-08-05, extended through Phase 12.** `tools/bake.ps1` → `src/art_data.h`, committed, compiled in, nothing loaded at runtime. **64 records now baked** (was 37): the original 37 plus 16 `fx_portal` and `fx_well` frames and 11 dream palette variants. `magical/`'s remaining frames (`fx_rift`, `fx_crystal`) stay unbaked — nothing calls them. See decisions 37–39, 46–47 and [[Phase 07 - Asset Seam]] |
 | **Player occlusion behind props** | **RESOLVED AND SHIPPED 2026-08-05** — props fade over the player, `--fade-test`, +0 bytes, seen on screen. Carried as the top open item by four handovers. See decision 40 |
 | **The bush's magenta base disc** | **RESOLVED AND SHIPPED 2026-08-05** — 163 px stripped at bake, real contact shadow drawn instead, guarded by `--sprite-test`. See decision 41 |
 | **Rock outcrops as pale floating cubes** | **RESOLVED AND SHIPPED 2026-08-05** — stone tops out at luminance 74 against grass at 78, guarded by `--fog-test`. Outcrops kept, so no generator change and no re-argued proof. See decision 42 |
-| **A second biome** | **RESOLVED 2026-08-05 — new direction, approved and specced.** A portal in the `TERRAIN_DARK` region to a Lumiara-style dream realm, timeboxed into five separately shippable slices. See [[Phase 12 - Dream Realm]] |
+| **A second biome** | **RESOLVED, SPECCED AND SHIPPED, 2026-08-05/06.** A portal in the `TERRAIN_DARK` region to a Lumiara-style dream realm — all 5 slices, all 11 tasks built, tested and committed. `--play-test` 50/50 with the whole loop (travel, shards, the Well) exercised. See [[Phase 12 - Dream Realm]] |
 | **"Lacks the pixelated game feel"** | **LARGELY ANSWERED BY THE ART, 2026-08-05.** The worry was that 960×540 ×2 reads too smooth. In practice the delivered pixel art supplies the chunkiness the procedural shapes lacked, and it was authored against a 48 px diamond — the scale already shipped — so **no re-authoring was needed and no resolution change was required.** Dropping `LOGICAL_W`/`LOGICAL_H` remains available as a taste lever, but it is no longer blocking anything |
 | **Input orientation** | **RESOLVED, 2026-08-05** — screen-aligned, `dd8cfef`. See decision 28 |
 | Camera easing | **RESOLVED in mechanism, OPEN in feel** — deadzone + exponential ease shipped, but `CAM_DEADZONE`/`CAM_EASE` are first guesses nobody has driven by hand |
@@ -1625,11 +1633,10 @@ first**, another agent may already be on this). **Hard stop 2026-08-14**, after 
 > **Do not re-raise the schedule.** It was put to the user on 2026-08-05 with the full arithmetic;
 > they considered it and said there is time. That is their call and it has been made.
 
-**Nine days to that hard stop.** Audio is a softsynth from zero and is completely untouched; so are
-save/load and any on-screen HUD. If something has to give, take it from [[Cut List]].
-
-**Schedule reality, unchanged in substance from the last handover:** today is 2026-08-05; the
-deadline is 2026-09-04. Audio (a softsynth from zero) and the rest of Week 5 (save/load, HUD, win
-state, game-feel pass) are both completely untouched. **Judging order is finished → under size →
-fun.** If something has to give, take it from [[Cut List]] — the most likely candidate remains
-cutting Kindle and shipping Wade + Climb only.
+**Schedule reality, as of this handover:** today is **2026-08-06**; the hard stop on art/backbone
+work is **2026-08-14** — **eight days from now**; the contest deadline is **2026-09-04**. Phase 12
+finishing in one calendar day is ahead of where the arithmetic assumed it would be, not behind —
+this is not a reason to relax, since audio (a softsynth from zero), save/load, and any on-screen
+HUD are all **still completely untouched**. **Judging order is finished → under size → fun.** If
+something has to give, take it from [[Cut List]] — the most likely candidate remains cutting Kindle
+and shipping Wade + Climb only.
