@@ -621,6 +621,12 @@ typedef struct {
 #define VILLAGE_RADIUS  12  /* tiles from a site centre to its outermost plot */
 #define VILLAGE_SPACING 29  /* minimum tiles between two site centres */
 #define BUILDING_TARGET 22
+/* Furthest apart two house centres can be and still get a connecting path.
+ * Larger than any plausible intra-cluster pair (centres within a cluster sit
+ * at most ~2x VILLAGE_RADIUS apart) so lanes reliably join a village's houses,
+ * yet well under the gap between clusters — a path between two villages only
+ * happens when the seeds place them nearly touching, and reads as a lane. */
+#define PATH_CLUSTER    24
 /* Wall height per storey, and the plinth under the first one.
  *
  * Both were roughly doubled after the roof-alignment fix made the real
@@ -692,6 +698,12 @@ typedef struct {
      * river and gives no gradient to terrace with. Never consulted by
      * collision, the region graph or the verifier. */
     Uint8  sea_dist[WORLD_H][WORLD_W];
+    /* Worn dirt path tile, laid down by place_paths between the village houses.
+     * RENDER-ONLY in exactly the bridge sense: a path is ordinary open ground
+     * to every traversal, so nothing that measures reachability, gating or
+     * completability can observe it. Also rng-free by construction — see the
+     * note on place_paths — so adding paths never shifts the world stream. */
+    Uint8  path[WORLD_H][WORLD_W];
     /* The two ends of the portal pair, as tile indices, or -1 before placement.
      *
      * NOT render-only, and deliberately called out as the exception. Unlike height, bld_at, surf,
@@ -992,6 +1004,14 @@ static void world_gen(World *w, Rng *rng)
  * shrinks the reachable area — see bridge_negative_test. Always 0 outside
  * that test, so this changes nothing about normal generation. */
 static int g_suppress_bridges = 0;
+/* --path-test only: skips place_paths so the negative control can confirm the
+ * checker actually notices when no house has a path to its door. Always 0
+ * outside that test. */
+static int g_suppress_paths = 0;
+/* --ground-test only: skips the Phase 09 new mark kinds (tile_tuft, tile_mortar,
+ * tile_pebbles) so the negative control can diff a render with and without
+ * them. Always 0 outside that test. */
+static int g_suppress_marks = 0;
 #endif
 static void place_rivers(World *w, Rng *rng, int *dist, int *queue)
 {
@@ -1243,6 +1263,83 @@ static void place_buildings(World *w, Rng *rng)
     }
 }
 
+/* Phase 09: worn paths between the clustered houses. A village of identical
+ * boxes in open field reads as an exhibit; a dirt strip from every door, plus
+ * a connecting line to each house's nearest neighbour, is what makes the same
+ * houses read as lived in.
+ *
+ * RENDER-ONLY, like bridge: a path tile is ordinary open ground to collision,
+ * the region graph and the verifier, so no traversal can observe one.
+ *
+ * Deliberately rng-free. Every length and direction comes from the building's
+ * own placed position and variant, so laying paths consumes nothing from the
+ * terrain stream — a world regenerated after this phase keeps byte-identical
+ * geometry, and the existing 50-seed completability proof is untouched rather
+ * than merely re-run.
+ *
+ * Guaranteed to reach the ground: footprints carry a permanently-open two-tile
+ * skirt. Each building demands its own skirt all-open at placement, and two
+ * skirts can never overlap (a later house would fail its own skirt test), so
+ * the first two tiles of the door strip are always open ground. */
+static void place_paths(World *w)
+{
+    int i;
+    for (i = 0; i < w->bld_count; i++) {
+        const Building *b = &w->bld[i];
+        int dx0 = b->x + b->w, dy0 = b->y + b->h; /* just off the front corner */
+        int cx = b->x + b->w / 2, cy = b->y + b->h / 2;
+        Uint32 hv = b->variant * 2654435761u
+                  + (Uint32)(b->x * 17 + b->y * 31 + b->w * 7 + b->h * 13);
+        int j, best = -1, bestd = PATH_CLUSTER * PATH_CLUSTER + 1;
+
+        /* Door strip: up to five tiles straight out from the front corner (the
+         * +x/+y corner, which is where the facade's door draws). */
+        for (j = 0; j < 2 + (int)(hv & 3); j++) {
+            int tx = dx0 + j, ty = dy0 + j;
+            if (tx < WORLD_W && ty < WORLD_H && !w->solid[ty][tx]
+                && w->surf[ty][tx] != SURF_RIVER && w->surf[ty][tx] != SURF_OCEAN)
+                w->path[ty][tx] = 1;
+        }
+
+        /* Connecting strip to the nearest house within the same cluster: a
+         * Bresenham run between the two front corners, marking only open ground
+         * so a path never eats into a wall or a cliff. Starting at the same
+         * corner the door strip uses makes the two merge into one lane. */
+        for (j = 0; j < w->bld_count; j++) {
+            const Building *o = &w->bld[j];
+            int dx, dy, d;
+            if (i == j)
+                continue;
+            dx = (o->x + o->w / 2) - cx;
+            dy = (o->y + o->h / 2) - cy;
+            d = dx * dx + dy * dy;
+            if (d < bestd) {
+                bestd = d;
+                best = j;
+            }
+        }
+        if (best >= 0 && bestd <= PATH_CLUSTER * PATH_CLUSTER) {
+            const Building *o = &w->bld[best];
+            int x = dx0, y = dy0;
+            int ex = o->x + o->w, ey = o->y + o->h;
+            int adx = ex - x < 0 ? x - ex : ex - x;
+            int ady = ey - y < 0 ? y - ey : ey - y;
+            int sx = ex < x ? -1 : 1, sy = ey < y ? -1 : 1;
+            int err = adx - ady;
+            while (x != ex || y != ey) {
+                int e2;
+                if (x >= 0 && y >= 0 && x < WORLD_W && y < WORLD_H
+                    && !w->solid[y][x]
+                    && w->surf[y][x] != SURF_RIVER && w->surf[y][x] != SURF_OCEAN)
+                    w->path[y][x] = 1;
+                e2 = err * 2;
+                if (e2 > -ady) { err -= ady; x += sx; }
+                if (e2 < adx)  { err += adx; y += sy; }
+            }
+        }
+    }
+}
+
 /* GRAPH ADJACENCY FOR A TILE: the four orthogonal neighbours, plus — once Phase 12's portal is
  * placed — its paired tile. Writes up to 5 indices into `out` and returns the count.
  *
@@ -1463,6 +1560,34 @@ static void regions_depth(const World *w, int *depth)
                 queue[tail++] = i;
             }
         }
+    }
+}
+
+/* After regions_build: assign every building the region of its closest open neighbour.
+ * Building footprints are solid and therefore not regioned themselves, but the
+ * restoration-driven rebuild needs to know which region owns each building. */
+static void buildings_assign_regions(World *w)
+{
+    int i, dx, dy;
+    for (i = 0; i < w->bld_count; i++) {
+        Building *b = &w->bld[i];
+        int best_r = REGION_NONE;
+        int best_d = 999;
+        /* Search a small 5-tile ring around the footprint; the placement rule
+         * guarantees an open tile within 2 tiles on every side. */
+        for (dy = -2; dy <= (int)b->h + 1; dy++) {
+            for (dx = -2; dx <= (int)b->w + 1; dx++) {
+                int tx = (int)b->x + dx;
+                int ty = (int)b->y + dy;
+                if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H) continue;
+                if (w->solid[ty][tx]) continue;
+                int d = dx*dx + dy*dy;
+                if (d < best_d && w->region[ty][tx] != REGION_NONE) {
+                    best_d = d; best_r = w->region[ty][tx];
+                }
+            }
+        }
+        b->region = (Uint8)best_r;
     }
 }
 
@@ -2572,6 +2697,10 @@ static int game_init(Game *g, Rngs *rngs)
      * either of them walls off. */
     place_rivers(&g->w, &rngs->terrain, sc.dist, sc.queue);
     place_buildings(&g->w, &rngs->terrain);
+#if WAYFARER_SELFTEST
+    if (!g_suppress_paths)
+#endif
+        place_paths(&g->w);
     /* And the portal, for the same reason and in the same window: before the flood fill and the
      * verifier, so a layout it cannot serve is rejected and regenerated by machinery that already
      * exists (decision 13). From here on, tile_neighbours reports the portal edge to every
@@ -2671,6 +2800,9 @@ static int game_init(Game *g, Rngs *rngs)
         regions_depth(&g->w, depth);
         g->gen_attempts = world_place_and_verify(&g->w, rngs, depth, g->ents, g->shards);
     }
+
+    /* Assign each building to its containing region — needed for the restoration rebuild. */
+    buildings_assign_regions(&g->w);
 
     /* Last, and after terrain assignment: purely derived, purely for drawing.
      * The pathological-seed early return above leaves height all zeros courtesy
@@ -3136,6 +3268,79 @@ static void tile_detail(SDL_Surface *fb, int ax, int ay, int h, Uint32 hash,
         int ox = PX(4 + (int)((hash >> (k * 4)) & 15) + (int)((hash >> (k * 4 + 2)) & 7));
         int oy = PX(4 + (int)((hash >> (k * 4 + 6)) & 15) + (int)((hash >> (k * 4 + 1)) & 7));
         fill_rect(fb, ax + ox - oy, ay + ((ox + oy) >> 1) - h, mw, 1, c);
+    }
+}
+
+/* Phase 09 task 5: the new mark kinds. The DoD asks for more kinds, not more
+ * marks of the one existing kind — the two-tone dither was already flagged as
+ * the weakest surface in the renderer. Each kind below is a distinct geometry
+ * (a rising clump, a ruled line, a row of ovals), positioned by the tile hash
+ * exactly like tile_detail, so a given tile stays identical every frame and no
+ * RNG stream is touched. */
+
+/* A grass tuft with a lit edge. The existing grass scatter lies FLAT on the
+ * face; a tuft is a clump of blades that RISE off it, and the right-hand blade
+ * is drawn one shade brighter so the tuft reads as catching sunlight rather
+ * than as a blemish. Blades step taller left to right so the lit edge is the
+ * tallest, which is how a real clump silhouettes against the sky. */
+static void tile_tuft(SDL_Surface *fb, int ax, int ay, int h, Uint32 hash,
+                      Uint32 blade, Uint32 lit)
+{
+    int ox = PX(7 + (int)((hash >> 2) & 15) + (int)((hash >> 6) & 7));
+    int oy = PX(5 + (int)((hash >> 8) & 15) + (int)((hash >> 4) & 7));
+    int sy = ay + ((ox + oy) >> 1) - h;   /* the ground line at this offset */
+    int k;
+    for (k = 0; k < 3; k++) {
+        int bx = ax + ox - oy + k * PX(2) - PX(2);
+        int bh = PX(2) + k;
+        fill_rect(fb, bx, sy - bh, PX(1), bh, blade);
+        if (k == 2)
+            fill_rect(fb, bx + PX(1), sy - bh, PX(1), bh, lit);
+    }
+}
+
+/* Mortar courses across a dressed-stone top face. Two thin horizontal courses
+ * span the diamond, each a row of constant (ox + oy) so it lands screen-level,
+ * with one staggered vertical joint — enough to read as masonry rather than as
+ * the speckle a flat grey cliff reads as. */
+static void tile_mortar(SDL_Surface *fb, int ax, int ay, int h, Uint32 hash,
+                        Uint32 c)
+{
+    int s1 = PX(16) + (int)((hash >> 3) & 3) * PX(2);
+    int s2 = s1 + PX(12);
+    int k;
+    if (s2 > PX(34))
+        s2 = PX(34);
+    for (k = 0; k < 2; k++) {
+        int s = k ? s2 : s1;
+        int ox;
+        for (ox = 0; ox <= PX(32); ox++) {
+            int oy = s - ox;
+            if (oy < 0 || oy > PX(32))
+                continue;
+            fill_rect(fb, ax + ox - oy, ay + ((ox + oy) >> 1) - h, PX(1), 1, c);
+        }
+        /* the joint, dropped below the lower course at a hash-picked offset */
+        if (k == 1) {
+            int jx = PX(4) + (int)((hash >> 10) & 7) * PX(2);
+            int oy = s - jx + 1;
+            if (oy >= 0 && oy < PX(32))
+                fill_rect(fb, ax + jx - oy, ay + ((jx + oy) >> 1) - h, PX(1), PX(2), c);
+        }
+    }
+}
+
+/* Shoreline pebbles. A scatter of small pale ovals on the beach ring — the
+ * land one BFS hop from the sea — drawn flatter and paler than a grass tuft so
+ * a coast reads as shingle breaking up the meadow rather than as more meadow. */
+static void tile_pebbles(SDL_Surface *fb, int ax, int ay, int h, Uint32 hash,
+                         Uint32 c)
+{
+    int k;
+    for (k = 0; k < 4; k++) {
+        int ox = PX(3 + (int)((hash >> (k * 5)) & 15) + (int)((hash >> (k * 5 + 3)) & 3));
+        int oy = PX(3 + (int)((hash >> (k * 5 + 6)) & 15) + (int)((hash >> (k * 5 + 1)) & 3));
+        fill_rect(fb, ax + ox - oy, ay + ((ox + oy) >> 1) - h, 2, 1, c);
     }
 }
 
@@ -4022,6 +4227,26 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
  * rasteriser and an edge that has to agree with the first to the pixel, which
  * is the seam bug class this project already decided to avoid once. Roof shape
  * varies by how many steps it takes and how fast it narrows. */
+
+/* Pure predicate: 0 = walls only, 1 = partial roof, 2 = full roof + facade,
+ * 3 = baked sprite. Bands chosen to give a visible sequence as restoration
+ * eases from 0 to 1 — see design/phases/Phase 09 - Placeholder Art.md. */
+static int bld_phase(float r)
+{
+    if (r < 0.0f) r = 0.0f;
+    if (r < 0.4f) return 0;
+    if (r < 0.7f) return 1;
+    if (r < 1.0f) return 2;
+    return 3;
+}
+
+static float building_restoration(const World *w, const Building *b)
+{
+    if (b->region >= REGION_COUNT)
+        return 0.0f;
+    return w->regions[b->region].restoration;
+}
+
 static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
                           int cam_x, int cam_y, float rev)
 {
@@ -4030,6 +4255,8 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
     const Uint8 *wp = wall_pal[BV_WALL(v)];
     int cx, cy, wall = WALL_BASE + b->levels * STOREY_H;
     int rw, steps, k, pitch;
+    float rst = building_restoration(w, b);
+    int phase = bld_phase(rst);
 
     /* Centre of the footprint in world px, projected.
      *
@@ -4057,14 +4284,22 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
      * Anchored at the footprint's ground centre: world_to_iso returns the tile centre's visual
      * position, and draw_sprite wants the ground-contact point, so (cx, cy) IS the anchor with
      * no correction. Anything that adds one here is wrong — that is exactly the +ISO_HH mistake
-     * described above, which put every roof half a tile off its own walls for four sessions. */
+     * described above, which put every roof half a tile off its own walls for four sessions.
+     *
+     * Phase 09 restoration rebuild: the baked sprite only appears at full restoration (phase 3).
+     * Below that, the procedural path below draws the ruin state with parts suppressed. */
     {
         int art = building_sprite_id(b);
-        if (art != ART_NONE) {
+        if (art != ART_NONE && phase >= 3) {
             draw_sprite(fb, art, cx, cy, rev);
             return;
         }
     }
+
+    /* phase 0: gapped walls only — walls are drawn by the tile pass; this routine
+     * draws nothing at all. The footprint's raised platform is already the building. */
+    if (phase <= 0)
+        return;
 
     /* Half-width of the footprint's diamond, plus a small eave overhang.
      *
@@ -4093,27 +4328,33 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
      * under a ring is still rings.
      *
      * Slight lightening up the slope is kept on top of the split — a roof does
-     * catch more light near the ridge — but it is no longer doing the work. */
-    for (k = 0; k < steps; k++) {
-        int krw = rw - (rw * k) / (steps + 1);
-        int s   = (k * 3) / steps;
-        iso_diamond_lr(fb, cx, cy - wall - k * pitch, krw,
-                       fog_lerp(fb, rp[s][0] * ROOF_L / 100,
-                                    rp[s][1] * ROOF_L / 100,
-                                    rp[s][2] * ROOF_L / 100, rev),
-                       fog_lerp(fb, rp[s][0], rp[s][1], rp[s][2], rev));
+     * catch more light near the ridge — but it is no longer doing the work.
+     *
+     * Phase 09 restoration rebuild: phase 1 draws only half the roof steps
+     * (partial roof), phase 2 draws the full roof. */
+    {
+        int roof_steps = (phase < 2) ? steps / 2 : steps;
+        for (k = 0; k < roof_steps; k++) {
+            int krw = rw - (rw * k) / (steps + 1);
+            int s   = (k * 3) / steps;
+            iso_diamond_lr(fb, cx, cy - wall - k * pitch, krw,
+                           fog_lerp(fb, rp[s][0] * ROOF_L / 100,
+                                        rp[s][1] * ROOF_L / 100,
+                                        rp[s][2] * ROOF_L / 100, rev),
+                           fog_lerp(fb, rp[s][0], rp[s][1], rp[s][2], rev));
+        }
     }
-    /* Ridge cap. Small on purpose: at rw/(steps+1)+3 the top diamond was wide
-     * enough to read as a flat plateau, which is what made the roof look like a
-     * tarp stretched over a box instead of coming to a peak. */
-    iso_diamond_lr(fb, cx, cy - wall - steps * pitch, rw / (steps + 2),
-                   fog_lerp(fb, rp[2][0] * ROOF_L / 100,
-                                rp[2][1] * ROOF_L / 100,
-                                rp[2][2] * ROOF_L / 100, rev),
-                   fog_lerp(fb, rp[2][0], rp[2][1], rp[2][2], rev));
+    /* Ridge cap — only at phase 2+ (full roof). */
+    if (phase >= 2) {
+        iso_diamond_lr(fb, cx, cy - wall - steps * pitch, rw / (steps + 2),
+                       fog_lerp(fb, rp[2][0] * ROOF_L / 100,
+                                    rp[2][1] * ROOF_L / 100,
+                                    rp[2][2] * ROOF_L / 100, rev),
+                       fog_lerp(fb, rp[2][0], rp[2][1], rp[2][2], rev));
+    }
 
-    /* Chimney, on the roof rather than beside it. */
-    if (BV_CHIM(v)) {
+    /* Chimney, on the roof rather than beside it — only at phase 2+. */
+    if (phase >= 2 && BV_CHIM(v)) {
         int ox = (BV_CHIM(v) == 1) ? -rw / 3 : rw / 3;
         int ch = PX(8) + (int)BV_CHIM(v) * PX(3);
         fill_rect(fb, cx + ox - PX(3), cy - wall - steps * pitch - ch,
@@ -4140,7 +4381,10 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
      * The previous version placed everything relative to `cy - wall + ISO_HH`,
      * a constant that only made sense alongside the roof's own ISO_HH error —
      * which is why the windows were being drawn on the ROOF rather than on the
-     * wall, in every screenshot going back to when buildings landed. */
+     * wall, in every screenshot going back to when buildings landed.
+     *
+     * Phase 09 restoration rebuild: facade only drawn at phase 2+. */
+    if (phase >= 2)
     {
         int fw   = (b->w + b->h) * ISO_HW / 2;
         int ftop = cy - wall;
@@ -4386,6 +4630,11 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
         /* Planks. Checked before `solid`, because a bridge tile is deliberately
          * NOT solid — that is the whole mechanism by which it is crossable. */
         *cr = 0x6b; *cg = 0x4e; *cb = 0x32;
+    } else if (g->w.path[ty][tx]) {
+        /* Worn dirt, a little redder than the packed-earth yard a baked house
+         * stands on (0x8f7d5e) so a lane reads as travelled ground, not as a
+         * bare patch. Never on a footprint, river or cliff by construction. */
+        *cr = 0x8c; *cg = 0x7a; *cb = 0x4f;
     } else if (g->w.surf[ty][tx] == SURF_RIVER) {
         /* Brighter and greener than the sea ramp, so a channel running through
          * the interior does not read as an inlet of the ocean. */
@@ -4523,7 +4772,11 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             terr = g->w.solid[ty][tx] ? -1 : (g->w.region[ty][tx] == REGION_NONE
                        ? TERRAIN_NORMAL : g->w.regions[g->w.region[ty][tx]].terrain);
             nmark = 5; mw = PX(2);
-            if (terr < 0) {
+            if (g->w.path[ty][tx]) {
+                /* Worn dirt: a few darker clods, and sparse — a lane is smooth,
+                 * unlike the tufted grass beside it. */
+                mr = 0x68; mg = 0x58; mb = 0x3a; nmark = 3; mw = PX(2);
+            } else if (terr < 0) {
                 /* Rock. Long marks, because stone reads through aligned
                  * repetition — strata, not speckle (design/Art Bible.md §6). */
                 mr = 0x6e; mg = 0x6c; mb = 0x7a; nmark = 4; mw = PX(6);
@@ -4554,12 +4807,52 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
              * as dirt on a flat field; two read as depth in the grass. Both
              * shades now come from the grass ramp rather than being invented,
              * so the tufts sit in the same family as the ground. */
-            if (terr == TERRAIN_NORMAL) {
+            if (terr == TERRAIN_NORMAL && !g->w.path[ty][tx]) {
                 mr = 0x2c; mg = 0x44; mb = 0x29;
                 if (dream_palette(ty))
                     dream_shift(mr, mg, mb, &mr, &mg, &mb);
                 tile_detail(fb, ax, ay, h, hash * 2654435761u,
                             fog_lerp(fb, mr, mg, mb, rev), 5, 2);
+            }
+            /* Phase 09 task 5: the new mark kinds — see the DoD and the notes
+             * on each helper. Each is gated to the surface it belongs to:
+             * tufts only on grass away from the beach, mortar only on dressed
+             * stone (never the sea, which is solid and would show it too),
+             * pebbles only on the shoreline ring one hop from the water. All
+             * drawn from the tile hash, so they are deterministic and touch no
+             * RNG stream; all fogged like the existing marks. */
+#if WAYFARER_SELFTEST
+            if (!g_suppress_marks)
+#endif
+            {
+                if (terr == TERRAIN_NORMAL && !g->w.path[ty][tx]
+                    && !g->w.bld_at[ty][tx] && g->w.sea_dist[ty][tx] != 1
+                    && ((hash >> 16) & 3) == 0) {
+                    int br = 0x2c, bg = 0x44, bb = 0x29;
+                    int lr = 0x5f, lg = 0x8c, lb = 0x43;
+                    if (dream_palette(ty)) {
+                        dream_shift(br, bg, bb, &br, &bg, &bb);
+                        dream_shift(lr, lg, lb, &lr, &lg, &lb);
+                    }
+                    tile_tuft(fb, ax, ay, h, hash,
+                              fog_lerp(fb, br, bg, bb, rev),
+                              fog_lerp(fb, lr, lg, lb, rev));
+                }
+                if (terr < 0 && g->w.surf[ty][tx] != SURF_OCEAN
+                    && g->w.surf[ty][tx] != SURF_RIVER
+                    && ((hash >> 18) & 3) == 0) {
+                    int mr = 0x6a, mg = 0x74, mb = 0x86;
+                    if (dream_palette(ty))
+                        dream_shift(mr, mg, mb, &mr, &mg, &mb);
+                    tile_mortar(fb, ax, ay, h, hash,
+                                fog_lerp(fb, mr, mg, mb, rev));
+                }
+                if (terr == TERRAIN_NORMAL && !g->w.path[ty][tx]
+                    && !g->w.bld_at[ty][tx] && g->w.sea_dist[ty][tx] == 1
+                    && !dream_palette(ty) && ((hash >> 20) & 1)) {
+                    tile_pebbles(fb, ax, ay, h, hash,
+                                 fog_lerp(fb, 0x8e, 0x7c, 0x58, rev));
+                }
             }
         }
 
@@ -8451,6 +8744,389 @@ static int village_negative_test(void)
     return fails;
 }
 
+/* Phase 09: truth-table test for bld_phase(), the pure predicate that maps a
+ * region's 0..1 restoration float to one of four visual rebuild bands. */
+static int rebuild_selftest(void)
+{
+    struct { float r; int want; } cases[] = {
+        { -0.5f, 0 }, { 0.0f, 0 }, { 0.2f, 0 }, { 0.39f, 0 },
+        { 0.4f, 1 },  { 0.55f, 1 }, { 0.69f, 1 },
+        { 0.7f, 2 },  { 0.85f, 2 }, { 0.99f, 2 },
+        { 1.0f, 3 },  { 1.5f, 3 }
+    };
+    int i, fails = 0;
+    for (i = 0; i < (int)(sizeof cases / sizeof cases[0]); i++) {
+        int got = bld_phase(cases[i].r);
+        if (got != cases[i].want) {
+            printf("FAIL  bld_phase(%g) = %d, want %d\n",
+                   (double)cases[i].r, got, cases[i].want);
+            fails++;
+        }
+    }
+    /* Negative control: a predicate that always returns 3 (baked-sprite path).
+     * A checker that cannot distinguish a ruined house from a restored one is
+     * not testing the rebuild — it must reject this identity. */
+    {
+        int bad = 0;
+        for (i = 0; i < (int)(sizeof cases / sizeof cases[0]); i++) {
+            if (3 != bld_phase(cases[i].r)) bad++;
+        }
+        printf("negative control (always-baked predicate rejected): %s\n",
+               bad ? "PASS" : "FAIL");
+        if (!bad) fails++;
+    }
+    printf("rebuild phase: %s (%d fails)\n", fails ? "FAIL" : "PASS", fails);
+    return fails;
+}
+
+/* Phase 09: the worn paths. Asserts what the DoD needs a path to BE — dirt on
+ * walkable open ground — and that no house is left without one. Both properties
+ * are checked the way village_selftest checks footprints: over the whole map
+ * where the structure is global, per-building where it is local. */
+static int path_selftest(Uint64 seed, int verbose, int *total)
+{
+    Game g;
+    Rngs rngs;
+    int i, x, y, bad = 0, paths = 0, doorless = 0;
+
+    rngs_init(&rngs, seed);
+    (void)game_init(&g, &rngs);
+
+    /* (1) A path tile is open ground: never a footprint, never a river or sea
+     * tile, never inside rock. */
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            if (g.w.path[y][x]) {
+                paths++;
+                if (g.w.solid[y][x] || g.w.bld_at[y][x]
+                    || g.w.surf[y][x] == SURF_RIVER || g.w.surf[y][x] == SURF_OCEAN)
+                    bad++;
+            }
+
+    /* (2) Every house has a path touching its footprint. A dwelling with no
+     * lane to its door reads as abandoned — which is the exact Handover §2
+     * complaint this phase exists to answer. */
+    for (i = 0; i < g.w.bld_count; i++) {
+        const Building *b = &g.w.bld[i];
+        int touch = 0;
+        for (y = b->y - 1; y <= b->y + b->h && !touch; y++)
+            for (x = b->x - 1; x <= b->x + b->w && !touch; x++)
+                if (x >= 0 && y >= 0 && x < WORLD_W && y < WORLD_H
+                    && g.w.path[y][x])
+                    touch = 1;
+        if (!touch)
+            doorless++;
+    }
+
+    if (verbose)
+        printf("  seed %-6.0f path tiles %4d  bad %d  doorless %d  %s\n",
+               (double)seed, paths, bad, doorless,
+               (bad || doorless || paths == 0) ? "FAIL" : "PASS");
+    *total += paths;
+    if (paths == 0)
+        bad++;
+    return (bad || doorless) ? 1 : 0;
+}
+
+/* Negative control: with place_paths suppressed, there must be no path tiles at
+ * all — and the door checker, which the feature exists to satisfy, must notice
+ * that every house is now doorless. If either fails, the positive test above is
+ * passing for a reason unrelated to place_paths. */
+static int path_negative_test(Uint64 seed)
+{
+    Game g;
+    Rngs rngs;
+    int i, x, y, fails = 0, paths = 0, doorless = 0;
+
+    g_suppress_paths = 1;
+    rngs_init(&rngs, seed);
+    (void)game_init(&g, &rngs);
+    g_suppress_paths = 0;
+
+    if (g.w.bld_count == 0) {
+        printf("negative control (paths suppressed): skipped, no houses on seed %.0f\n",
+               (double)seed);
+        return 0;
+    }
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            if (g.w.path[y][x]) paths++;
+    for (i = 0; i < g.w.bld_count; i++) {
+        const Building *b = &g.w.bld[i];
+        int touch = 0;
+        for (y = b->y - 1; y <= b->y + b->h && !touch; y++)
+            for (x = b->x - 1; x <= b->x + b->w && !touch; x++)
+                if (x >= 0 && y >= 0 && x < WORLD_W && y < WORLD_H
+                    && g.w.path[y][x])
+                    touch = 1;
+        if (!touch)
+            doorless++;
+    }
+    printf("negative control (paths suppressed: %d tiles, %d of %d houses doorless): %s\n",
+           paths, doorless, g.w.bld_count,
+           (paths == 0 && doorless == g.w.bld_count) ? "PASS" : "FAIL");
+    if (!(paths == 0 && doorless == g.w.bld_count)) fails++;
+    return fails;
+}
+
+/* Phase 09 task 5: the new ground-mark kinds, checked by diff. A crafted world
+ * — exactly three land tiles, everything else sea — is rendered twice, once
+ * with the new marks and once with them suppressed, and the framebuffers are
+ * diffed. Every other pixel is identical between the two, so the diff isolates
+ * precisely the new marks and can assert the three claims that matter: they
+ * drew at all, they landed only on the three land tiles (never the sea), and
+ * each kind reached the surface it belongs to. */
+
+/* Point-in-diamond, using the exact geometry iso_tile draws with:
+ * |dx|/ISO_HW + |dy|/ISO_HH <= 1 about the tile centre (ax, ay + ISO_HH). */
+static int tile_diamond_hit(int sx, int sy, int ax, int ay)
+{
+    int dx = sx - ax;
+    int dy = sy - (ay + ISO_HH);
+    if (dx < -ISO_HW || dx > ISO_HW || dy < -ISO_HH || dy > ISO_HH)
+        return 0;
+    return ISO_HH * (dx < 0 ? -dx : dx) + ISO_HW * (dy < 0 ? -dy : dy)
+           <= ISO_HW * ISO_HH;
+}
+
+/* Same shape, but the INNER half-diamond of each tile: |dx|/ISO_HW +
+ * |dy|/ISO_HH <= 1/2 about the centre. Half-sized on purpose — see
+ * ground_sealeak, which needs a region no legitimate mark can ever touch. */
+static int tile_inner_hit(int sx, int sy, int ax, int ay)
+{
+    int dx = sx - ax;
+    int dy = sy - (ay + ISO_HH);
+    if (dx < -ISO_HW || dx > ISO_HW || dy < -ISO_HH || dy > ISO_HH)
+        return 0;
+    return 2 * (ISO_HH * (dx < 0 ? -dx : dx) + ISO_HW * (dy < 0 ? -dy : dy))
+           <= ISO_HW * ISO_HH;
+}
+
+/* Diff pixels that lie inside the INNER half-diamond of any sea tile. This is
+ * the confinement claim that can be asserted exactly: a tuft's blades may
+ * legitimately rise a few px over their own tile's edge into the next tile's
+ * diamond, so the FULL diamond is too strict (it flags correct grass); the
+ * inner half-diamond, however, is at least six screen-px from every land edge
+ * and no mark of ours can reach it. A hit is a mark genuinely straying onto
+ * the water. */
+static int ground_sealeak(const Game *g, const Uint32 *a, const Uint32 *b,
+                          int w, int h)
+{
+    int b0 = (g->cam_y - ISO_OY - DIA_H) / ISO_HH;
+    int b1 = (g->cam_y - ISO_OY + h + ELEV_MAX) / ISO_HH;
+    int diff[4096], ndiff = 0;
+    int band, sx, sy, i, k, leak = 0;
+
+    if (b0 < 0) b0 = 0;
+    if (b1 > BAND_MAX) b1 = BAND_MAX;
+    for (sy = 0; sy < h; sy++)
+        for (sx = 0; sx < w; sx++)
+            if (a[sy * w + sx] != b[sy * w + sx] && ndiff < 4096)
+                diff[ndiff++] = sy * w + sx;
+
+    for (band = b0; band <= b1; band++) {
+        int lo = band - (WORLD_H - 1), hi = band;
+        int ay;
+        if (lo < 0) lo = 0;
+        if (hi > WORLD_W - 1) hi = WORLD_W - 1;
+        ay = band * ISO_HH + ISO_OY - g->cam_y;
+        for (i = lo; i <= hi; i++) {
+            int ty = band - i;
+            int ax = (i - ty) * ISO_HW + ISO_OX - g->cam_x;
+            if (g->w.surf[ty][i] != SURF_OCEAN)
+                continue;             /* only sea tiles can leak to */
+            if (ax + ISO_HW < 0 || ax - ISO_HW >= w ||
+                ay + DIA_H < 0 || ay - ISO_HH >= h)
+                continue;             /* not on screen */
+            for (k = 0; k < ndiff; k++) {
+                sx = diff[k] % w;
+                sy = diff[k] / w;
+                if (tile_inner_hit(sx, sy, ax, ay))
+                    leak++;
+            }
+        }
+    }
+    return leak;
+}
+
+/* How many differing pixels lie inside one tile's diamond — the presence check
+ * for "this kind reached this surface". */
+static int ground_present(const Game *g, const Uint32 *a, const Uint32 *b,
+                          int w, int h, int tx, int ty)
+{
+    int ax = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
+    int ay = (tx + ty) * ISO_HH + ISO_OY - g->cam_y;
+    int sx, sy, n = 0;
+    for (sy = ay - ISO_HH; sy <= ay + ISO_HH * 2; sy++)
+        for (sx = ax - ISO_HW; sx <= ax + ISO_HW; sx++)
+            if (sx >= 0 && sy >= 0 && sx < w && sy < h
+                && tile_diamond_hit(sx, sy, ax, ay)
+                && a[sy * w + sx] != b[sy * w + sx])
+                n++;
+    return n;
+}
+
+static int ground_selftest(Uint64 base)
+{
+    enum { GW = 320, GH = 240,
+           RX = 40, RY = 40, G1X = 41, G1Y = 40, G2X = 42, G2Y = 40 };
+    int fails = 0;
+    Game g;
+    SDL_Surface *sf;
+    Uint32 *a, *b, *c;
+    Uint64 seed;
+    int tries, x, y;
+
+    sf = SDL_CreateRGBSurfaceWithFormat(0, GW, GH, 32, SDL_PIXELFORMAT_RGB888);
+    if (!sf) {
+        printf("FAIL  could not create the ground test surface\n");
+        return 1;
+    }
+    a = (Uint32 *)SDL_malloc((size_t)GW * GH * sizeof(Uint32));
+    b = (Uint32 *)SDL_malloc((size_t)GW * GH * sizeof(Uint32));
+    c = (Uint32 *)SDL_malloc((size_t)GW * GH * sizeof(Uint32));
+    if (!a || !b || !c) {
+        printf("FAIL  out of memory\n");
+        SDL_FreeSurface(sf);
+        SDL_free(a); SDL_free(b); SDL_free(c);
+        return 1;
+    }
+
+    SDL_zero(g);
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            g.w.solid[y][x] = 1;            /* everything is sea... */
+            g.w.surf[y][x]  = SURF_OCEAN;
+            g.w.region[y][x] = REGION_NONE;
+            g.w.reveal[y][x] = 1.0f;        /* ...and fully revealed */
+        }
+    /* ...except the three land tiles under test. G1 is the beach ring (one hop
+     * from the sea), G2 is inland grass, R is dressed stone. */
+    g.w.solid[RY][RX]   = 1;  g.w.surf[RY][RX]  = SURF_ROCK;
+    g.w.solid[G1Y][G1X] = 0;  g.w.surf[G1Y][G1X] = SURF_LAND;
+    g.w.solid[G2Y][G2X] = 0;  g.w.surf[G2Y][G2X] = SURF_LAND;
+    g.w.sea_dist[RY][RX] = 0; g.w.sea_dist[G1Y][G1X] = 1; g.w.sea_dist[G2Y][G2X] = 5;
+
+    /* Seed pick: every land tile must be prop-free AND hash-gate its own new
+     * kind ON, or this checker fails a CORRECT render. */
+    seed = base;
+    for (tries = 0; tries < 1000; tries++, seed++) {
+        Uint32 h;
+        if (prop_at(&g.w, seed, RX, RY, &h) != PROP_NONE) continue;
+        if (prop_at(&g.w, seed, G1X, G1Y, &h) != PROP_NONE) continue;
+        if (prop_at(&g.w, seed, G2X, G2Y, &h) != PROP_NONE) continue;
+        if (((tile_hash(seed, RX, RY) >> 18) & 3) != 0) continue;   /* mortar on  */
+        if (((tile_hash(seed, G2X, G2Y) >> 16) & 3) != 0) continue; /* tuft on     */
+        if (((tile_hash(seed, G1X, G1Y) >> 20) & 1) != 1) continue; /* pebbles on  */
+        break;
+    }
+    if (tries >= 1000) {
+        printf("FAIL  no seed found with all three mark kinds gated on\n");
+        SDL_FreeSurface(sf);
+        SDL_free(a); SDL_free(b); SDL_free(c);
+        return 1;
+    }
+    g.seed = seed;
+
+    /* Camera centred on the three tiles; player parked far away so her sprite
+     * and prompt never enter the frame. */
+    g.cam_x = (G1X - G1Y) * ISO_HW + ISO_OX - GW / 2;
+    g.cam_y = (G1X + G1Y) * ISO_HH + ISO_OY - GH / 2;
+    g.p.x = (float)(WORLD_W - 2) * TILE;
+    g.p.y = (float)(WORLD_H - 2) * TILE;
+
+    render(sf, &g, 0);
+    SDL_memcpy(a, sf->pixels, (size_t)GW * GH * 4);
+    render(sf, &g, 0);
+    SDL_memcpy(c, sf->pixels, (size_t)GW * GH * 4);   /* second marks-on frame */
+    g_suppress_marks = 1;
+    render(sf, &g, 0);
+    SDL_memcpy(b, sf->pixels, (size_t)GW * GH * 4);
+    g_suppress_marks = 0;
+
+    /* (1) deterministic: the two marks-on frames must be identical. */
+    {
+        int diff = 0;
+        for (x = 0; x < GW * GH; x++)
+            if (a[x] != c[x]) diff++;
+        if (diff) {
+            printf("FAIL  render is not deterministic: %d px differ between two marks-on frames\n",
+                   diff);
+            fails++;
+        } else {
+            printf("determinism: PASS  two marks-on frames identical\n");
+        }
+    }
+
+    /* (2) the marks drew at all. */
+    {
+        int diff = 0;
+        for (x = 0; x < GW * GH; x++)
+            if (a[x] != b[x]) diff++;
+        if (diff == 0) {
+            printf("FAIL  suppressing the marks changed nothing — they never drew\n");
+            fails++;
+        } else {
+            printf("marks drawn: PASS  %d px differ when they are suppressed\n", diff);
+        }
+    }
+
+    /* (3) confinement: no mark pixel ever strays onto the sea. Tuft blades may
+     * rise over their own tile's edge, so the check is against each sea tile's
+     * inner half-diamond — a region no legitimate mark can reach. */
+    {
+        int leak = ground_sealeak(&g, a, b, GW, GH);
+        if (leak) {
+            printf("FAIL  %d mark px landed inside a sea tile's inner diamond\n", leak);
+            fails++;
+        } else {
+            printf("confinement: PASS  no mark px on the sea\n");
+        }
+    }
+
+    /* (4) each kind reached the surface it belongs to. */
+    {
+        int nrock  = ground_present(&g, a, b, GW, GH, RX, RY);
+        int nbeach = ground_present(&g, a, b, GW, GH, G1X, G1Y);
+        int ngrass = ground_present(&g, a, b, GW, GH, G2X, G2Y);
+        if (!nrock || !nbeach || !ngrass) {
+            printf("FAIL  kinds missing: rock %d, shoreline %d, grass %d\n",
+                   nrock, nbeach, ngrass);
+            fails++;
+        } else {
+            printf("per-surface: PASS  mortar %d px, pebbles %d px, tufts %d px\n",
+                   nrock, nbeach, ngrass);
+        }
+    }
+
+    /* Negative control for (3): stamp a stray pixel at the sea tile's centre
+     * (deep inside its inner half-diamond) and confirm the sealeak check flags
+     * it. A checker that cannot see a mark sitting on the water is not testing
+     * confinement. */
+    {
+        int wx = G2X + 1, wy = G2Y;
+        int ax = (wx - wy) * ISO_HW + ISO_OX - g.cam_x;
+        int ay = (wx + wy) * ISO_HH + ISO_OY - g.cam_y;
+        int cxp = ax, cyp = ay + ISO_HH;           /* the sea tile's centre */
+        SDL_memcpy(c, a, (size_t)GW * GH * 4);     /* restart from marks-on */
+        c[cyp * GW + cxp] = b[cyp * GW + cxp] ^ 1; /* a stray mark on the sea */
+        {
+            int leak = ground_sealeak(&g, c, b, GW, GH);
+            if (leak == 0) {
+                printf("FAIL  confinement control: a mark stamped on the sea went undetected\n");
+                fails++;
+            } else {
+                printf("confinement control: PASS  stray sea mark flagged (%d px)\n", leak);
+            }
+        }
+    }
+
+    SDL_FreeSurface(sf);
+    SDL_free(a); SDL_free(b); SDL_free(c);
+    printf("ground marks: %s (%d fails)\n", fails ? "FAIL" : "PASS", fails);
+    return fails;
+}
+
 /* Runs audio with no window for `ms`, then reports whether the callback met
  * its deadline and dumps raw samples for independent offline analysis. */
 static int audio_selftest(int argc, char **argv, int ms)
@@ -8642,6 +9318,22 @@ int main(int argc, char **argv)
             return sprite_selftest();
         if (arg_flag(argc, argv, "--fade-test"))
             return fade_selftest();
+        if (arg_flag(argc, argv, "--rebuild-test"))
+            return rebuild_selftest();
+        if (arg_flag(argc, argv, "--path-test")) {
+            int n = arg_int(argc, argv, "--seeds", 20);
+            int base = arg_int(argc, argv, "--seed", 1);
+            int s, bad = 0, total = 0;
+            printf("=== worn paths, %d seeds ===\n", n);
+            for (s = 0; s < n; s++)
+                bad += path_selftest((Uint64)(base + s), 1, &total);
+            printf("\nmean %d path tiles per world\n", total / (n > 0 ? n : 1));
+            bad += path_negative_test((Uint64)base);
+            printf("%s (%d failures across %d seeds)\n", bad ? "FAIL" : "PASS", bad, n);
+            return bad ? 1 : 0;
+        }
+        if (arg_flag(argc, argv, "--ground-test"))
+            return ground_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
         if (arg_flag(argc, argv, "--sector-test"))
             return sector_selftest((Uint64)arg_int(argc, argv, "--seed", 1),
                                    arg_int(argc, argv, "--seeds", 10));

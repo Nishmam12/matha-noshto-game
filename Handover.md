@@ -24,7 +24,7 @@ Running log: [[INDEX]]
 
 | Agent | Focus | Branch | Tree state | Since | Notes |
 |---|---|---|---|---|---|
-| qwen | Phase 09: restoration rebuild + worn paths + ground marks | `feat/phase-09-restoration` | **WAITING** — uncommitted slice-5 WIP needs `fx_well` baked | 2026-08-06 | Stopped at compile gate; resuming once slice-5 agent resolves `ART_FX_WELL_*` |
+| qwen | Phase 09: restoration rebuild + worn paths + ground marks | `feat/phase-09-restoration` | **DONE** — all three DoD items committed | 2026-08-06 | Rebuild → baked at 1.0; RNG-free paths; hash-gated marks |
 
 **Resolved 2026-08-06, same day.** `fx_well` is baked, slice 5 (dream shards + the Dream Well) is
 finished and committed on `feat/phase-12-dream-realm` — the branch qwen's row names does not
