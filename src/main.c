@@ -2083,13 +2083,13 @@ static int try_collect_shard(Game *g)
 
 /* The loop the whole game is built around: restore a memory, the region's
  * colour returns, and sometimes an ability comes back with it and opens terrain
- * that was closed a moment ago. Returns the entity restored, or -1. */
-static int try_restore(Game *g)
+ * that was closed a moment ago. Returns the entity restored, or -1.
+ *
+ * apply_restore is the state change alone, split out so loading a save applies
+ * exactly the same transitions try_restore does — one source of truth for what
+ * "restored" means, instead of a second copy that could drift. */
+static void apply_restore(Game *g, int i)
 {
-    int i = entity_in_reach(g);
-
-    if (i < 0)
-        return -1;
     g->ents[i].restored = 1;
     g->p.abilities |= g->ents[i].grants;
     if (g->ents[i].region < g->w.region_count)
@@ -2098,6 +2098,15 @@ static int try_restore(Game *g)
         g->souls_restored++;
     else
         g->frags_restored++;
+}
+
+static int try_restore(Game *g)
+{
+    int i = entity_in_reach(g);
+
+    if (i < 0)
+        return -1;
+    apply_restore(g, i);
     return i;
 }
 
@@ -2681,6 +2690,204 @@ static int game_init(Game *g, Rngs *rngs)
     g->cam_x = 0;
     g->cam_y = 0;
     return biggest; /* open tiles reachable from spawn */
+}
+
+/* ------------------------------------------------------------- save/load -- */
+/* The world is a pure function of its seed, so a save is the seed plus the
+ * deltas play has made on top of it: where she stands, what she carries, which
+ * memories are restored and which shards the Well has drunk. Loading
+ * regenerates the world from the seed and replays the deltas — never a second
+ * load path that could drift from what generation produces.
+ *
+ * The format is flat, fixed-size and versioned, fields written little-endian
+ * by hand so no struct padding or host endianness ever leaks into the file.
+ * A future format change bumps SAVE_VERSION and old files fail loudly here.
+ *
+ * Not saved, by design: the per-tile fog reveal (45 KB of float, rebuilt on
+ * load as one instant of standing at the saved position — exactly what
+ * reveal_around would have produced there), the eased restoration floats
+ * (snapped to their targets), and render-only state (facing, anim, camera,
+ * clock). */
+#define SAVE_MAGIC_0  'W'
+#define SAVE_MAGIC_1  'F'
+#define SAVE_VERSION  1
+#define SAVE_SIZE     28
+#define SAVE_FILENAME "wayfarer.sav"
+
+static void save_put32(Uint8 *p, Uint32 v)
+{
+    p[0] = (Uint8)(v); p[1] = (Uint8)(v >> 8);
+    p[2] = (Uint8)(v >> 16); p[3] = (Uint8)(v >> 24);
+}
+
+static void save_put64(Uint8 *p, Uint64 v)
+{
+    save_put32(p, (Uint32)v);
+    save_put32(p + 4, (Uint32)(v >> 32));
+}
+
+static Uint32 save_get32(const Uint8 *p)
+{
+    return (Uint32)p[0] | ((Uint32)p[1] << 8)
+         | ((Uint32)p[2] << 16) | ((Uint32)p[3] << 24);
+}
+
+static Uint64 save_get64(const Uint8 *p)
+{
+    return (Uint64)save_get32(p) | ((Uint64)save_get32(p + 4) << 32);
+}
+
+static float save_getf32(const Uint8 *p)
+{
+    Uint32 u = save_get32(p);
+    float f;
+    SDL_memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+static int game_save(const Game *g, const char *path)
+{
+    Uint8 buf[SAVE_SIZE];
+    Uint32 restored = 0, shards = 0;
+    Uint32 fx, fy;
+    int i;
+    SDL_RWops *rw;
+
+    for (i = 0; i < ENTITY_COUNT; i++)
+        if (g->ents[i].restored)
+            restored |= 1u << i;
+    /* shards[i] < 0 covers both "collected" and "never placed on this seed";
+     * the load side can tell them apart because placement is deterministic,
+     * so storing the raw bit pattern is correct and complete. */
+    for (i = 0; i < SHARD_COUNT; i++)
+        if (g->shards[i] < 0)
+            shards |= 1u << i;
+
+    buf[0] = SAVE_MAGIC_0;
+    buf[1] = SAVE_MAGIC_1;
+    buf[2] = SAVE_VERSION;
+    buf[3] = 0;
+    save_put64(buf + 4, g->seed);
+    SDL_memcpy(&fx, &g->p.x, sizeof(fx));
+    SDL_memcpy(&fy, &g->p.y, sizeof(fy));
+    save_put32(buf + 12, fx);
+    save_put32(buf + 16, fy);
+    buf[20] = g->p.abilities;
+    buf[21] = (Uint8)shards;
+    buf[22] = 0;
+    buf[23] = 0;
+    save_put32(buf + 24, restored);
+
+    rw = SDL_RWFromFile(path, "wb");
+    if (!rw)
+        return -1;
+    i = (SDL_RWwrite(rw, buf, 1, SAVE_SIZE) == SAVE_SIZE) ? 0 : -1;
+    if (SDL_RWclose(rw) != 0)
+        i = -1;
+    return i;
+}
+
+/* Regenerate from the saved seed, then replay the deltas. Returns 0 on success
+ * and reports the seed through *seed_out so the caller can keep its own copy in
+ * step (the R key increments it). Every malformed input — missing file, short
+ * read, bad magic, unknown version, nonzero reserved bytes, mask bits past the
+ * arrays, non-finite or out-of-bounds or wall-trapped position — is rejected
+ * with -1 BEFORE the live game is touched, so a corrupt file can never leave
+ * the player mid-world in a half-loaded state. This is the first boundary in
+ * the project where outside input reaches the program, and it is validated
+ * accordingly: the world is regenerated into scratch space, checked against the
+ * regenerated solid map, and only then copied over the live game. */
+static int game_load(Game *g, Rngs *rngs, const char *path, Uint64 *seed_out)
+{
+    Uint8 buf[SAVE_SIZE];
+    SDL_RWops *rw = SDL_RWFromFile(path, "rb");
+    Game *tmp;
+    Rngs lr;
+    Uint64 seed;
+    Uint32 restored, entity_mask = (1u << ENTITY_COUNT) - 1u;
+    Uint32 shard_mask = (1u << SHARD_COUNT) - 1u;
+    float px, py;
+    Uint8 abilities, shards;
+    int i;
+
+    if (!rw)
+        return -1;
+    if (SDL_RWread(rw, buf, 1, SAVE_SIZE) != SAVE_SIZE) {
+        SDL_RWclose(rw);
+        return -1;
+    }
+    SDL_RWclose(rw);
+
+    if (buf[0] != SAVE_MAGIC_0 || buf[1] != SAVE_MAGIC_1)
+        return -1;
+    if (buf[2] != SAVE_VERSION || buf[3] != 0 || buf[22] != 0 || buf[23] != 0)
+        return -1;
+    restored = save_get32(buf + 24);
+    if (restored & ~entity_mask)
+        return -1;
+    abilities = buf[20];
+    shards = buf[21];
+    if ((Uint32)shards & ~shard_mask)
+        return -1;
+    seed = save_get64(buf + 4);
+    px = save_getf32(buf + 12);
+    py = save_getf32(buf + 16);
+    if (!(px >= 0.0f) || !(py >= 0.0f) || /* also rejects NaN */
+        px >= (float)WORLD_W * TILE || py >= (float)WORLD_H * TILE)
+        return -1;
+
+    /* All file-level validation done. Regenerate into scratch — Game is far too
+     * big for a second one on this frame, and the live game must stay untouched
+     * until the position is checked against the regenerated solid map. */
+    tmp = (Game *)SDL_malloc(sizeof(Game));
+    if (!tmp)
+        return -1;
+    rngs_init(&lr, seed);
+    (void)game_init(tmp, &lr);
+    if (player_blocked(&tmp->w, abilities, px, py)) {
+        /* A position generation would never have produced. */
+        SDL_free(tmp);
+        return -1;
+    }
+
+    tmp->p.x = px;
+    tmp->p.y = py;
+    tmp->p.abilities = abilities;
+    for (i = 0; i < ENTITY_COUNT; i++)
+        if (restored & (1u << i))
+            apply_restore(tmp, i);
+    for (i = 0; i < SHARD_COUNT; i++) {
+        if ((shards & (1u << i)) && tmp->shards[i] >= 0) {
+            tmp->shards[i] = -1;
+            tmp->shards_held++;
+        }
+    }
+    /* Snap the eased floats to their targets — mid-ease values are animation,
+     * not progress — and rebuild the fog reveal as one instant of standing at
+     * the saved position (the same taper reveal_around converges to). */
+    for (i = 0; i < tmp->w.region_count; i++)
+        tmp->w.regions[i].restoration = tmp->w.regions[i].restore_to;
+    {
+        int cx = (int)(px / TILE), cy = (int)(py / TILE);
+        int r = REVEAL_TILES, tx, ty;
+        for (ty = cy - r; ty <= cy + r; ty++)
+            for (tx = cx - r; tx <= cx + r; tx++) {
+                int ddx = tx - cx, ddy = ty - cy, d2 = ddx * ddx + ddy * ddy;
+                if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H)
+                    continue;
+                if (d2 <= r * r)
+                    tmp->w.reveal[ty][tx] =
+                        SIGHT_MAX * (1.0f - (float)d2 / (float)(r * r));
+            }
+    }
+    tmp->cam_ready = 0; /* snap the camera to her, like a fresh world */
+
+    /* Every check passed: commit. */
+    SDL_memcpy(g, tmp, sizeof(Game));
+    SDL_free(tmp);
+    *rngs = lr;
+    *seed_out = seed;
+    return 0;
 }
 
 /* ----------------------------------------------------------------- perf -- */
@@ -8580,6 +8787,276 @@ static int audio_selftest(int argc, char **argv, int ms)
     SDL_Quit();
     return 0;
 }
+
+/* ---- Phase 08: save/load -------------------------------------------------
+ * The round-trip claim, tested exactly: save, trash the live state, load, and
+ * the restored state must be BIT-identical to the snapshot taken at save time
+ * — no "close enough". Everything the format does not carry (the fog reveal,
+ * the camera, the walk cycle) is deliberately absent from the snapshot, and
+ * the load's rebuild of them is a pure function of the saved fields. */
+
+typedef struct {
+    Uint64 seed;
+    float  px, py;
+    Uint8  abilities;
+    int    frags, souls, shards_held, region_count;
+    Uint8  restored[ENTITY_COUNT];
+    int    shards[SHARD_COUNT];
+    float  restore_to[REGION_COUNT];
+    float  restoration[REGION_COUNT];
+} SaveSnap;
+
+static void save_snap(const Game *g, SaveSnap *s)
+{
+    int i;
+
+    s->seed = g->seed;
+    s->px = g->p.x;
+    s->py = g->p.y;
+    s->abilities = g->p.abilities;
+    s->frags = g->frags_restored;
+    s->souls = g->souls_restored;
+    s->shards_held = g->shards_held;
+    s->region_count = g->w.region_count;
+    for (i = 0; i < ENTITY_COUNT; i++)
+        s->restored[i] = g->ents[i].restored;
+    for (i = 0; i < SHARD_COUNT; i++)
+        s->shards[i] = g->shards[i];
+    for (i = 0; i < REGION_COUNT; i++) {
+        s->restore_to[i] = g->w.regions[i].restore_to;
+        s->restoration[i] = g->w.regions[i].restoration;
+    }
+}
+
+static int save_snap_eq(const SaveSnap *a, const SaveSnap *b, const char **why)
+{
+    int i;
+
+    if (a->seed != b->seed) { *why = "seed"; return 0; }
+    if (a->px != b->px || a->py != b->py) { *why = "player position"; return 0; }
+    if (a->abilities != b->abilities) { *why = "abilities"; return 0; }
+    if (a->frags != b->frags) { *why = "fragment count"; return 0; }
+    if (a->souls != b->souls) { *why = "soul count"; return 0; }
+    if (a->shards_held != b->shards_held) { *why = "shard count"; return 0; }
+    if (a->region_count != b->region_count) { *why = "region count"; return 0; }
+    for (i = 0; i < ENTITY_COUNT; i++)
+        if (a->restored[i] != b->restored[i]) { *why = "restored mask"; return 0; }
+    for (i = 0; i < SHARD_COUNT; i++)
+        if (a->shards[i] != b->shards[i]) { *why = "shard tiles"; return 0; }
+    for (i = 0; i < REGION_COUNT; i++) {
+        if (a->restore_to[i] != b->restore_to[i]) { *why = "restore_to"; return 0; }
+        if (a->restoration[i] != b->restoration[i]) { *why = "restoration"; return 0; }
+    }
+    return 1;
+}
+
+static int save_write_bytes(const char *path, const Uint8 *buf, size_t n)
+{
+    SDL_RWops *rw = SDL_RWFromFile(path, "wb");
+    int ok;
+
+    if (!rw)
+        return -1;
+    ok = (SDL_RWwrite(rw, buf, 1, n) == n) ? 0 : -1;
+    if (SDL_RWclose(rw) != 0)
+        ok = -1;
+    return ok;
+}
+
+static int save_selftest(Uint64 base)
+{
+    const char *path = "wayfarer-savetest.sav";
+    Game *g = (Game *)SDL_malloc(sizeof(Game));
+    Game *loaded = (Game *)SDL_malloc(sizeof(Game));
+    Game *again = (Game *)SDL_malloc(sizeof(Game));
+    Rngs rngs, lrngs;
+    SaveSnap want, got, before;
+    Uint8 good[SAVE_SIZE];
+    Uint64 ls;
+    const char *why;
+    int fails = 0, i;
+
+    if (!g || !loaded || !again) {
+        printf("FAIL  out of memory\n");
+        SDL_free(g); SDL_free(loaded); SDL_free(again);
+        return 1;
+    }
+
+    rngs_init(&rngs, base);
+    (void)game_init(g, &rngs);
+
+    /* Deterministic in-play mutations, applied through the SAME transitions
+     * play uses: stand on a known open tile, restore the first three entities,
+     * and drink shard 0 if this seed placed one. */
+    {
+        int found = 0;
+        int x, y;
+        for (y = 1; y < WORLD_H - 1 && !found; y++)
+            for (x = 1; x < WORLD_W - 1 && !found; x++)
+                if (!g->w.solid[y][x]) {
+                    g->p.x = (float)x * TILE + TILE * 0.5f;
+                    g->p.y = (float)y * TILE + TILE * 0.5f;
+                    found = 1;
+                }
+        if (!found) {
+            printf("FAIL  no open tile to stand on\n");
+            SDL_free(g); SDL_free(loaded); SDL_free(again);
+            return 1;
+        }
+    }
+    for (i = 0; i < 3; i++)
+        apply_restore(g, i);
+    if (g->shards[0] >= 0) {
+        g->shards[0] = -1;
+        g->shards_held++;
+    }
+    /* Finish the ease so the load's snap is exercised against settled values,
+     * exactly as a player who waited would leave them. */
+    for (i = 0; i < g->w.region_count; i++)
+        g->w.regions[i].restoration = g->w.regions[i].restore_to;
+
+    save_snap(g, &want);
+    if (game_save(g, path) != 0) {
+        printf("FAIL  game_save could not write %s\n", path);
+        SDL_free(g); SDL_free(loaded); SDL_free(again);
+        return 1;
+    }
+
+    /* Trash the live state so a load that did nothing could not pass. */
+    g->p.x += 3.0f * TILE;
+    g->p.y -= 2.0f * TILE;
+    apply_restore(g, 3);
+
+    /* The round trip. */
+    if (game_load(loaded, &lrngs, path, &ls) != 0) {
+        printf("FAIL  game_load rejected a file game_save just wrote\n");
+        fails++;
+    } else {
+        if (ls != base) {
+            printf("FAIL  load reported seed %llu, saved %llu\n",
+                   (unsigned long long)ls, (unsigned long long)base);
+            fails++;
+        }
+        if (lrngs.seed != base) {
+            printf("FAIL  load left the rng streams on seed %llu\n",
+                   (unsigned long long)lrngs.seed);
+            fails++;
+        }
+        save_snap(loaded, &got);
+        if (!save_snap_eq(&want, &got, &why)) {
+            printf("FAIL  loaded state differs from the saved state: %s\n", why);
+            fails++;
+        } else {
+            printf("round trip: PASS  loaded state bit-identical to the snapshot\n");
+        }
+        /* And twice more: the load must be a pure function of the file. */
+        if (game_load(again, &lrngs, path, &ls) != 0) {
+            printf("FAIL  second load of the same file failed\n");
+            fails++;
+        } else {
+            save_snap(again, &got);
+            if (!save_snap_eq(&want, &got, &why)) {
+                printf("FAIL  second load differs from the first: %s\n", why);
+                fails++;
+            } else {
+                printf("determinism: PASS  two loads of one file agree\n");
+            }
+        }
+    }
+
+    /* Negative controls. Each must fail cleanly AND leave the live game
+     * bit-for-bit untouched — a failed load that mutates anything is worse
+     * than no load at all. */
+    {
+        SDL_RWops *rw = SDL_RWFromFile(path, "rb");
+        size_t n = 0;
+        if (rw) {
+            n = SDL_RWread(rw, good, 1, SAVE_SIZE);
+            SDL_RWclose(rw);
+        }
+        if (n != SAVE_SIZE) {
+            printf("FAIL  could not read back the save for the controls\n");
+            fails++;
+        } else {
+            struct {
+                const char *name;
+                Uint8 buf[SAVE_SIZE];
+                size_t len;
+            } ctl[4];
+
+            save_snap(loaded, &before);
+
+            /* truncated: one byte short */
+            SDL_memcpy(ctl[0].buf, good, SAVE_SIZE);
+            ctl[0].name = "truncated file";
+            ctl[0].len = SAVE_SIZE - 1;
+            /* wrong version */
+            SDL_memcpy(ctl[1].buf, good, SAVE_SIZE);
+            ctl[1].buf[2] = SAVE_VERSION + 1;
+            ctl[1].name = "wrong version";
+            ctl[1].len = SAVE_SIZE;
+            /* bad magic */
+            SDL_memcpy(ctl[2].buf, good, SAVE_SIZE);
+            ctl[2].buf[0] = 'X';
+            ctl[2].name = "bad magic";
+            ctl[2].len = SAVE_SIZE;
+            /* position outside the world */
+            SDL_memcpy(ctl[3].buf, good, SAVE_SIZE);
+            {
+                float bad = (float)WORLD_W * TILE + 100.0f;
+                Uint32 u;
+                SDL_memcpy(&u, &bad, sizeof(u));
+                save_put32(ctl[3].buf + 12, u);
+            }
+            ctl[3].name = "out-of-bounds position";
+            ctl[3].len = SAVE_SIZE;
+
+            for (i = 0; i < 4; i++) {
+                if (save_write_bytes(path, ctl[i].buf, ctl[i].len) != 0) {
+                    printf("FAIL  could not write the %s control\n", ctl[i].name);
+                    fails++;
+                    continue;
+                }
+                if (game_load(again, &lrngs, path, &ls) == 0) {
+                    printf("FAIL  %s: load accepted a corrupt file\n", ctl[i].name);
+                    fails++;
+                } else {
+                    save_snap(again, &got);
+                    /* again still holds the last GOOD load; a failed load must
+                     * not have disturbed it. */
+                    if (!save_snap_eq(&before, &got, &why)) {
+                        printf("FAIL  %s: failed load mutated the game (%s)\n",
+                               ctl[i].name, why);
+                        fails++;
+                    } else {
+                        printf("%s: PASS  rejected, game untouched\n", ctl[i].name);
+                    }
+                }
+            }
+
+            /* missing file */
+            remove(path);
+            if (game_load(again, &lrngs, path, &ls) == 0) {
+                printf("FAIL  missing file: load succeeded with no file present\n");
+                fails++;
+            } else {
+                save_snap(again, &got);
+                if (!save_snap_eq(&before, &got, &why)) {
+                    printf("FAIL  missing file: failed load mutated the game (%s)\n",
+                           why);
+                    fails++;
+                } else {
+                    printf("missing file: PASS  rejected, game untouched\n");
+                }
+            }
+        }
+    }
+
+    remove(path);
+    SDL_free(g); SDL_free(loaded); SDL_free(again);
+    printf("save/load: %s (%d fails)\n", fails ? "FAIL" : "PASS", fails);
+    return fails;
+}
 #endif /* WAYFARER_SELFTEST */
 
 /* ----------------------------------------------------------------- main -- */
@@ -8605,6 +9082,9 @@ int main(int argc, char **argv)
     int frame = 0;
     int running = 1;
     int overlay = 0, grid = 0, dirty = 1, title_dirty = 1, fullscreen = 0;
+    /* One-keypress feedback for F5/F9 in the only text channel that exists
+     * before the Week 5 font: shown in the title bar until the next key. */
+    const char *note = "";
     int seed = arg_int(argc, argv, "--seed", 1);
 #if WAYFARER_PERF
     Perf pf;
@@ -8651,6 +9131,8 @@ int main(int argc, char **argv)
         if (arg_flag(argc, argv, "--shard-test"))
             return shard_selftest((Uint64)arg_int(argc, argv, "--seed", 1),
                                   arg_int(argc, argv, "--seeds", 30));
+        if (arg_flag(argc, argv, "--save-test"))
+            return save_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
         if (arg_flag(argc, argv, "--land-test")) {
             int n = arg_int(argc, argv, "--seeds", 20);
             int base = arg_int(argc, argv, "--seed", 1);
@@ -8901,6 +9383,7 @@ int main(int argc, char **argv)
             if (ev.type == SDL_QUIT) {
                 running = 0;
             } else if (ev.type == SDL_KEYDOWN) {
+                note = ""; /* any key dismisses the last save/load note */
                 switch (ev.key.keysym.sym) {
                 case SDLK_ESCAPE:
                     running = 0;
@@ -8958,6 +9441,21 @@ int main(int argc, char **argv)
                     audio.rng = rngs.audio;
                     dirty = 1;
                     break;
+                case SDLK_F5: /* save */
+                    note = game_save(&game, SAVE_FILENAME) == 0
+                               ? "  [saved]" : "  [save failed]";
+                    break;
+                case SDLK_F9: { /* load */
+                    Uint64 ls;
+                    if (game_load(&game, &rngs, SAVE_FILENAME, &ls) == 0) {
+                        seed = (int)ls;
+                        audio.rng = rngs.audio; /* same sync the R key does */
+                        note = "  [loaded]";
+                    } else {
+                        note = "  [no save]";
+                    }
+                    break;
+                }
                 default:
                     break;
                 }
@@ -9047,11 +9545,12 @@ int main(int argc, char **argv)
             };
             char t[224];
             int n = SDL_snprintf(t, sizeof(t),
-                         "Wayfarer  seed %d  fragments %d/%d  souls %d/%d  %s%s%s",
+                         "Wayfarer  seed %d  fragments %d/%d  souls %d/%d  %s%s%s%s",
                          (int)seed, game.frags_restored, FRAGMENT_COUNT,
                          game.souls_restored, SOUL_COUNT, stage_name[world_stage(&game)],
                          overlay ? "  [F1 overlay]" : "",
-                         grid ? "  [F2 grid]" : "");
+                         grid ? "  [F2 grid]" : "",
+                         note);
 #if WAYFARER_PERF
             /* Live readout while developing. The title bar is the only text
              * channel that exists before the Week 5 bitmap font. */
