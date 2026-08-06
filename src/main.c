@@ -11392,6 +11392,13 @@ int main(int argc, char **argv)
             game.cam_ready = 0;
         }
     }
+    {
+        if (arg_flag(argc, argv, "--castle")) {
+            game.p.x = (float)(CASTLE_RESERVE_X0 + CASTLE_RESERVE_W / 2) * TILE + TILE * 0.5f;
+            game.p.y = (float)(CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H / 2) * TILE + TILE * 0.5f;
+            game.cam_ready = 0;
+        }
+    }
 #endif
 
     prev = SDL_GetPerformanceCounter();
