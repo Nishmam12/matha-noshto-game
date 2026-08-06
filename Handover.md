@@ -27,15 +27,18 @@ Running log: [[INDEX]]
 | qwen | Phase 09: restoration rebuild + worn paths + ground marks | `feat/phase-09-restoration` | **DONE** — all three DoD items committed | 2026-08-06 | Rebuild → baked at 1.0; RNG-free paths; hash-gated marks |
 | qwen | Phase 08: save/load | `feat/phase-08-save-load` | **DONE** — committed | 2026-08-06 | 28-byte versioned save; regen-from-seed + deltas; `--save-test` with 5 negative controls; +1,536 bytes |
 | opencode | Phase 10: motion | `feat/phase-10-motion` | **DONE** — all 7 DoD items, committed | 2026-08-06 | sway/shimmer/fall-lines/smoke/fireflies/soul-bob; `--motion-test` 8 checks green; full suite green; +2,048 bytes → 781,824 |
-| opencode | Phase 11: ship critical | `feat/phase-11-ship` | **DONE** — all DoD items, committed (`8a27404`), PR pending | 2026-08-06 | 5-layer softsynth (deterministic, 0.325 ms worst case vs 21.333 ms deadline), chime/shard/portal SFX; HUD (counters, minimap, toasts, win banner) on the font extended with lowercase a–z + `/` (0x20–0x7A, 91 glyphs); `--hud-test` + `--font-test` green; full suite green; `nm` clean (no SDL_image/ttf/mixer); +4,608 bytes → 786,432 |
-| opencode | Phase 11 bugfix: shard pickup | `feat/phase-11-ship` | **DONE** — committed | 2026-08-06 | E-key restructure left the shard branch unreachable (nothing caught it: autopilot and `--shard-test` both bypassed the key path). Extracted the whole interaction into `try_interact()`, handler now calls it, `--shard-test` drives it (`shard pickup: PASS`) |
+| opencode | Phase 11: ship critical | `feat/phase-11-ship-complete` | **DONE** — all DoD items, committed (`8a27404`), PR pending | 2026-08-06 | 5-layer softsynth (deterministic, 0.325 ms worst case vs 21.333 ms deadline), chime/shard/portal SFX; HUD (counters, minimap, toasts, win banner) on the font extended with lowercase a–z + `/` (0x20–0x7A, 91 glyphs); `--hud-test` + `--font-test` green; full suite green; `nm` clean (no SDL_image/ttf/mixer); +4,608 bytes → 786,432 |
+| opencode | Phase 11 bugfix: shard pickup | `feat/phase-11-ship-complete` | **DONE** — committed (`7cd408a`), pushed | 2026-08-06 | E-key restructure left the shard branch unreachable (nothing caught it: autopilot and `--shard-test` both bypassed the key path). Extracted the whole interaction into `try_interact()`, handler now calls it, `--shard-test` drives it (`shard pickup: PASS`); full suite re-run green; release size unchanged 786,432 |
 
 **Resolved 2026-08-06, later still.** Phases 08 and 09 merged into `feat/phase-08-and-09`, PR #1
-merged into `main` (`b4f2fde`). Phase 10 (motion) is DONE on `feat/phase-10-motion` from that
-`main` — PR pending. Phase 12 remains feature-complete on its own branch. **Phase 11 (ship
-critical) is DONE on `feat/phase-11-ship` (from `feat/phase-10-motion-latest`): audio, HUD, QA
-items — the last required phase.** What remains is the submission checklist (second-machine smoke
-test, repo visibility at submission time, final wrap).
+merged into `main` (`b4f2fde` — that branch also carried all of Phase 12, so `main` already has the
+dream realm). Everything after `main` now sits in ONE straight line on **`feat/phase-11-ship-complete`**:
+Phase 10 (`d78b106`, `0f90bb2`), Phase 11 (`8a27404`, `95e8872`, `0f87552`), and the shard-pickup
+fix (`7cd408a`) plus its docs (`7a39eac`) — all pushed, branch tracking origin. The older
+`feat/phase-10-motion`, `feat/phase-11-ship` and `feat/phase-11-ship-latest` branches are
+superseded; PR and merge should come from `-complete`. **Phase 11 (ship critical) is the last
+required phase and it is DONE.** What remains is the submission checklist: merge to `main`,
+second-machine smoke test, repo visibility at submission time, final wrap.
 
 **Resolved 2026-08-06, same day.** `fx_well` is baked, slice 5 (dream shards + the Dream Well) is
 finished and committed on `feat/phase-12-dream-realm` — the branch qwen's row names does not
@@ -60,10 +63,10 @@ worn paths, ground marks) are DONE there. Phase 08 (save/load) is DONE on `feat/
 
 | | |
 |---|---|
-| **State** | 786,432 bytes, builds clean, full suite green (incl. `--hud-test`, `--font-test`, `--audio-test --layers --sfx`), plays to completion on 50/50 seeds. All twelve phases done |
-| **Branch** | **`feat/phase-11-ship`** (Phase 11, PR pending) — `main` is at `b4f2fde` (Phases 08+09 merged via PR #1); Phases 10/11 PRs carry the rest. Working tree clean |
+| **State** | 786,432 bytes, builds clean, full suite green (incl. `--hud-test`, `--font-test`, `--audio-test --layers --sfx`, and the `try_interact` shard-pickup regression), plays to completion on 50/50 seeds. All twelve phases done |
+| **Branch** | **`feat/phase-11-ship-complete`** (Phase 10+11+the shard fix, pushed through `7a39eac`, PR pending) — `main` is at `b4f2fde` (Phases 08+09 merged via PR #1); this branch is that `main` + Phases 10/11 in a straight line. Working tree clean |
 | **Deadline** | 2026-09-04 — **all development phases are complete**; only the submission checklist remains |
-| **Do first** | **Everything is built.** Audio (5-layer softsynth), HUD, save/load, dream realm, motion, art — all in, all green. Remaining: run the [[QA Checklist]]'s human items on a second machine, confirm the repo's visibility for submission, final wrap |
+| **Do first** | **Everything is built.** Audio (5-layer softsynth), HUD, save/load, dream realm, motion, art — all in, all green, and the one bug play found (shard pickup) is fixed with a regression. Remaining: merge `feat/phase-11-ship-complete` to `main`, run the [[QA Checklist]]'s human items on a second machine, confirm the repo's visibility for submission, final wrap |
 | **Then** | Submission: final size audit (653,568 headroom), tag the submission commit, push |
 | **Biggest risk** | **Nothing has been heard, watched or played by a human outside the dev loop.** Audio and motion are measured, not judged; the second-machine smoke test has never run |
 
@@ -180,17 +183,19 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 | | |
 |---|---|
-| **`build\wayfarer.exe`** | **774,144 bytes** — 665,856 under the ship target |
-| `build\wayfarer-selftest.exe` | 827,904 bytes — **not a deliverable**, never shipped |
-| `src\main.c` | ~8,180 lines, single translation unit |
+| **`build\wayfarer.exe`** | **786,432 bytes** — 653,568 under the ship target |
+| `build\wayfarer-selftest.exe` | 853,504 bytes — **not a deliverable**, never shipped |
+| `src\main.c` | ~10,530 lines, single translation unit |
 | `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. **64 records over 53 pixel streams** (11 are dream palette variants sharing a twin's stream), 76,048 bytes of const data. Never edit by hand |
 | Warnings | zero, under `-Wall -Wextra` |
-| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–07 and 12 (all 5 slices) all done.** See [[Phase Roadmap]]. Audio, save and UI are all still untouched |
+| Plan progress | **Phases 00–12 all done** — including 08 (save/load), 09 (restoration rebuild), 10 (motion), 11 (audio + HUD, ship critical) and 12 (dream realm, 5/5 slices). See [[Phase Roadmap]]. Only the submission checklist remains |
 
-> **If you are starting here: all twelve phases are done.** Phase 11 (ship critical) landed audio
-> and the HUD; Phase 12 (dream realm) is feature-complete on its own branch. What remains is the
-> submission checklist — second-machine smoke test, repo visibility, final wrap. Check the Agent
-> Log at the top of this file for anything another agent may have picked up.
+> **If you are starting here: all twelve phases are done, and the one bug the day's play found is
+> fixed.** Phase 11 (ship critical) landed audio and the HUD; the E-key restructure had silently
+> made shard pickups unreachable, now extracted into `try_interact` and covered by a `--shard-test`
+> regression. Everything ships from `feat/phase-11-ship-complete` (pushed). What remains is the
+> human submission checklist — merge to `main`, second-machine smoke test, repo visibility, final
+> wrap. Check the Agent Log at the top of this file for anything another agent may have picked up.
 
 ### What actually works right now
 
@@ -218,8 +223,11 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 - **8 DREAM SHARDS FEED A DREAM WELL THAT UNLOCKS ITS OWN FOUND SOUL.** Shards live in their own
   array — never `ents[]`, so `game_complete`'s all-entities mask is untouched. Feeding
   `SHARD_REQUIRED` (6 of 8) makes the Well's Soul redeemable, which is a pure function of
-  `shards_held` rather than a stored lock bit. `--play-test` is 50/50 with her unlocked and
-  redeemed on every seed. See decisions 53–56 and [[Phase 12 - Dream Realm]] Evidence, slice 5
+  `shards_held` rather than a stored lock bit. Pickup runs through `try_interact` — the exact
+  function the E key calls — because that branch was once unreachable and every test at the time
+  bypassed the key path (see the Agent Log and decision 60). `--play-test` is 50/50 with her
+  unlocked and redeemed on every seed. See decisions 53–56 and [[Phase 12 - Dream Realm]]
+  Evidence, slice 5
 - **THE DREAM REALM LOOKS LIKE A DIFFERENT PLACE, and it cost almost nothing.** `dream_shift()` is
   the one definition of the biome's colour; `tools/bake.ps1` carries the same formula because a
   sprite palette is recoloured at *bake* time, and `--sprite-test` checks every baked `_DREAM`
@@ -290,49 +298,50 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 - Restore confirm beat (audio), real-time safe: 0.136 ms worst case against a 21.333 ms deadline
 - Debug overlay, 12-seed grid view, title-bar stats, render instrumentation
 - **A 5×7 bitmap font** (`draw_text`, `draw_text_shadow`) and an **F3 live tuning overlay** for the
-  fog constants — `TAB` cycles rows, `-`/`=` adjust. **Both are self-test-only and cost the shipping
-  build 0 bytes**; `fog_lerp` reads `FOG_*_V` macros that expand back to the literals in a release
-  build. See [[Phase 03 - Legibility Tools]]
-- **The game has been played by a human being, once**, and read as "slightly enjoyable" — see §8
+  fog constants — `TAB` cycles rows, `-`/`=` adjust. The overlay is self-test-only and costs the
+  shipping build 0 bytes; the **font is un-gated since Phase 11**, because the HUD is the real
+  caller that lifted decision 25's gate. `fog_lerp` reads `FOG_*_V` macros that expand back to the
+  literals in a release build. See [[Phase 03 - Legibility Tools]]
+- **The game has been played by the user and friends, repeatedly** — the 2026-08-04 pre-art "the
+  gameplay is in early stage, it did feel slightly enjoyable", the 2026-08-05 art-in session, and
+  2026-08-06 sessions that found and re-verified the shard bug by hand — see §8
 
 ### What does NOT exist yet
 
-- **Any music.** The layered synth is still ahead. Only the confirm beat exists
-- **Any text in the shipping build.** The font exists but is gated behind `WAYFARER_SELFTEST`,
-  because nothing in the release build calls it yet — Found Soul restoration lines and a HUD are
-  Phase 09/11. Un-gating is a one-line change once a real caller exists, and the gate is what keeps
-  the +0-byte property true by construction rather than by remembering
-- **Save/load**
-- **Most ambient animation.** The *character* walks, **the portal vortex turns** and **the prompt
-  keycap bobs** — but nothing else sways, shimmers or smokes. The world is still largely static
-- **A HUD, or any on-screen text.** The prompt is a keycap, not writing; the font is still
-  self-test-only and nothing in the shipping build draws a letter
-- **Buildings do not respond to restoration.** The ruin→whole rebuild is designed but not built
-- **No worn paths between buildings.** The village reads as buildings-in-a-field, not as inhabited
-- Idle sway/breathe for Found Souls
-- Audio-layer-per-restore (the hook is wired; the layers are not)
+Every item on the old list is now built: music, on-screen text, save/load, ambient motion, the
+ruin→whole rebuild, worn paths, Found Soul sway and audio layers all ship. What genuinely remains:
+
+- **Wade-splash SFX** — deferred per [[Cut List]]'s descoping order (#5), documented, not forgotten
+- **A human judgement of the audio** — measured (deterministic, 0.325 ms worst case), never heard;
+  "does it sound good" is a human-ear question nobody has answered
+- **The second-machine smoke test** — the last unchecked [[QA Checklist]] item; a human task
+- **A public repo** — private today; the contest's visibility requirement is unconfirmed
+- **Shard-vs-decoration legibility** — the collect-8-find-6 loop's pickups still read like ambient
+  `PROP_CRYSTAL` decoration in stills; the palette/size pass is an unjudged open item (see §11)
 
 ### Git
 
 Remote: **`https://github.com/Nishmam12/matha-noshto-game`** — private, branch `main`.
 
-**Current branch: `feat/phase-12-dream-realm`, pushed through `367a4f9`.** `main` is at `ae788b4`,
-also pushed. Working tree is clean as of this handover's own commit — verify with `git status`
-before trusting that, since this note has needed correcting before.
+**Current branch: `feat/phase-11-ship-complete`, HEAD `7a39eac`, pushed, tracking
+`origin/feat/phase-11-ship-complete`.** `main` is at `b4f2fde` (Phases 08+09 merged via PR #1) —
+and that merge's base branch carried all of Phase 12, so `main` already has the dream realm. A
+straight line from `main` holds everything else: Phase 10, Phase 11, and the shard-pickup fix. The
+older `feat/phase-10-motion`, `feat/phase-11-ship`, `feat/phase-11-ship-latest` and
+`feat/phase-12-dream-realm` branches are all superseded by it. Working tree is clean as of this
+handover's own commit — verify with `git status` before trusting that, since this note has needed
+correcting before.
 
 ```
-367a4f9  Phase 12 task 10: the first UI, and the gate it exposed  <- HEAD, PUSHED
-                          (title undersells it - the body covers tasks 8, 9, 10 AND 11.
-                           Not amended; ask first if you want the title fixed.)
-87fcbd3  Handover for slice 4: the travel gap is closed
-3d03421  Phase 12 task 9: the dream realm stops being scenery
-50e8427  Phase 12 task 8: the first UI, and the gate it exposed
-cb74bf2  Handover and devlog for slice 3, and the trap it taught
-c3e4d30  The portal put the player somewhere she could not stand
-b35f25a  Phase 12 slice 3: the dream realm has a look, and a portal you can see
-0f4c982  Handover for a fresh chat: the direction changed and slices 1-2 are in
-4f4cf64  Phase 12 slice 2: a portal, and the proof it is load-bearing
-ae788b4  Handover for a fresh chat: the art is in, and one decision is waiting  <- main, PUSHED
+7a39eac  docs: update Phase 11 ship summary (unified interaction + shard fix)  <- HEAD, PUSHED
+7cd408a  fix: shards uncollectable since the E-key restructure - extract try_interact, test it
+0f87552  docs: Phase 11 ship-critical summary (softsynth, HUD, tests)          (user-authored)
+95e8872  docs: Phase 11 ship-critical summary, devlog session-06, handover + roadmap + QA updates
+8a27404  Phase 11: ship critical - 5-layer softsynth, multi-SFX, HUD with minimap, toasts, win
+                                                            banner (main.c +671/-58)
+0f90bb2  docs: Phase 10 motion summary detailing all changes and additions      (user authored)
+d78b106  Phase 10: motion — sway, shimmer, smoke, fireflies, soul-bob
+b4f2fde  Merge PR #1 (Phases 08+09 — and, through that branch, all of Phase 12)  <- main, PUSHED
 ```
 
 **`assets/` (217 files, 1.2 MB) IS committed** as of `df480a6` — the source PNGs plus their Godot
@@ -351,11 +360,12 @@ never need saying again.
 to a GitHub Release if a playable download is wanted.
 
 > **THE TEAM'S ART IS IN THE BUILD.** `assets/` holds **130 PNGs** across `buildings/`, `nature/`,
-> `player/`, `magical/`, `generated/`, plus 81 Godot `.import` sidecars, 1.2 MB total. **37 of them
-> are baked and wired** (player, nature, buildings) via `tools/bake.ps1` → `src/art_data.h`.
+> `player/`, `magical/`, `generated/`, plus 81 Godot `.import` sidecars, 1.2 MB total. **64 records
+> are baked and wired** via `tools/bake.ps1` → `src/art_data.h`: the original 37 (player, nature,
+> buildings) plus the portal/Well frames and 11 dream palette variants (which share pixel streams).
 > What is deliberately NOT baked, and why:
-> - **`magical/`** — 56 portal and crystal effect frames with no caller in the renderer. Baking a
->   sprite nothing draws is pure byte cost; same rule that kept the bitmap font at +0 bytes.
+> - **`magical/`'s remaining frames** (`fx_rift`, `fx_crystal`) — still no caller in the renderer.
+>   Baking a sprite nothing draws is pure byte cost.
 > - **`generated/`** — duplicates of the building sprites plus two sprite *sheets*.
 > - **The `.import` files** are Godot editor metadata: not shipped, not baked, and arguably should
 >   not be committed at all. That is still undecided.
@@ -433,7 +443,8 @@ $e = ".\build\wayfarer-selftest.exe"
 & $e --fade-test                            # prop-fade selection truth table + exact blend, 2 controls
 & $e --sector-test --seeds 30 --seed 1      # two landmasses, void band, separation, spawn sector
 & $e --portal-test --seeds 30 --seed 1      # portal load-bearing + standable landing + Kindle gate
-& $e --shard-test  --seeds 30 --seed 1      # shard placement, the Well's boundary, both controls
+& $e --shard-test  --seeds 30 --seed 1      # shard placement, the Well's boundary, PICKUP driven
+                                          #   through try_interact (the real E path), both controls
 & $e --gating-test --seeds 30 --seed 1      # walk-reachable == graph-reachable, all 4 tiers
 & $e --play-test   --seeds 50 --seed 1      # full headless playthroughs to completion
 & $e --audio-test 3000 --sfx                # callback timing under restore-beat load
@@ -447,7 +458,8 @@ $e = ".\build\wayfarer-selftest.exe"
                                                      #   --shard-at N does the same for a shard
 ```
 
-**All currently pass.** Last full run, **2026-08-06**, after Phase 11 (audio + HUD, ship critical):
+**All currently pass.** Last full run, **2026-08-06**, after Phase 11 (audio + HUD) **and the
+shard-pickup fix** — the whole suite was re-run after the E-key restructure change and stayed green:
 
 ```
 audio   : PASS  tone 439.9 Hz; --layers peak 0.6417; --layers --sfx peak 0.9151,
@@ -549,9 +561,10 @@ whether any of it *looks good* — see §8.
 .\build\wayfarer.exe --seed 3
 ```
 
-`WASD`/arrows move · `E`/`Space` restore · `F1` region overlay · `F2` 12-seed grid ·
-**`F11` borderless fullscreen** · `R` regenerate with next seed · `ESC` quit. Stats are in the
-**window title** (nothing in the release build draws text yet). `--frames N` runs exactly N frames
+`WASD`/arrows move · `E`/`Space` interact — portal, restore, or shard pickup via `try_interact` ·
+`F1` region overlay · `F2` 12-seed grid · **`F11` borderless fullscreen** · `R` regenerate with
+next seed (also restarts the music) · `F9` quick-save, `F5` quick-load · `ESC` quit. Stats are in
+the **window title**; the on-screen HUD carries the counters. `--frames N` runs exactly N frames
 then exits 0. `--scale N` forces the window scale.
 
 **Self-test binary only:** `F3` toggles the live fog-tuning overlay, `TAB` cycles the selected row,
@@ -565,9 +578,22 @@ held, so it can be screenshotted without a human at the keyboard.
 
 ## 5. Code map — `src/main.c`, in order
 
-Line numbers below were measured at `e42f2f4` and are now **substantially stale** — the file has
-grown from ~6,500 to ~6,972 lines since. Treat this as a map of the file's *order* and **trust the
-grep, not the number.**
+Line numbers below were measured at `7cd408a` (2026-08-06) — the file is now **~10,530 lines**.
+Treat this as a map of the file's *order* and **trust the grep, not the number.**
+
+**Phase 11's new symbols, in file order** (grep for these, they have no reliable line numbers):
+
+| Symbol | What it is |
+|---|---|
+| `typedef struct { ... } Audio` (~288) | All synth state. The game thread may touch ONLY the atomics below |
+| `sfx_fire(a, kind)` / `SFX_CHIME`/`SFX_SHARD`/`SFX_PORTAL` (317, 334) | One-entry SFX requests; the callback drains them |
+| `layer_fire` / `voice_fire` / `reset_req` (460–462) | The `SDL_atomic_t` fields the game thread bumps — fragment layers, the Voice of Souls, full synth reset (R/F9) |
+| `synth_latch` / `synth_step` (496, 527) | Callback-side: latch the atomics once per block, step every voice as a pure function of a sample counter |
+| `FONT_FIRST`/`FONT_LAST`/`FONT_GLYPHS` (3345–3350) | **0x20–0x7A, 91 glyphs.** Was uppercase-only — every lowercase HUD string silently rendered nothing until this extension |
+| `draw_glyph` / `draw_text` / `draw_text_shadow` (3442+) | The font, now un-gated: the HUD is the real caller that lifted decision 25's gate |
+| `hud_draw` (3586) / `HUD_TOAST_FRAMES` (3489) | Counters top-left, cached minimap top-right (redraw on `mm_dirty` or every 15 frames), toasts bottom-centre (fade last 30 of 180), seed bottom-right, win banner |
+| `try_interact` (3650) | **The whole interact key in one function**: portal → restore → shard pickup, returns 1/2/3/0. E/Space call only this. It exists because the shard branch was unreachable once — see decision 60 |
+| `font_selftest` (9408) / `hud_selftest` (9522) | The pixel-probe checkers behind `--font-test` / `--hud-test` |
 
 **Phase 12's new functions, in file order** (grep for these, they have no reliable line numbers):
 
@@ -651,7 +677,7 @@ grep, not the number.**
 | ~2545 | **Baked sprites** | `art_stream_ok` (self-test only), `art_palette`, `draw_sprite`. Anchor = bottom-centre; fog applied to the palette once per draw |
 | ~1745 | **Building art seam** | `art_bld_small`/`art_bld_large`, `building_sprite_id` — read by `world_heights`, `tile_colour` AND `draw_building`, deliberately one decision |
 | ~3140 | **Prop art seam** | `prop_art[]` table; `draw_prop` dispatches to a baked sprite or falls back to the procedural routine |
-| 1997 | **Bitmap font** | `FONT_*` constants, the flat `FONT_5X7` table (2007), `draw_glyph` (2068), `draw_text`, `draw_text_shadow`. All inside `#if WAYFARER_SELFTEST` |
+| ~3345 | **Bitmap font** | `FONT_*` constants (3345), the flat `FONT_5X7` table, `draw_glyph` (3442), `draw_text`, `draw_text_shadow` — **0x20–0x7A, 91 glyphs, un-gated since Phase 11** (the HUD is the caller). The F3 tuning overlay is the only font-adjacent thing still self-test-only |
 | 2560 | **House parts** | `BV_*` variant accessors, wall/roof palettes; `draw_building` (2715) — roof face-split, facade derived from the wall-top diamond |
 | 2380 | **Props** | palettes, `draw_tree`/`bush`/`rock`/`reed`/`flower`/`crystal`/`stump` (all with contact shadows), `prop_at`, `draw_prop` |
 | 2921 | Render | `tile_reveal`, `tile_colour` (2921), `render` (2975) — the band sweep; `render_grid` (3195), `camera_follow` (3267, **now eased**) |
@@ -677,7 +703,7 @@ grep, not the number.**
 | `SIGHT_MAX` | **0.50** (was 0.42) | Raised alongside the fog rewrite so walked ground keeps more colour |
 | `FOG_TINT_R/G/B` | **60 / 70 / 86** | Was (44, 52, 68) — a *dark* blue-grey. Now a light cool haze. Took three tuning passes; **tune these with the F3 overlay in a self-test build, never by rebuild-and-screenshot again** |
 | `FOG_KEEP` | **0.50** | Fraction of a colour's own luminance contrast preserved at reveal 0. Replaces a flat 0.55 luminance scale + 0.45 tint-pull that crushed contrast. Also F3-adjustable |
-| `FONT_W` / `FONT_H` / `FONT_SCALE` | **5 / 7 / 2 (new)** | Glyph cell and its logical-pixel magnification. Charset is `0x20`–`0x5F`: uppercase, digits, punctuation. No lowercase |
+| `FONT_W` / `FONT_H` / `FONT_SCALE` | **5 / 7 / 2** | Glyph cell and its logical-pixel magnification. Charset is **`0x20`–`0x7A`: digits, A–Z, a–z, punctuation — 91 glyphs**, extended in Phase 11; the HUD renders lowercase now |
 | `FACE_L` / `FACE_R` | 58 / 76 | Unchanged — terrain side-face shading, per cent |
 | `ROOF_L` | **64 (new)** | Roof down-left slope shading, per cent of true colour. New this session — see Phase 02 |
 | `ELEV_STEP` / `ELEV_MAX` | 12 / 48 | Unchanged |
@@ -996,6 +1022,31 @@ New decisions from the Phase 12 slice 5 session (2026-08-06):
     "restored 20/19" bug the portal-crossing code already fixed once, in the neighbourhood of
     decision 29.
 
+New decisions from the Phase 11 ship-critical session (2026-08-06):
+
+57. **The music is a static-table softsynth: every voice is a pure function of a sample counter,
+    so determinism is by construction, not by discipline.** No samples, no allocation, no random
+    access inside the callback. Two fresh states produce bit-identical 96,000-sample streams —
+    proven — which is what "audio plays identically everywhere" rests on.
+58. **The game thread touches synth state ONLY through atomics.** `layer_fire`/`voice_fire`/
+    per-SFX `fire`/`reset_req` are `SDL_atomic_t`; the callback latches them once per block and
+    owns everything else. R/F9 zero the synth via `reset_req` with no race by construction.
+59. **Restore layers are a function of COUNT, not of which fragment.** Strings at frag count 1,
+    Pad at 2, Bells at 3; souls add the Voice of Souls. No per-fragment identity lookup to
+    maintain, and the reveal a player hears tracks the reveal she sees.
+60. **The interact key runs ONE function: `try_interact` — portal → restore → shard pickup, in
+    that order, returning 1/2/3/0.** This function exists because the Phase 11 restructure
+    orphaned the shard branch and no test drove the key path (the autopilot calls
+    `try_collect_shard` directly; `--shard-test` called `try_restore`). The ordering decision now
+    lives in exactly one place, and `--shard-test` drives exactly that function — see §7.
+61. **The HUD is verified by pixel probes, not screenshots.** `--hud-test` counts lit pixels per
+    element, asserts the minimap's coverage, demands the exact-white player marker, and simulates
+    world frames (surface refilled between draws) to prove the toast shows AND expires.
+62. **A bitmap font with no lowercase is a silent black box.** The first HUD rendered nothing but
+    digits because every string was lowercase and `draw_glyph` skipped out-of-range characters —
+    no error, no warning. The charset is now 0x20–0x7A by decision, and `--font-test`'s expected
+    count derives from the table itself (2,236 → 3,736 with zero test edits).
+
 ---
 
 ## 7. Traps — each of these already cost time once
@@ -1240,6 +1291,28 @@ true and are not repeated in full here — see git history at `545598f` for verb
   reads as surprisingly out of date, check whether something else has been writing to it before
   assuming your own last edit didn't take.
 
+**New in the Phase 11 ship-critical session (2026-08-06):**
+
+- **A harness that never drives the real input path cannot catch a branch the restructure
+  orphaned.** The E-key chain `if (!grid && try_portal) … else if (!grid) { try_restore } …
+  else if (!grid && try_collect_shard)` made the shard branch dead code the moment the restore
+  branch was widened to `else if (!grid)` — and every test stayed green all day, because the
+  autopilot collects shards by calling `try_collect_shard` directly and `--shard-test` drove
+  `entity_in_reach`/`try_restore`, never the key path. Found by a human playing, within minutes.
+  **The fix's regression test drives `try_interact` — the exact function E runs — and that is the
+  load-bearing change, not the one-line handler.**
+- **`--grid-test` is not a flag.** Unknown self-test arguments fall through to opening a game
+  window and hanging silently — twice this session, ~10 minutes each, killed by timeout. Check the
+  flag exists before running it (the real world-shape flag is `--grid`).
+- **A draw-once test of a fading overlay fails for the wrong reason.** The toast's 180-frame fade
+  only *looks* like 180 frames because the world redraws over it every frame; a test that draws the
+  HUD onto a static surface and counts later sees stale pixels. The toast-expired check now
+  refills the surface between draws, mirroring the real frame loop.
+- **A font table's silent range check is the worst kind of failure: total.** `draw_glyph` returned
+  early on out-of-range characters, so the first HUD pass showed nothing but digits with every call
+  "working". The lowercase extension and the 3,736-px expectation were both derived from the table
+  (no magic numbers), so the test needed no edits — the same property decision 23 was built for.
+
 ---
 
 ## 8. Verified vs NOT verified
@@ -1390,6 +1463,21 @@ controls; audio callback timing; render cost). New this session:
   bright vertical burst. `--shards N` and `--shard-at N` (self-test only) exist because nothing
   else could reliably put a camera at either — both are reached by reservoir sampling, so no seed
   or vantage shows one without positioning the player directly.
+- **The shard pickup regression passes through the EXACT function the E key runs**, after the
+  branch was proven dead and unreachable by the whole suite: `--shard-test` plants a shard at the
+  player's feet at the Well, drives `try_interact`, and asserts the pickup (return 3, held count,
+  shard consumed). Full suite re-run green after the restructure; release size unchanged at
+  786,432 (+0).
+- **The softsynth is deterministic and inside the deadline.** Two fresh states → bit-identical
+  96,000 samples; worst case 0.325 ms of the 21.333 ms deadline; peak 0.9151, NaN 0, out-of-range
+  0, partial writes 0; fragment layers and the Voice of Souls wired to restore counts. Measured,
+  not heard — see NOT verified.
+- **The shipping exe's import table lists only OS DLLs** — kernel32, user32, gdi32, winmm,
+  imm32, ole32/oleaut32, version, advapi32, setupapi, shell32, msvcrt. No SDL DLL, no dev-tool
+  dependency; "runs clean without dev tools" is discharged in code terms (the physical
+  second-machine run is still the human item).
+- **The toast shows AND expires** — the expired check refills the surface between draws to
+  simulate the world redraw, mirroring the real frame loop (decision 61).
 
 ### NOT verified — be honest about these
 
@@ -1517,6 +1605,9 @@ controls; audio callback timing; render cost). New this session:
 | **The bush's magenta base disc** | **RESOLVED AND SHIPPED 2026-08-05** — 163 px stripped at bake, real contact shadow drawn instead, guarded by `--sprite-test`. See decision 41 |
 | **Rock outcrops as pale floating cubes** | **RESOLVED AND SHIPPED 2026-08-05** — stone tops out at luminance 74 against grass at 78, guarded by `--fog-test`. Outcrops kept, so no generator change and no re-argued proof. See decision 42 |
 | **A second biome** | **RESOLVED, SPECCED AND SHIPPED, 2026-08-05/06.** A portal in the `TERRAIN_DARK` region to a Lumiara-style dream realm — all 5 slices, all 11 tasks built, tested and committed. `--play-test` 50/50 with the whole loop (travel, shards, the Well) exercised. See [[Phase 12 - Dream Realm]] |
+| **Audio — the softsynth + SFX** | **RESOLVED AND SHIPPED 2026-08-06** — 5 layers (Base/Strings/Pad/Bells/Voice of Souls), deterministic by construction, 0.325 ms worst case; chime/shard/portal SFX. Wade-splash deferred per [[Cut List]] #5. Whether it *sounds good* is a human judgement nobody has made. See decisions 57–59 |
+| **HUD + on-screen text** | **RESOLVED AND SHIPPED 2026-08-06** — counters, minimap, toasts, win banner on the 91-glyph font (0x20–0x7A); the font is un-gated because it now has a real caller. See decisions 61–62 |
+| **The single interact key** | **RESOLVED AND SHIPPED 2026-08-06** — `try_interact` owns portal/restore/shard pickup in one function; `--shard-test` drives it. See decision 60 |
 | **"Lacks the pixelated game feel"** | **LARGELY ANSWERED BY THE ART, 2026-08-05.** The worry was that 960×540 ×2 reads too smooth. In practice the delivered pixel art supplies the chunkiness the procedural shapes lacked, and it was authored against a 48 px diamond — the scale already shipped — so **no re-authoring was needed and no resolution change was required.** Dropping `LOGICAL_W`/`LOGICAL_H` remains available as a taste lever, but it is no longer blocking anything |
 | **Input orientation** | **RESOLVED, 2026-08-05** — screen-aligned, `dd8cfef`. See decision 28 |
 | Camera easing | **RESOLVED in mechanism, OPEN in feel** — deadzone + exponential ease shipped, but `CAM_DEADZONE`/`CAM_EASE` are first guesses nobody has driven by hand |
@@ -1553,15 +1644,16 @@ be re-derived:
 
 **The picture changed on 2026-08-05, and in the expected direction.** All game *logic* ever written
 — the island generator, village clustering, elevation, seven kinds of procedural prop,
-mix-and-match buildings, the fog rewrite, a bitmap font, a tuning overlay, screen-aligned input, an
-eased camera, rivers, bridges, waterfalls, and six test harnesses with negative controls — still
-comes to about **23 KB**, a rounding error next to SDL2's ~664 KB.
+mix-and-match buildings, the fog rewrite, a bitmap font, a tuning overlay, a 5-layer softsynth, a
+HUD, six test harnesses with negative controls — still comes to about **23 KB**, a rounding error
+next to SDL2's ~664 KB.
 
-**Art is the first thing to cost real bytes: 62,976 for 37 sprites**, roughly 2.7× everything else
-ever written. It is still only 8% of the free space, and the remaining 93 unbaked sprites would fit
-several times over. So the conclusion is unchanged in substance — **bytes are not the constraint** —
-but the *shape* is now worth knowing: if anything ever threatens the limit it will be assets, not
-code, and the lever is which sprites get baked, not how the game is written.
+**Art is the first thing to cost real bytes: 62,976 for the first 37 sprites**, and the bake now
+carries **64 records / 76,048 const-data bytes** (the portal/Well frames and dream palette variants
+added since). Even so it is ~11% of the free space. So the conclusion is unchanged in substance —
+**bytes are not the constraint** — but the *shape* is now worth knowing: if anything ever threatens
+the limit it will be assets, not code, and the lever is which sprites get baked, not how the game
+is written.
 
 Authoring judgement remains the real cost. This session's expensive mistakes were writing a test
 after the code it was meant to de-risk, and forgetting that constants calibrated against small
@@ -1673,18 +1765,18 @@ the mechanism is fully proven (placement, collection, the autopilot finding all 
 *legibility* is not, and this is the kind of thing that needs a human's eye, not another test. See
 [[Phase 12 - Dream Realm]] Evidence, slice 5, for the rest.
 
-After Phase 12: **[[Phase 08 - Save Load]]**, then motion (Phase 10) and what remains of Phase 09
-(the restoration rebuild, worn paths, and decisions 40–42's siblings — **check the Agent Log above
-first**, another agent may already be on this). **Hard stop 2026-08-14**, after which Phase 11
-(audio, font-dependent HUD, QA, submission) takes over regardless.
+**All of it is done.** Phases 08 (save/load), 09 (restoration rebuild), 10 (motion) and 11 (audio +
+HUD) landed on schedule after Phase 12; every phase's DoD is ticked and the full suite is green.
+The only outstanding engine bug found by play was the unreachable shard pickup, fixed same-day
+(`7cd408a`) with a regression that drives the real key path. What remains is the **human submission
+checklist**: merge `feat/phase-11-ship-complete` into `main`, run the [[QA Checklist]]'s
+second-machine smoke test, decide the repo's visibility, tag the submission commit, push.
 
 > **Do not re-raise the schedule.** It was put to the user on 2026-08-05 with the full arithmetic;
 > they considered it and said there is time. That is their call and it has been made.
 
-**Schedule reality, as of this handover:** today is **2026-08-06**; the hard stop on art/backbone
-work is **2026-08-14** — **eight days from now**; the contest deadline is **2026-09-04**. Phase 12
-finishing in one calendar day is ahead of where the arithmetic assumed it would be, not behind —
-this is not a reason to relax, since audio (a softsynth from zero), save/load, and any on-screen
-HUD are all **still completely untouched**. **Judging order is finished → under size → fun.** If
-something has to give, take it from [[Cut List]] — the most likely candidate remains cutting Kindle
-and shipping Wade + Climb only.
+**Schedule reality, as of this handover:** today is **2026-08-06**; the contest deadline is
+**2026-09-04** — development is complete a month early, with **653,568 bytes of headroom**. The
+buffer week is real: submit early, not at the deadline. **Judging order is finished → under size →
+fun.** The only remaining *fun* risk is the unjudged stuff in §8 — nothing else needs to give;
+[[Cut List]] stays pre-committed but nothing is expected to be cut.
