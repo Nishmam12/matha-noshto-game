@@ -569,6 +569,22 @@ typedef struct {
 #define DREAM_FRAGMENTS 4   /* of FRAGMENT_COUNT, and never the 3 ability grants */
 #define DREAM_SOULS     2   /* of SOUL_COUNT */
 
+/* Phase 12 tasks 10-11.
+ *
+ * Shards live in their OWN array, not in ents[] — game_complete() is frags_restored +
+ * souls_restored >= ENTITY_COUNT, EVERY entity, so folding an 8-shard scavenger hunt into that
+ * mask would make it mandatory for the ending the moment the Well grants a Soul. Kept separate,
+ * game_complete is untouched and shard sufficiency gets its own clause (shards_sufficient) rather
+ * than a silent tightening of an existing one.
+ *
+ * WELL_SOUL_IDX is the first Found Soul index, and Phase 12 task 9's placement loop already put
+ * the first DREAM_SOULS souls in the dream sector — so this one was ALREADY there; task 11 only
+ * changes where exactly she stands (beside the Well rather than anywhere reachable) and adds the
+ * lock. The OTHER dream soul, FRAGMENT_COUNT+1, is placed normally and always was. */
+#define SHARD_COUNT    8
+#define SHARD_REQUIRED 6            /* of SHARD_COUNT: two can be awkwardly sited without stranding anyone */
+#define WELL_SOUL_IDX  FRAGMENT_COUNT
+
 typedef struct {
     int   tile;
     Uint8 region;
@@ -684,6 +700,11 @@ typedef struct {
      * invariant holds unchanged: collision sees `solid` and regions[].terrain and nothing else.
      * Travel is an interact, not a movement. */
     int    portal[2];
+    /* The Dream Well: one fixed landmark beside the portal's dream end, or -1. Set once, in
+     * place_portal, and never touched again — render-only in the sense that collision has no
+     * opinion about it (it occupies an ordinary open tile), but NOT render-only in the sense
+     * decision-12's list means: the entity system reads it, because WELL_SOUL_IDX stands here. */
+    int    well;
     Building bld[BUILDING_MAX];
     int    bld_count;
     Region regions[REGION_COUNT];
@@ -750,6 +771,12 @@ typedef struct {
      * the world's animation time, as opposed to Player.anim which is the walk cycle and stops
      * when she does. Render-only in the same sense as `height` and `surf`. */
     float  clock;
+    /* Dream shards, Phase 12 task 10. shards[i] is a tile index while uncollected, -1 once
+     * picked up or never placed — the same -1-means-resolved idiom World.portal already uses.
+     * shards_held is the running count, which is all the Well (task 11) ever reads: shards are
+     * consumed on pickup, not carried in an inventory a HUD would have to show. */
+    int    shards[SHARD_COUNT];
+    int    shards_held;
 } Game;
 
 typedef struct {
@@ -1654,6 +1681,19 @@ static void place_entities(World *w, Rng *rng, Entity *ents)
         regions_by_sector(w, &over_mask, &dream_mask);
 
         for (i = 3; i < ENTITY_COUNT; i++) {
+            /* Phase 12 task 11: she does not get a region/tile PICK at all. She stands wherever
+             * place_portal put the Well, which already ran before regions_build — so w->well and
+             * w->region are both settled by now. Still an ordinary Entity for every other
+             * purpose: world_solvable's reachability walk, the restored-mask, game_complete. Only
+             * entity_in_reach treats her differently, and only while shards_held < SHARD_REQUIRED. */
+            if (i == WELL_SOUL_IDX) {
+                ents[i].tile = w->well;
+                ents[i].region = (w->well >= 0)
+                                ? w->region[w->well / WORLD_W][w->well % WORLD_W]
+                                : REGION_NONE;
+                continue;
+            }
+
             /* Phase 12 task 9's quota. The first DREAM_FRAGMENTS non-grant fragments and the
              * first DREAM_SOULS Souls are drawn from the dream side; everything else is placed
              * exactly as before.
@@ -1707,28 +1747,78 @@ static int entities_split_ok(const Entity *ents)
     return frags >= DREAM_FRAGMENTS && souls >= DREAM_SOULS;
 }
 
+/* All 8 dream shards, in reachable dream-sector regions. Phase 12 task 10.
+ *
+ * Full abilities, not the staged `held` the three grants use: by the time a player is chasing an
+ * 8-shard scavenger hunt she has already crossed the portal, which means she already holds
+ * whatever she needed to get there. Staging shard placement the way the grants are staged would
+ * buy nothing and risks one landing behind an ability granted AFTER the portal — which does not
+ * exist.
+ *
+ * NO NON-DREAM FALLBACK, unlike place_entities' generic placement. A "dream shard" found in the
+ * overworld would defeat the point, so a region that cannot supply one is simply skipped; if the
+ * dream sector has too little reachable ground to hold SHARD_REQUIRED, shards_sufficient()
+ * rejects the seed and the generate-then-verify loop tries again — the same shape as
+ * entities_split_ok, not a new mechanism. */
+static void place_shards(const World *w, Rng *rng, int *shards)
+{
+    Uint32 reach = regions_reachable(w, (Uint8)(ABIL_WADE | ABIL_CLIMB | ABIL_KINDLE));
+    Uint32 over_mask, dream_mask, pool;
+    int i;
+
+    regions_by_sector(w, &over_mask, &dream_mask);
+    pool = reach & dream_mask;
+
+    for (i = 0; i < SHARD_COUNT; i++) {
+        int r = pick_region(pool, w->region_count, rng);
+        shards[i] = (r < 0) ? -1 : pick_tile_in_region(w, r, rng, 1);
+    }
+}
+
+/* Does this layout place enough shards to feed the Well? Phase 12 task 10.
+ *
+ * Kept OUT of world_solvable for the same reason entities_split_ok is: that function means
+ * exactly one thing — every ENTITY reachable in ability order — and shards are not entities.
+ * place_shards already constrains every shard it places to a reachable dream region, so
+ * "sufficient" only has to count what actually landed. */
+static int shards_sufficient(const int *shards)
+{
+    int i, n = 0;
+    for (i = 0; i < SHARD_COUNT; i++)
+        if (shards[i] >= 0) n++;
+    return n >= SHARD_REQUIRED;
+}
+
 /* Generate-then-verify, with a fallback that cannot fail. Returns attempts used
  * (positive), or a negative depth if it had to ungate regions to guarantee
  * solvability. design/Cut List.md lists the reachability guarantee as never
  * cuttable, so losing some gating is the correct trade against shipping a seed
  * that cannot be completed. */
-static int world_place_and_verify(World *w, Rngs *rngs, const int *depth, Entity *ents)
+static int world_place_and_verify(World *w, Rngs *rngs, const int *depth, Entity *ents,
+                                  int *shards)
 {
     int attempt, d, i;
 
     for (attempt = 0; attempt < 64; attempt++) {
         regions_assign_terrain(w, &rngs->terrain, depth);
         place_entities(w, &rngs->entities, ents);
-        if (world_solvable(w, ents, NULL) && entities_split_ok(ents))
+        place_shards(w, &rngs->entities, shards);
+        if (world_solvable(w, ents, NULL) && entities_split_ok(ents)
+            && shards_sufficient(shards))
             return attempt + 1;
     }
 
-    /* Ungate outward, shallowest first, keeping as much gating as possible. */
+    /* Ungate outward, shallowest first, keeping as much gating as possible. Shards are still
+     * placed here so the Well is never left permanently unfeedable, but — same as
+     * entities_split_ok — sufficiency is not re-checked: this path exists to guarantee a
+     * completable world at any cost, and design/Cut List.md is explicit that the reachability
+     * guarantee is the one thing that must never be traded for a fuller dream realm. */
     for (d = 1; d <= REGION_COUNT; d++) {
         for (i = 0; i < w->region_count; i++)
             if (depth[i] == d)
                 w->regions[i].terrain = TERRAIN_NORMAL;
         place_entities(w, &rngs->entities, ents);
+        place_shards(w, &rngs->entities, shards);
         if (world_solvable(w, ents, NULL))
             return -d;
     }
@@ -1736,6 +1826,7 @@ static int world_place_and_verify(World *w, Rngs *rngs, const int *depth, Entity
     for (i = 0; i < w->region_count; i++)
         w->regions[i].terrain = TERRAIN_NORMAL;
     place_entities(w, &rngs->entities, ents);
+    place_shards(w, &rngs->entities, shards);
     return -100;
 }
 
@@ -1933,6 +2024,13 @@ static int entity_in_reach(const Game *g)
         float ex, ey, dx, dy, d2;
         if (g->ents[i].restored || g->ents[i].tile < 0)
             continue;
+        /* Phase 12 task 11: the Well's Soul is a real, ordinary entity everywhere else — the
+         * region graph, the restored-mask, world_solvable — but she is not REDEEMABLE until the
+         * Well has been fed. Excluding her here, rather than storing a mutable "locked" flag, is
+         * deliberate: whether she is available is a pure function of shards_held, so there is
+         * nothing to keep in sync and nothing that can go stale. */
+        if (i == WELL_SOUL_IDX && g->shards_held < SHARD_REQUIRED)
+            continue;
         ex = (float)(g->ents[i].tile % WORLD_W) * TILE + TILE * 0.5f;
         ey = (float)(g->ents[i].tile / WORLD_W) * TILE + TILE * 0.5f;
         dx = ex - g->p.x;
@@ -1944,6 +2042,43 @@ static int entity_in_reach(const Game *g)
         }
     }
     return best;
+}
+
+/* Nearest uncollected dream shard within reach, or -1. Same proximity shape as
+ * entity_in_reach, deliberately — a shard is another thing you walk up to and press E on. */
+static int shard_in_reach(const Game *g)
+{
+    int best = -1, i;
+    float best_d2 = INTERACT_RADIUS * INTERACT_RADIUS;
+
+    for (i = 0; i < SHARD_COUNT; i++) {
+        float ex, ey, dx, dy, d2;
+        if (g->shards[i] < 0)
+            continue;
+        ex = (float)(g->shards[i] % WORLD_W) * TILE + TILE * 0.5f;
+        ey = (float)(g->shards[i] / WORLD_W) * TILE + TILE * 0.5f;
+        dx = ex - g->p.x;
+        dy = ey - g->p.y;
+        d2 = dx * dx + dy * dy;
+        if (d2 <= best_d2) {
+            best_d2 = d2;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* Shards are consumed on pickup, not carried — shards_held is the only record that is
+ * ever kept, which is what lets the Well's progress show with no inventory and no HUD. */
+static int try_collect_shard(Game *g)
+{
+    int i = shard_in_reach(g);
+
+    if (i < 0)
+        return -1;
+    g->shards[i] = -1;
+    g->shards_held++;
+    return i;
 }
 
 /* The loop the whole game is built around: restore a memory, the region's
@@ -2345,10 +2480,45 @@ static int biggest_component_tile(World *w, Rng *rng, Uint8 *seen, int *stack, i
     return best_first; /* sampling failed on a tiny component; the corner will do */
 }
 
+/* A `seen`-marked tile close to `near`, walking outward in Chebyshev rings, or -1. Phase 12 task
+ * 11: the Dream Well sits BESIDE the portal's dream end, not crowding it.
+ *
+ * Starts at ring 4, not 2. The first version started at 2 and MEASURED as a placement bug rather
+ * than a judgement call: a 2-tile diagonal offset projects to about one arch-height's worth of
+ * screen distance in this projection, so the Well's own sprite drew inside the arch's silhouette
+ * and screenshotting "every Well stage" (the phase file's own verification gate) showed only a
+ * portal. Found by looking, not by a test — the same class of bug as the ziggurat roofs.
+ *
+ * Deterministic rather than randomised — a landmark's direction from the portal is incidental,
+ * and determinism keeps the same seed reproducing the same layout with no RNG stream to sync. */
+static int near_open_tile(const Uint8 *seen, int near, int max_r)
+{
+    int nx = near % WORLD_W, ny = near / WORLD_W, r;
+
+    for (r = 4; r <= max_r; r++) {
+        int dx, dy;
+        for (dy = -r; dy <= r; dy++)
+            for (dx = -r; dx <= r; dx++) {
+                int x, y, idx;
+                if (dx > -r && dx < r && dy > -r && dy < r)
+                    continue; /* ring only: the interior was already checked at a smaller r */
+                x = nx + dx;
+                y = ny + dy;
+                if (x < 0 || y < 0 || x >= WORLD_W || y >= WORLD_H)
+                    continue;
+                idx = y * WORLD_W + x;
+                if (seen[idx])
+                    return idx;
+            }
+    }
+    return -1;
+}
+
 static void place_portal(World *w, Rng *rng, Uint8 *seen, int *stack)
 {
     w->portal[0] = -1;
     w->portal[1] = -1;
+    w->well = -1;
     if (PORTAL_SUPPRESSED)
         return;
 
@@ -2363,7 +2533,17 @@ static void place_portal(World *w, Rng *rng, Uint8 *seen, int *stack)
     if (w->portal[0] < 0 || w->portal[1] < 0) {
         w->portal[0] = -1;
         w->portal[1] = -1;
+        return; /* no dream end, so nothing to put a Well beside */
     }
+
+    /* `seen` still marks EXACTLY the dream component biggest_component_tile just sampled from —
+     * see the note on that function: its second re-flood leaves the largest component's tiles
+     * marked and nothing clears them before returning. Phase 12 task 11's one fixed landmark.
+     * Falls back to co-locating with the portal on the rare tiny-component seed, which is always
+     * a legal tile since portal[1] itself came from this same seen set. */
+    w->well = near_open_tile(seen, w->portal[1], 24);
+    if (w->well < 0)
+        w->well = w->portal[1];
 }
 
 /* Spawn in the LARGEST open region, not merely the nearest open tile.
@@ -2489,7 +2669,7 @@ static int game_init(Game *g, Rngs *rngs)
 
         regions_build(&g->w, &sc, best_idx);
         regions_depth(&g->w, depth);
-        g->gen_attempts = world_place_and_verify(&g->w, rngs, depth, g->ents);
+        g->gen_attempts = world_place_and_verify(&g->w, rngs, depth, g->ents, g->shards);
     }
 
     /* Last, and after terrain assignment: purely derived, purely for drawing.
@@ -3357,9 +3537,10 @@ static void draw_sprite(SDL_Surface *fb, int id, int cx, int by, float rev)
  * would be the first half of a loop and would jump on wrap; taken every other frame it is a
  * complete cycle at half the rate, which is the whole point of choosing them this way.
  *
- * fx_well and fx_crystal are deliberately NOT baked. Nothing draws the Well until slice 5, and
- * nothing in this phase draws fx_crystal at all — baking a sprite with no caller is pure byte
- * cost, the rule that kept the bitmap font at +0 shipping bytes. */
+ * fx_crystal is still NOT baked: nothing in this phase draws it — the dream realm's crystal
+ * decoration and the shard pickup are both procedural (draw_crystal, draw_shard) — and baking a
+ * sprite with no caller is pure byte cost, the rule that kept the bitmap font at +0 shipping
+ * bytes. fx_well IS now baked; see below. */
 #define PORTAL_FRAMES 8
 #define PORTAL_FPS    8.0f   /* one full turn of the vortex per second */
 
@@ -3367,6 +3548,51 @@ static const short portal_frames[PORTAL_FRAMES] = {
     ART_FX_PORTAL_0,  ART_FX_PORTAL_2,  ART_FX_PORTAL_4,  ART_FX_PORTAL_6,
     ART_FX_PORTAL_8,  ART_FX_PORTAL_10, ART_FX_PORTAL_12, ART_FX_PORTAL_14
 };
+
+/* The Dream Well, Phase 12 task 11. Same halving as the portal — `_0 _2 _4 … _14`, a complete
+ * loop at half rate — but unlike the portal this one is NOT a constant loop: the authored frames
+ * run calm (original frame 8, our index 4) out to a bright vertical burst at both ends (0 and 15),
+ * confirmed by looking at the actual PNGs rather than assumed from the filename. That shape is
+ * used rather than fought: an unfed Well sits on its calm frame, motionless; fed but short of
+ * SHARD_REQUIRED it stirs through a narrow band around calm; fully fed it plays the whole loop,
+ * burst included — "progress shows in the Well's own animation" (the spec's words), read as "how
+ * much of the animation range is unlocked" rather than as a literal fill gauge. */
+#define WELL_FRAMES 8
+#define WELL_FPS    2.0f   /* a slow ambient pulse, calmer than the portal's spin */
+
+static const short well_frames[WELL_FRAMES] = {
+    ART_FX_WELL_0,  ART_FX_WELL_2,  ART_FX_WELL_4,  ART_FX_WELL_6,
+    ART_FX_WELL_8,  ART_FX_WELL_10, ART_FX_WELL_12, ART_FX_WELL_14
+};
+
+enum { WELL_EMPTY = 0, WELL_PARTIAL, WELL_FULL };
+
+static int well_stage(int shards_held)
+{
+    if (shards_held >= SHARD_REQUIRED) return WELL_FULL;
+    if (shards_held > 0)               return WELL_PARTIAL;
+    return WELL_EMPTY;
+}
+
+/* Which of the 8 halved frames to show, given the Well's stage and the world clock. PURE, so
+ * --fade-test (already the home of prompt_bob) can sweep it directly rather than inferring
+ * motion from pixels. */
+static int well_frame(int stage, float t)
+{
+    static const int calm_band[3] = { 3, 4, 5 }; /* around index 4, the authored calm frame */
+    int f;
+
+    if (stage == WELL_EMPTY)
+        return 4;
+    if (stage == WELL_PARTIAL) {
+        f = (int)(t * WELL_FPS) % 3;
+        if (f < 0) f += 3;
+        return calm_band[f];
+    }
+    f = (int)(t * WELL_FPS) % WELL_FRAMES;
+    if (f < 0) f += WELL_FRAMES;
+    return f;
+}
 
 static const short player_frames[FACE_COUNT][WALK_FRAMES] = {
     { ART_CHAR_PLAYER_N_0, ART_CHAR_PLAYER_N_1, ART_CHAR_PLAYER_N_2, ART_CHAR_PLAYER_N_3 },
@@ -3583,6 +3809,31 @@ static void draw_crystal(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
     }
     fill_rect(fb, cx - 1, by - ch - PX(2), PX(2), PX(3),
               fog_lerp(fb, 0xf0, 0xe8, 0xff, rev));
+}
+
+/* A dream shard: a pickup, not decoration. Phase 12 task 10.
+ *
+ * Reuses draw_crystal's tapering-shard SHAPE rather than growing a new primitive — shape was
+ * never what would distinguish a shard from the ambient PROP_CRYSTAL decorations already
+ * scattered through the dream realm (decision from Phase 12 task 6's ground-cover recolour).
+ * What distinguishes it is a FIXED bright palette instead of the tile-hash-randomised one, and a
+ * bob — nothing else in the world moves except the player, the portal vortex and the prompt, and
+ * a pickup that never moves would vanish into that clutter. */
+static void draw_shard(SDL_Surface *fb, int cx, int by, float rev, float t)
+{
+    static const Uint8 core[3] = { 0x9a, 0xe8, 0xf4 };
+    int bob = (int)(SDL_sinf(t * 3.0f) * (float)PX(2));
+    int i, bands = 4, ch = PX(16);
+
+    by += bob;
+    for (i = 0; i < bands; i++) {
+        int w = PX(7) - i * PX(2);
+        if (w < PX(2)) w = PX(2);
+        fill_rect(fb, cx - w / 2, by - (ch * (i + 1)) / bands, w, ch / bands + 1,
+                  fog_lerp(fb, core[0], core[1], core[2], rev));
+    }
+    fill_rect(fb, cx - 1, by - ch - PX(2), PX(2), PX(3),
+              fog_lerp(fb, 0xff, 0xff, 0xff, rev));
 }
 
 /* A cut stump with a pale ring, and the sawn face catching the light. */
@@ -4397,6 +4648,51 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                             portal_usable(g, i) ? PROMPT_TRAVEL : PROMPT_LOCKED, g->clock);
         }
 
+        /* The Dream Well. Phase 12 task 11. Same anchor/height/reveal handling as the portal
+         * arch, drawn once per band at its one fixed tile. No prompt of its own — the padlock and
+         * the E-cue live on the well-bound Soul standing at the same tile (below), which is the
+         * thing E actually redeems. Drawing a second prompt here would just be the same cue
+         * twice. */
+        if (g->w.well >= 0) {
+            int ex = g->w.well % WORLD_W, ey = g->w.well / WORLD_W;
+            if (ex + ey == band) {
+                float prev = tile_reveal(g, ex, ey, overlay);
+                if (overlay || prev >= 0.06f) {
+                    int sx, sy, f;
+                    world_to_iso((float)(ex * TILE + TILE / 2), (float)(ey * TILE + TILE / 2),
+                                &sx, &sy);
+                    sy -= height_at(&g->w, ex, ey);
+                    sx -= g->cam_x;
+                    sy -= g->cam_y;
+                    f = well_frame(well_stage(g->shards_held), g->clock);
+                    draw_sprite(fb, well_frames[f], sx, sy, prev);
+                }
+            }
+        }
+
+        /* Dream shards. Rendered like a prop rather than an entity — they are consumed on
+         * pickup, not carried, so there is no "restored" state to track past collection. */
+        for (i = 0; i < SHARD_COUNT; i++) {
+            int t = g->shards[i], ex, ey, sx, sy;
+            float rev;
+            if (t < 0)
+                continue;
+            ex = t % WORLD_W;
+            ey = t / WORLD_W;
+            if (ex + ey != band)
+                continue;
+            rev = tile_reveal(g, ex, ey, overlay);
+            if (!overlay && rev < 0.06f)
+                continue;
+            world_to_iso((float)(ex * TILE + TILE / 2), (float)(ey * TILE + TILE / 2), &sx, &sy);
+            sy -= height_at(&g->w, ex, ey);
+            sx -= g->cam_x;
+            sy -= g->cam_y;
+            draw_shard(fb, sx, sy, rev, g->clock);
+            if (!overlay && shard_in_reach(g) == i)
+                draw_prompt(fb, sx, sy - PX(22), PROMPT_INTERACT, g->clock);
+        }
+
         /* Entities standing in this band. Scanned per band rather than per tile
          * — 19 compares times ~34 visible bands, not 19 times ~500 tiles.
          *
@@ -4440,10 +4736,26 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
 
         /* Only over the one the key would actually act on, and only while it still has something
          * to give — a restored entity is scenery, and prompting over it would promise an interact
-         * that does nothing. */
-        if (!overlay && !g->ents[i].restored && entity_in_reach(g) == i)
-            draw_prompt(fb, sx - g->cam_x, sy - s / 2 - g->cam_y - PX(6),
-                        PROMPT_INTERACT, g->clock);
+         * that does nothing.
+         *
+         * The well-bound Soul is special-cased rather than falling through to entity_in_reach:
+         * she is deliberately EXCLUDED from that set while locked (see the note on
+         * entity_in_reach), so the generic check would simply never fire for her and she would
+         * stand there with no cue at all — indistinguishable from a fragment nobody has found yet.
+         * A padlock, shown from plain proximity instead of "the interact would act on this", is
+         * what tells the player she is seen but not yet redeemable. */
+        if (!overlay && !g->ents[i].restored) {
+            if (i == WELL_SOUL_IDX && g->shards_held < SHARD_REQUIRED) {
+                float ddx = (float)(ex * TILE + TILE / 2) - g->p.x;
+                float ddy = (float)(ey * TILE + TILE / 2) - g->p.y;
+                if (ddx * ddx + ddy * ddy <= INTERACT_RADIUS * INTERACT_RADIUS)
+                    draw_prompt(fb, sx - g->cam_x, sy - s / 2 - g->cam_y - PX(6),
+                                PROMPT_LOCKED, g->clock);
+            } else if (entity_in_reach(g) == i) {
+                draw_prompt(fb, sx - g->cam_x, sy - s / 2 - g->cam_y - PX(6),
+                            PROMPT_INTERACT, g->clock);
+            }
+        }
         }
 
         /* The player, drawn in its own band: after everything one tile behind
@@ -5101,40 +5413,68 @@ static void bfs_gated(const World *w, Uint8 abilities, int start, int *dist, int
 
 /* One tick of an autopilot that plays the real game: restores anything in
  * reach, otherwise walks one step along a genuine shortest path to the nearest
- * reachable un-restored entity. Uses the real collision, the real ability
- * flags and the real restore call — nothing is teleported or shortcut, because
- * the point is to catch a divergence between the model and the game.
+ * reachable un-restored entity or uncollected shard. Uses the real collision, the real ability
+ * flags and the real restore/collect calls — nothing is teleported or shortcut, because the point
+ * is to catch a divergence between the model and the game.
  *
- * Returns 1 if it restored something, 0 if it moved, -1 if nothing is
+ * Returns 1 if it restored something, 0 if it moved or collected a shard, -1 if nothing is
  * reachable (a dead end). */
 static int autopilot_tick(Game *g, Scratch *sc)
 {
-    int here, target = -1, best = 1 << 30, i, next = -1;
+    int here, target = -1, kind = 0, best = 1 << 30, i, next = -1, target_tile;
     Input in;
 
     if (try_restore(g) >= 0)
         return 1;
+    /* 0, not 1 — same reasoning as the portal step below: this function's contract is "1 if it
+     * RESTORED something", and a shard is not a restoration. Returning 1 here would inflate
+     * --play-test's restored count past ENTITY_COUNT exactly the way the portal crossing once
+     * did. */
+    if (try_collect_shard(g) >= 0)
+        return 0;
 
     here = (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE);
 
-    /* Nearest un-restored entity we can actually walk to right now. */
+    /* Nearest thing worth walking to, among un-restored entities and uncollected shards we can
+     * actually walk to right now. Phase 12 tasks 10-11 add the shard half of this search and the
+     * WELL_SOUL_IDX exclusion.
+     *
+     * The well-bound Soul is skipped while g->shards_held < SHARD_REQUIRED, for the same reason
+     * entity_in_reach already excludes her: without this the autopilot would walk straight to
+     * her, find try_restore refuses (she is not in entity_in_reach's set either), and retarget
+     * her again next tick — the livelock shape decision 29 already names, just with a lock
+     * instead of a deadband. */
     bfs_gated(&g->w, g->p.abilities, here, sc->dist, sc->queue);
     for (i = 0; i < ENTITY_COUNT; i++) {
         int t = g->ents[i].tile;
         if (g->ents[i].restored || t < 0 || sc->dist[t] < 0)
             continue;
+        if (i == WELL_SOUL_IDX && g->shards_held < SHARD_REQUIRED)
+            continue;
         if (sc->dist[t] < best) {
             best = sc->dist[t];
             target = i;
+            kind = 0;
+        }
+    }
+    for (i = 0; i < SHARD_COUNT; i++) {
+        int t = g->shards[i];
+        if (t < 0 || sc->dist[t] < 0)
+            continue;
+        if (sc->dist[t] < best) {
+            best = sc->dist[t];
+            target = i;
+            kind = 1;
         }
     }
     if (target < 0)
         return -1;
+    target_tile = (kind == 0) ? g->ents[target].tile : g->shards[target];
 
     /* Re-root the field at the target so we can descend it from where we
      * stand — that gives the next step directly, with no path buffer and no
      * greedy steering to wedge in a concave corner. */
-    bfs_gated(&g->w, g->p.abilities, g->ents[target].tile, sc->dist, sc->queue);
+    bfs_gated(&g->w, g->p.abilities, target_tile, sc->dist, sc->queue);
     if (sc->dist[here] < 0)
         return -1;
 
@@ -5169,15 +5509,15 @@ static int autopilot_tick(Game *g, Scratch *sc)
 
     SDL_zero(in);
     {
-        /* Aim at the next tile centre, or the entity itself on the last leg. */
+        /* Aim at the next tile centre, or the target itself on the last leg. */
         float wx, wy, ddx, ddy, sdx, sdy;
         int wantx, wanty;
         if (next >= 0) {
             wx = (float)(next % WORLD_W) * TILE + TILE * 0.5f;
             wy = (float)(next / WORLD_W) * TILE + TILE * 0.5f;
         } else {
-            wx = (float)(g->ents[target].tile % WORLD_W) * TILE + TILE * 0.5f;
-            wy = (float)(g->ents[target].tile / WORLD_W) * TILE + TILE * 0.5f;
+            wx = (float)(target_tile % WORLD_W) * TILE + TILE * 0.5f;
+            wy = (float)(target_tile / WORLD_W) * TILE + TILE * 0.5f;
         }
         ddx = wx - g->p.x;
         ddy = wy - g->p.y;
@@ -6990,6 +7330,127 @@ static int portal_selftest(Uint64 seed, int nseeds)
     return fails ? 1 : 0;
 }
 
+/* Phase 12 tasks 10-11: dream shards feed the Dream Well, which releases its own Found Soul.
+ *
+ * Shards live in their OWN array, not in ents[] — see the note on shards_sufficient. But the
+ * Well's Soul (WELL_SOUL_IDX) is a REAL entity like any other, so feeding SHARD_REQUIRED shards
+ * must make her restorable and feeding one fewer must not. That off-by-one boundary IS the
+ * negative control: there is no broken world to construct here, the boundary itself is the thing
+ * being verified, the same shape decision 36 already established for bridges. */
+static int shard_selftest(Uint64 seed, int nseeds)
+{
+    int fails = 0, s;
+
+    for (s = 0; s < nseeds; s++) {
+        Game *g = (Game *)SDL_malloc(sizeof(Game));
+        Rngs rngs;
+        int i, placed = 0, in_dream = 0;
+
+        if (!g) { printf("FAIL  out of memory\n"); return 1; }
+        rngs_init(&rngs, seed + (Uint64)s);
+        game_init(g, &rngs);
+
+        for (i = 0; i < SHARD_COUNT; i++) {
+            if (g->shards[i] < 0) continue;
+            placed++;
+            if (dream_sector(g->shards[i] / WORLD_W)) in_dream++;
+        }
+        if (placed < SHARD_REQUIRED) {
+            printf("  seed %d: only %d of %d shards placed, need >= %d\n",
+                   s, placed, SHARD_COUNT, SHARD_REQUIRED);
+            fails++;
+        }
+        if (in_dream != placed) {
+            printf("  seed %d: %d of %d shards outside the dream sector\n",
+                   s, placed - in_dream, placed);
+            fails++;
+        }
+        if (g->w.well < 0) {
+            printf("  seed %d: no Well placed\n", s);
+            fails++;
+        } else if (!dream_sector(g->w.well / WORLD_W)) {
+            printf("  seed %d: the Well sits outside the dream sector\n", s);
+            fails++;
+        }
+        if (g->ents[WELL_SOUL_IDX].tile != g->w.well) {
+            printf("  seed %d: the Well's Soul is not standing at the Well\n", s);
+            fails++;
+        }
+        SDL_free(g);
+    }
+    if (!fails)
+        printf("placement: PASS  %d seeds, all >= %d/%d shards in the dream sector, Well and "
+               "its Soul co-located\n", nseeds, SHARD_REQUIRED, SHARD_COUNT);
+
+    /* Negative control for shards_sufficient: starve a real world's shards by hand and require
+     * REJECTION - proving the clause can fail rather than merely being present, the bar every
+     * checker here has to clear. */
+    {
+        Game *g = (Game *)SDL_malloc(sizeof(Game));
+        Rngs rngs;
+        int i, starved;
+        if (!g) { printf("FAIL  out of memory\n"); return 1; }
+        rngs_init(&rngs, seed);
+        game_init(g, &rngs);
+        for (i = SHARD_REQUIRED - 1; i < SHARD_COUNT; i++)
+            g->shards[i] = -1;
+        starved = shards_sufficient(g->shards);
+        printf("negative control (shard-starved world rejected): %s\n",
+               starved ? "FAIL" : "PASS");
+        if (starved) fails++;
+        SDL_free(g);
+    }
+
+    /* THE BOUNDARY IS THE CONTROL for the Well itself. Feed SHARD_REQUIRED-1 and she must stay
+     * locked; feed one more and she must unlock. Measured through entity_in_reach/try_restore —
+     * the REAL interact path — not by inspecting shards_held directly, for the same reason
+     * decision 40's fade test measures pixels rather than trusting the selection alone. */
+    {
+        Game *g = (Game *)SDL_malloc(sizeof(Game));
+        Rngs rngs;
+        int ok_short, ok_full;
+
+        if (!g) { printf("FAIL  out of memory\n"); return 1; }
+        rngs_init(&rngs, seed);
+        game_init(g, &rngs);
+
+        if (g->w.well < 0) {
+            printf("FAIL  boundary: seed %.0f placed no Well\n", (double)seed);
+            fails++;
+        } else {
+            g->p.x = (float)(g->w.well % WORLD_W) * TILE + TILE * 0.5f;
+            g->p.y = (float)(g->w.well / WORLD_W) * TILE + TILE * 0.5f;
+
+            g->shards_held = SHARD_REQUIRED - 1;
+            ok_short = (entity_in_reach(g) == WELL_SOUL_IDX);
+
+            g->shards_held = SHARD_REQUIRED;
+            ok_full = (entity_in_reach(g) == WELL_SOUL_IDX);
+
+            printf("well boundary: %s  [%d shards: %s, %d shards: %s]\n",
+                   (!ok_short && ok_full) ? "PASS" : "FAIL",
+                   SHARD_REQUIRED - 1, ok_short ? "UNLOCKED" : "locked",
+                   SHARD_REQUIRED, ok_full ? "unlocked" : "LOCKED");
+            if (!(!ok_short && ok_full)) fails++;
+
+            /* And redeeming her, once fed, behaves exactly like any other Found Soul. */
+            if (try_restore(g) < 0) {
+                printf("FAIL  boundary: fed the Well but E still did nothing\n");
+                fails++;
+            } else if (!g->ents[WELL_SOUL_IDX].restored) {
+                printf("FAIL  boundary: try_restore succeeded but she is not marked restored\n");
+                fails++;
+            } else {
+                printf("well redemption: PASS  fed and restored through the real interact path\n");
+            }
+        }
+        SDL_free(g);
+    }
+
+    printf("%s (%d checks failed)\n", fails ? "FAIL" : "PASS", fails);
+    return fails ? 1 : 0;
+}
+
 /* Decision 41. The team authored a magenta base disc under the bush, which reads as a halo on
  * grass. tools/bake.ps1 drops it to transparent and draw_prop draws a real contact shadow.
  *
@@ -8187,6 +8648,9 @@ int main(int argc, char **argv)
         if (arg_flag(argc, argv, "--portal-test"))
             return portal_selftest((Uint64)arg_int(argc, argv, "--seed", 1),
                                    arg_int(argc, argv, "--seeds", 30));
+        if (arg_flag(argc, argv, "--shard-test"))
+            return shard_selftest((Uint64)arg_int(argc, argv, "--seed", 1),
+                                  arg_int(argc, argv, "--seeds", 30));
         if (arg_flag(argc, argv, "--land-test")) {
             int n = arg_int(argc, argv, "--seeds", 20);
             int base = arg_int(argc, argv, "--seed", 1);
@@ -8380,6 +8844,43 @@ int main(int argc, char **argv)
             }
         }
     }
+
+    /* --shards N: set shards_held directly, so the Well's three stages (Phase 12 task 11) can be
+     * screenshotted without actually playing 0, 1-5 and 6 shards' worth of a run. Self-test only,
+     * same reasoning as --dream: there is otherwise no way to script a capture of a state that
+     * only exists after real play.
+     *
+     * Positions two tiles SOUTH of the Well, not on it. The well's sprite is anchored at the same
+     * ground point a character standing on that tile would be, so the first version of this stood
+     * the player directly on top of the Well and her own sprite occluded it completely — the
+     * screenshot showed the portal arch and nothing else. Found by looking at the capture, not by
+     * a test; the same class of miss as the ziggurat roofs. */
+    {
+        int held = arg_int(argc, argv, "--shards", -1);
+        if (held >= 0) {
+            game.shards_held = held;
+            if (game.w.well >= 0) {
+                game.p.x = (float)(game.w.well % WORLD_W) * TILE + TILE * 0.5f;
+                game.p.y = (float)(game.w.well / WORLD_W + 2) * TILE + TILE * 0.5f;
+                game.cam_ready = 0;
+            }
+        }
+    }
+
+    /* --shard-at N: stand two tiles from dream shard N, same reasoning and the same offset as
+     * --shards above. Without it there is no reliable way to photograph a shard at all — they are
+     * placed by reservoir sampling over a whole reachable dream region, so nothing pins one near
+     * the portal, and a sweep across a dozen seeds hunting for one in frame by chance found none
+     * clearly enough to judge. */
+    {
+        int idx = arg_int(argc, argv, "--shard-at", -1);
+        if (idx >= 0 && idx < SHARD_COUNT && game.shards[idx] >= 0) {
+            int t = game.shards[idx];
+            game.p.x = (float)(t % WORLD_W) * TILE + TILE * 0.5f;
+            game.p.y = (float)(t / WORLD_W + 2) * TILE + TILE * 0.5f;
+            game.cam_ready = 0;
+        }
+    }
 #endif
 
     prev = SDL_GetPerformanceCounter();
@@ -8439,12 +8940,15 @@ int main(int argc, char **argv)
                     break;
                 case SDLK_e:
                 case SDLK_SPACE:
-                    /* Portal first. A portal end and an unrestored entity are never on the same
-                     * tile, so the order cannot actually matter — but fixing it makes the
-                     * interaction unambiguous rather than dependent on that staying true. */
+                    /* Portal first, then a restore, then a shard pickup. A portal end, an
+                     * unrestored entity and a shard are never on the same tile, so the order
+                     * cannot actually matter — but fixing it makes the interaction unambiguous
+                     * rather than dependent on that staying true. */
                     if (!grid && try_portal(&game))
                         SDL_AtomicAdd(&audio.sfx_fire, 1);
                     else if (!grid && try_restore(&game) >= 0)
+                        SDL_AtomicAdd(&audio.sfx_fire, 1);
+                    else if (!grid && try_collect_shard(&game) >= 0)
                         SDL_AtomicAdd(&audio.sfx_fire, 1);
                     break;
                 case SDLK_r: /* regenerate with the next seed */

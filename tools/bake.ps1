@@ -67,13 +67,17 @@ $script:TotalStripped = 0
 # would read as a costume change rather than as a change of place.
 $script:DreamCategories = @("nature")
 
-# Phase 12 task 7. The effect frames with a caller in the renderer, named individually.
+# Phase 12 tasks 7 and 11. The effect frames with a caller in the renderer, named individually.
 #
-# fx_portal is 16 authored frames and this takes every SECOND one, so the baked set is a complete
-# loop at half the rate rather than the first half of one. fx_well and fx_crystal stay OUT until
-# something draws them - the Well is slice 5 and nothing in the plan draws fx_crystal at all.
+# Both fx_portal and fx_well are 16 authored frames, and this takes every SECOND one of each, so
+# the baked set is a complete loop at half the rate rather than the first half of one. fx_crystal
+# stays OUT: nothing in this phase draws it as a baked sprite - the dream realm's crystal
+# decoration and the shard pickup are both procedural (draw_crystal, draw_shard) - and baking a
+# sprite with no caller is pure byte cost, the rule that kept the bitmap font at +0 shipping bytes.
 $script:FxFrames = @("fx_portal_0",  "fx_portal_2",  "fx_portal_4",  "fx_portal_6",
-                     "fx_portal_8",  "fx_portal_10", "fx_portal_12", "fx_portal_14")
+                     "fx_portal_8",  "fx_portal_10", "fx_portal_12", "fx_portal_14",
+                     "fx_well_0",    "fx_well_2",    "fx_well_4",    "fx_well_6",
+                     "fx_well_8",    "fx_well_10",   "fx_well_12",   "fx_well_14")
 
 # ------------------------------------------------------------ dream recolour --
 # A dream sprite is the SAME pixel stream with a different palette: ArtSprite keeps pal_off

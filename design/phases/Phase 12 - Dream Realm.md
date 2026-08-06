@@ -208,10 +208,15 @@ Each slice stands alone if the next is cut.
 | 2 | `--portal-test` **first**, then `portal_link`, then the portal renders. Travel works | **High** — the reachability argument |
 | 3 | Tier-1 recolours + tier-2 baked FX. It looks like Lumiara | Low, additive |
 | 4 | Prompt indicator, fragments moved into the sector. It plays | Low, additive |
-| 5 | Shards, the Well, `--shard-test`. It has a reason to explore | Low, additive |
+| 5 | Shards, the Well, `--shard-test`. It has a reason to explore | Low, additive — **DONE**, +6,144 bytes, `--play-test` 50/50 with the Well unlocked and redeemed |
 
 If the box runs out after slice 3, the game still ships a portal to a beautiful place with fragments
 in it — just no shards and no Well.
+
+**Phase 12 is now feature-complete.** All 11 tasks across all 5 slices are built, tested and
+committed. See Evidence — slice 5 for what remains honestly unverified (shard legibility against
+ambient decoration, the Well's animation unwatched in motion, and the user's own look-pass on the
+Well/shard content specifically, as distinct from the biome recolour slice 3 already cleared).
 
 ## Verification gate
 
@@ -582,6 +587,115 @@ yet, and it is somewhere to come back to instead of a dead end.
 - **The interact prompt has not been photographed over a dream-side entity** — only over overworld
   ones. The draw path is identical (one call, one function), so this is a gap in the picture rather
   than in the code.
+
+## Evidence — slice 5 (dream shards and the Dream Well)
+
+Tasks 10 and 11 — the last of Phase 12. **+6,144 bytes** (768,000 → 774,144). Render 0.974-1.089 →
+**1.14 ms mean** (max 1.89 ms) — a real increase, reported rather than waved away; still 59 fps
+against the 60 Hz target and comfortably under the 21.333 ms frame budget.
+
+### The design
+
+8 dream shards, in their own array (never `ents[]`), feed a fixed landmark — the Dream Well —
+placed beside the portal's dream end. Feeding `SHARD_REQUIRED` (6 of 8) unlocks the Well's own
+Found Soul, `WELL_SOUL_IDX` (the first dream-sector Soul task 9 already placed; task 11 only
+changes *where* she stands and adds the lock). Shards are **consumed on pickup**, not carried —
+`Game.shards_held` is the only record kept, which is what lets the Well show progress with no
+inventory and no HUD, exactly as the spec asked.
+
+- **Whether she is redeemable is a pure function of `shards_held`, not a stored flag.**
+  `entity_in_reach` excludes `WELL_SOUL_IDX` while `shards_held < SHARD_REQUIRED` and nothing else
+  changes — no mutable "locked" bit to keep in sync, no state that can go stale.
+- **`shards_sufficient()` is kept OUT of `world_solvable`**, for the same reason `entities_split_ok`
+  is: that function means exactly one thing — every *entity* reachable in ability order — and
+  shards are not entities. It is asked only by the primary generate-then-verify loop; the ungating
+  fallback still places shards (so the Well is never permanently unfeedable) but does not re-check
+  sufficiency, matching [[Cut List]]'s rule that the reachability guarantee is the one thing never
+  traded for a fuller dream realm.
+- **`place_shards` has NO non-dream fallback**, unlike the generic entity placement. A "dream
+  shard" found in the overworld would defeat the point, so a region that cannot supply one inside
+  the dream sector is simply skipped; if too few land, `shards_sufficient` rejects the seed and the
+  existing retry loop tries again — the same shape as `entities_split_ok`, not a new mechanism.
+- **The autopilot now searches shards and entities in one combined nearest-target loop**, and
+  excludes the locked well-soul from it. Without the exclusion the autopilot would walk straight to
+  her, find `try_restore` refuses (she is not in `entity_in_reach`'s set either while locked), and
+  retarget her again next tick — the livelock shape decision 29 already names, just with a lock
+  instead of a deadband, caught before it ever ran rather than by watching `--play-test` hang.
+- **Both new interact paths return 0, not 1, on success** (`try_collect_shard` from the autopilot;
+  the portal crossing already did this). This function's contract is "1 if it RESTORED something",
+  and neither a shard pickup nor a portal step is a restoration — returning 1 for either would
+  inflate `--play-test`'s restored count past `ENTITY_COUNT`, exactly the "restored 20/19" bug
+  decision 29's neighbourhood already produced once.
+
+### Two placement bugs, both found by looking, neither by a test
+
+- **The Well's first placement (ring search starting at radius 2) put it inside the portal arch's
+  own silhouette.** At this projection a 2-tile diagonal offset projects to about one arch-height of
+  screen distance, so the Well's sprite drew overlapping the arch and a screenshot of "every Well
+  stage" — the phase file's own verification gate — showed only a portal. `near_open_tile` now
+  starts its ring search at radius 4. No test could have caught this: `--shard-test` asserts the
+  Well and its Soul are co-located, which was and remains true: the *distance from the portal* was
+  never a property any checker had asserted, because "far enough to read as a separate landmark" is
+  a screen-space judgement, not a data invariant.
+- **Photographing a Well stage first showed only the portal, again — the player's own sprite was
+  standing on top of the Well and occluding it.** `--shards N` originally placed the player exactly
+  on the Well's tile, the same ground-contact anchor the Well's own sprite uses. Both `--shards` and
+  the new `--shard-at` now stand the player two tiles off, matching the pattern.
+
+### Verified
+
+- **`--play-test` is 50/50 with the well-bound Soul unlocked and redeemed on every seed** — the
+  autopilot collects shards, crosses the threshold, and walks to her exactly as it does for any
+  other Found Soul. `attempts 1` on all 50 seeds in `--reach-test`: the shard/split quota is met on
+  the first generation attempt every time, not by falling back to a retry.
+- **`--shard-test`'s boundary IS the control**, per decision 36's shape: there is no broken world to
+  construct, so `SHARD_REQUIRED - 1` shards must leave her locked and `SHARD_REQUIRED` must unlock
+  her, measured through `entity_in_reach`/`try_restore` — the real interact path, not by inspecting
+  `shards_held` directly. Both sides measured: PASS.
+- **A separate negative control for `shards_sufficient`**: a real world's shards starved by hand to
+  `SHARD_REQUIRED - 1` is rejected. PASS.
+- **All placed shards sit in the dream sector, on every seed measured** — 30/30, with the Well and
+  its Soul always co-located.
+- **Whole suite re-run**: sector 30, portal 30 (+ gate control), land 30 + both controls, village
+  30, region 30, move 30, reach 50 + control, gating 30, bridge **200/200**, shard 30 + 2 controls,
+  **play 50/50**, iso, fog, fade, sprite, rng.
+- **Seen on screen, deliberately positioned rather than found by luck**: the Well dormant (0
+  shards, a small dim basin) against the Well fed (6 shards, a bright vertical burst) — a clear,
+  honest visual distinction between the two end states. `--shards N` and `--shard-at N` (both
+  self-test only) exist because nothing else could put a camera there: the Well and shards are
+  reached by reservoir sampling over whatever region qualifies, so no seed or vantage reliably
+  shows one without positioning the player directly.
+
+### NOT verified by slice 5
+
+- **Shard pickups were not visually distinguishable from ambient `PROP_CRYSTAL` decoration in a
+  static screenshot.** A dozen seeds were swept looking for one in frame by chance; none was
+  identifiable against the dream forest's existing scattered crystal spikes, which share the same
+  tapering silhouette and a similar cyan palette family. `draw_shard`'s bob is real and would help
+  in motion, but a still cannot show it. **This is an honest, unresolved risk**, not a cosmetic
+  nice-to-have: if a human player cannot tell a shard from decoration by eye, the collect-8-find-6
+  loop reduces to wandering rather than searching. The mechanism (placement, collection, the
+  autopilot finding all of them) is fully proven; the *legibility* is not. A follow-up palette or
+  size pass is the likely fix, decided by looking, the same way every other art judgement in this
+  project has been.
+- **Nobody has watched the Well's animation loop play**, only single frames at chosen instants. The
+  "calm → stirring → full loop" progression is implemented and its three stages are visually
+  distinct in stills; whether it *reads* as the Well coming alive over several seconds of real play
+  is unjudged.
+- **The render cost increase (1.014 ms mean → 1.14 ms mean) has not been attributed to a specific
+  cause.** Plausible candidates are the Well's per-band draw, the shard loop's per-band
+  `shard_in_reach` scan, and 16 more sprite records in the bake — none investigated individually,
+  because none threatens the 60 fps budget (58.9 fps measured, frame time 16.975 ms against a
+  21.333 ms deadline).
+- **`--play-test`'s crossing count (2 per seed on several seeds) is lower than slice 4's 2-4
+  range on the same seeds.** Plausible and not investigated: the well-soul's fixed position
+  (beside the Well rather than anywhere reachable) and the autopilot's new shard-detours change the
+  exact path length, which can change whether a second crossing is ever needed. Completion and
+  the crossing-count-greater-than-zero invariant both still hold; the exact count was never a
+  contract.
+- **This closes Phase 12's task list.** The phase-level "looked at by the user" gate (Definition of
+  done) has been discharged for the biome's *look* (slice 3); the Well and shards are new content
+  inside that same look and have not yet had their own look-only pass by the user.
 
 ## Open, and deliberately not decided here
 

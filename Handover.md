@@ -17,29 +17,53 @@ Running log: [[INDEX]]
 
 ---
 
+## Agent Log — who is doing what
+
+> Append-only per agent. Do not rewrite another agent's row — the row below is qwen's own and is
+> left as it wrote it; the resolution is appended as a note rather than an edit to its text.
+
+| Agent | Focus | Branch | Tree state | Since | Notes |
+|---|---|---|---|---|---|
+| qwen | Phase 09: restoration rebuild + worn paths + ground marks | `feat/phase-09-restoration` | **WAITING** — uncommitted slice-5 WIP needs `fx_well` baked | 2026-08-06 | Stopped at compile gate; resuming once slice-5 agent resolves `ART_FX_WELL_*` |
+
+**Resolved 2026-08-06, same day.** `fx_well` is baked, slice 5 (dream shards + the Dream Well) is
+finished and committed on `feat/phase-12-dream-realm` — the branch qwen's row names does not
+actually exist in this repo, locally or on the remote, so its edits landed directly on
+`feat/phase-12-dream-realm` alongside this session's. **Two things any future session should know
+before trusting a shared doc here:** qwen's edit to [[INDEX]] reverted that file's status summary
+to stale Phase-07-era text, since corrected; and it left `opencode.json` (its own tool's config,
+with live-looking API keys in plaintext) untracked at the vault root. That file is now gitignored
+and was never committed, but it is still on disk — if a fresh clone doesn't have it, that is
+expected, not a regression.
+
+---
+
 ## 0. Start here — the ninety-second version
 
 | | |
 |---|---|
-| **State** | 768,000 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
-| **Branch** | **`feat/phase-12-dream-realm`**. `main` is at `ae788b4`. Working tree clean |
+| **State** | 774,144 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
+| **Branch** | **`feat/phase-12-dream-realm`**. `main` is at `ae788b4`. Working tree has this handover's own edits plus a `.gitignore` fix — see the Agent Log note above before committing broadly |
 | **Deadline** | 2026-09-04. **Hard stop on art/backbone work 2026-08-14** — eight days from now |
-| **Do first** | **[[Phase 12 - Dream Realm]] slice 5** — the plan is [[Phase 12 - Dream Realm Plan]], tasks 10–11: dream shards and the Dream Well |
-| **Then** | [[Phase 08 - Save Load]] → 10 (motion) → **11 is non-negotiable** |
+| **Do first** | **Phase 12 is DONE — all 11 tasks, all 5 slices.** Next real work is [[Phase 08 - Save Load]], or Phase 09's three leftover items (restoration rebuild, worn paths, ground marks) if another agent hasn't already started them — check the Agent Log above first |
+| **Then** | Phase 08 → 10 (motion) → **11 is non-negotiable** |
 | **Biggest risk** | **Audio does not exist at all.** A softsynth from zero, plus save/load and a HUD, all still ahead |
 
-> **THE PROJECT CHANGED DIRECTION ON 2026-08-05.** A portal in the `TERRAIN_DARK` region now leads
-> to a **second biome** — the team's "Lumiara / Dream Realm" concept art. It is specced as
-> [[Phase 12 - Dream Realm]], planned as [[Phase 12 - Dream Realm Plan]] (11 tasks, 5 slices), and
-> **slices 1, 2 and 3 are built and committed**. A session reading only §11's old ordering would
-> pick the wrong task. The user considered the schedule risk explicitly and accepted it — **do not
-> re-raise it.**
+> **THE PROJECT CHANGED DIRECTION ON 2026-08-05, AND THAT WHOLE PHASE IS NOW DONE.** A portal in the
+> `TERRAIN_DARK` region leads to a second biome — the team's "Lumiara / Dream Realm" concept art.
+> It was specced as [[Phase 12 - Dream Realm]], planned as [[Phase 12 - Dream Realm Plan]] (11
+> tasks, 5 slices), and **all 5 slices are built, tested and committed** as of 2026-08-06. A session
+> reading only §11's old ordering would still pick the wrong task — the roadmap in §11 below is the
+> current one.
 
-**Where slices 1–3 got to:** the grid is **108×104**, holding two landmasses — overworld rows
-0–59, an always-solid void band 60–63, dream archipelago 64–103. A portal pair links them, travel
-is an `E` interact, and `--gating-test` passes 30/30 with that edge live. **The dream realm now has
-a look and the portal has art**, both seen on screen and signed off by the user on 2026-08-06.
-Slice 4 (tasks 8–9) is next.
+**Where Phase 12 landed:** the grid is **108×104**, holding two landmasses — overworld rows 0–59,
+an always-solid void band 60–63, dream archipelago 64–103. A portal pair links them, travel is an
+`E` interact gated by whether you could actually stand on the far end, and `--gating-test` passes
+30/30 with that edge live. The dream realm has a look, the portal has art, a prompt indicator is
+the first UI and first ambient motion this game has had, 4 fragments and 2 Found Souls live past
+the portal, and 8 dream shards feed a Dream Well that unlocks the second one. **`--play-test` is
+50/50 with the whole loop exercised** — portal crossings, shard collection, the Well unlocking and
+redeeming its Soul, all by the same autopilot that plays everything else.
 
 > **PLAY IT, NOT JUST THE TESTS — 2026-08-06 made the case again.** Slice 3 was reported done with
 > the whole suite green. The user opened seed 1, walked through the portal, and **could not move**:
@@ -138,15 +162,15 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 | | |
 |---|---|
-| **`build\wayfarer.exe`** | **768,000 bytes** — 672,000 under the ship target |
-| `build\wayfarer-selftest.exe` | 815,616 bytes — **not a deliverable**, never shipped |
-| `src\main.c` | ~7,850 lines, single translation unit |
-| `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. **56 records over 45 pixel streams** (11 are dream palette variants sharing a twin's stream), 71,977 bytes of const data. Never edit by hand |
+| **`build\wayfarer.exe`** | **774,144 bytes** — 665,856 under the ship target |
+| `build\wayfarer-selftest.exe` | 827,904 bytes — **not a deliverable**, never shipped |
+| `src\main.c` | ~8,180 lines, single translation unit |
+| `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. **64 records over 53 pixel streams** (11 are dream palette variants sharing a twin's stream), 76,048 bytes of const data. Never edit by hand |
 | Warnings | zero, under `-Wall -Wextra` |
-| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–07 all done**; 07 absorbed most of 09. See [[Phase Roadmap]]. Audio, save and UI are all still untouched |
+| Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–07 and 12 (all 5 slices) all done.** See [[Phase Roadmap]]. Audio, save and UI are all still untouched |
 
-> **If you are starting here: settle the player-occlusion question in §0, then start
-> [[Phase 08 - Save Load]].** Nothing is half-finished behind you.
+> **If you are starting here: Phase 12 is done. Check the Agent Log at the top of this file for
+> what another agent may already have picked up, then start [[Phase 08 - Save Load]].**
 
 ### What actually works right now
 
@@ -252,30 +276,29 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 Remote: **`https://github.com/Nishmam12/matha-noshto-game`** — private, branch `main`.
 
-**Current branch: `feat/phase-12-dream-realm`**, pushed. `main` is at `ae788b4`, also pushed.
+**Current branch: `feat/phase-12-dream-realm`.** Pushed through `87fcbd3`. Everything from
+`50e8427` (task 8) onward — task 9, slice 5, and this handover's own commit — is **local only as
+of this session**; push before assuming it is backed up anywhere. `main` is at `ae788b4`, pushed.
 
 ```
+[slice 5 + this handover's commit go here once made]
+87fcbd3  Handover for slice 4: the travel gap is closed  <- last PUSHED commit
+3d03421  Phase 12 task 9: the dream realm stops being scenery
+50e8427  Phase 12 task 8: the first UI, and the gate it exposed
+cb74bf2  Handover and devlog for slice 3, and the trap it taught
 c3e4d30  The portal put the player somewhere she could not stand
 b35f25a  Phase 12 slice 3: the dream realm has a look, and a portal you can see
 0f4c982  Handover for a fresh chat: the direction changed and slices 1-2 are in
 4f4cf64  Phase 12 slice 2: a portal, and the proof it is load-bearing
-bf66217  Phase 12 slice 2a: one adjacency function, six readers
-cd8e9d3  Phase 12 slice 1: a second landmass in the same grid
-289638a  Phase 12 implementation plan, and two spec corrections it forced
-4bed242  Decisions 40-42: props fade over the player, and two value fixes
-3d1cb0a  Record decisions 40-42, and correct four stale claims in the handover
-d4861eb  Phase 12 spec: a portal to the Dream Realm
-ae788b4  Handover for a fresh chat: the art is in, and one decision is waiting  <- main
+ae788b4  Handover for a fresh chat: the art is in, and one decision is waiting  <- main, PUSHED
 ```
 
 **`assets/` (217 files, 1.2 MB) IS committed** as of `df480a6` — the source PNGs plus their Godot
 `.import` sidecars. The sidecars are editor metadata that nothing reads; whether they should be in
 the repo at all is still undecided.
 
-**Everything is committed AND pushed, as of 2026-08-05.** `main` is at `ae788b4` on the remote; the
-two commits this handover previously listed as unpushed (`ae788b4`, `33f4cd2`) are up. Phase 12's
-work lives on **`feat/phase-12-dream-realm`**, also pushed. Older notes saying "nothing is pushed to
-the remote yet" are stale.
+**Do not assume pushed == committed.** This handover has twice needed correcting on exactly this
+point. Check `git log origin/feat/phase-12-dream-realm..HEAD` before claiming anything is backed up.
 
 **Do not add `Co-Authored-By` trailers to commits.** This was asked for explicitly and one had to
 be stripped and force-pushed once already. It is recorded in persistent memory (§10) so it should
@@ -366,7 +389,8 @@ $e = ".\build\wayfarer-selftest.exe"
 & $e --sprite-test                          # RLE round-trip, baked data, anchors, key colour + 3 controls
 & $e --fade-test                            # prop-fade selection truth table + exact blend, 2 controls
 & $e --sector-test --seeds 30 --seed 1      # two landmasses, void band, separation, spawn sector
-& $e --portal-test --seeds 30 --seed 1      # portal is load-bearing; travel both ways + control
+& $e --portal-test --seeds 30 --seed 1      # portal load-bearing + standable landing + Kindle gate
+& $e --shard-test  --seeds 30 --seed 1      # shard placement, the Well's boundary, both controls
 & $e --gating-test --seeds 30 --seed 1      # walk-reachable == graph-reachable, all 4 tiers
 & $e --play-test   --seeds 50 --seed 1      # full headless playthroughs to completion
 & $e --audio-test 3000 --sfx                # callback timing under restore-beat load
@@ -376,9 +400,11 @@ $e = ".\build\wayfarer-selftest.exe"
 & $e --frames 60 --seed 4 --overlay --shot out.bmp   # scripted screenshot — see the recipe in §10
 & $e --frames 90 --seed 5 --dream 1 --shot d.bmp     # stand IN the dream realm; --dream 0 = the
                                                      #   overworld end. Self-test only
+& $e --frames 1 --seed 5 --shards 6 --overlay --shot w.bmp  # the fed Well; --shards 0 = dormant.
+                                                     #   --shard-at N does the same for a shard
 ```
 
-**All currently pass.** Last full run, **2026-08-06**, after Phase 12 slice 3 and the arrival fix:
+**All currently pass.** Last full run, **2026-08-06**, after Phase 12 slice 5 (shards + the Well):
 
 ```
 sector  : PASS  100 seeds; both sectors walkable, void band empty, an overworld
@@ -390,6 +416,10 @@ portal  : PASS  100/100 seeds shrank when the portal was suppressed; travel work
                 mean 818 tiles walkable, worst 6, 4 under 40; control (arrival
                 region gated by hand) caught. GATE: with the end gated by hand E is
                 refused ON the tile and BESIDE it, and works again with Kindle
+shard   : PASS  30 seeds, all placements >=6/8 shards in the dream sector, Well
+                and its Soul co-located; control (shard-starved world) rejected;
+                WELL BOUNDARY: 5 shards locked, 6 shards unlocked, redeemed
+                through the real interact path
 fade    : PASS  selection 8/8 cases; blend 1,808 px exact half-blend vs an
                 SDL_GetRGB-derived reference; both controls fire (band-blind
                 predicate rejected on the 2 cases that matter, fade-ignoring
@@ -424,16 +454,15 @@ move    : PASS (0 failures across 20 seeds); direction-independent speed confirm
 region  : PASS (0 failures across 30 seeds)
 reach   : PASS (0 failures across 50 seeds); negative control PASS; gating relaxed on 0/50;
                 SPLIT: >=4 fragments and >=2 Souls past the portal on every seed,
-                with an all-or-nothing control
+                with an all-or-nothing control; attempts 1 on all 50 seeds
 gating  : PASS (0 failures across 30 seeds)
-play    : PASS (0 seeds could not be completed) — and CROSSES THE PORTAL on
-                every seed, 2-4 times each, now that 4 fragments and 2 Souls
-                live past it. A crossing count of 0 fails the seed
+play    : PASS (0 seeds could not be completed) — CROSSES THE PORTAL on every
+                seed (2-4 times) and the Well's Soul is unlocked and redeemed on
+                every seed. A crossing count of 0 fails the seed
 audio   : worst case 0.136 ms of a 21.333 ms deadline; 0 partial writes
-perf    : render 1.089 ms mean (1.750 ms max), frame 16.913 ms = 59.1 fps
-          — FASTER than before slice 3 despite 19 more sprite records and a
-            recoloured biome, because the band sweep still only draws what is
-            on screen
+perf    : render 1.14 ms mean (1.89 ms max), frame 16.975 ms = 58.9 fps
+          — UP from 0.974-1.089 ms before slice 5, reported honestly rather than
+            claimed as "no regression"; still well inside the 21.333 ms budget
 ```
 
 > **`--land-test` has now been re-aimed THREE times for the two-sector grid, and never loosened.**
@@ -517,6 +546,30 @@ grep, not the number.**
 | `Game.clock` | World animation time. Advanced by `sim_step`, read only by `render`. NOT `Player.anim`, which stops when she does |
 | `walk_from` | Portal-BLIND gated flood, in the self-test. The second documented exception beside `land_flood` |
 | `--dream N` | Self-test flag: 0 stands at the overworld end, 1 crosses. In `main`, beside `--grid` |
+
+**Slice 4's new symbols** (2026-08-06, grep for these):
+
+| Symbol | What it is |
+|---|---|
+| `draw_prompt` / `prompt_bob` / `PROMPT_NONE`/`INTERACT`/`TRAVEL`/`LOCKED` | The procedural keycap prompt. `prompt_bob` is pure, ±`PROMPT_BOB` clamped, checked to actually vary |
+| `portal_usable` | Requires the end be STANDABLE (`!tile_blocked`), not merely within `PORTAL_REACH` — decision 50 |
+| `DREAM_FRAGMENTS` / `DREAM_SOULS` | 4 and 2 — the sector quota, beside `FRAGMENT_COUNT`/`SOUL_COUNT` |
+| `regions_by_sector` | One grid sweep producing `over_mask`/`dream_mask`, read by `place_entities` and `place_shards` |
+| `entities_split_ok` | The quota check. Kept OUT of `world_solvable` — decision 52 |
+
+**Slice 5's new symbols** (2026-08-06, grep for these):
+
+| Symbol | What it is |
+|---|---|
+| `World.well` | The Dream Well's tile, or −1. Set once in `place_portal`, beside `portal[2]` |
+| `SHARD_COUNT`/`SHARD_REQUIRED`/`WELL_SOUL_IDX` | 8, 6, and `FRAGMENT_COUNT` (the first dream Soul) |
+| `Game.shards[8]` / `shards_held` | Tile-or-−1 per shard; the running collected count. Consumed on pickup, never carried |
+| `near_open_tile` | Chebyshev ring search from a tile, starting at radius 4 — decision 53's neighbour, see the trap on why not 2 |
+| `place_shards` / `shards_sufficient` | Placement (dream-sector only, no fallback) and the count clause, beside `entities_split_ok` |
+| `shard_in_reach` / `try_collect_shard` | Same shape as `entity_in_reach`/`try_restore` |
+| `draw_shard` | Procedural pickup, reuses `draw_crystal`'s shape with a fixed palette and a bob |
+| `well_frames[8]` / `well_stage` / `well_frame` | The Well's 3-stage, pure frame selection — `well_frame` is swept the same way `prompt_bob` is |
+| `--shards N` / `--shard-at N` | Self-test flags to screenshot the Well's stages / a specific shard without playing to that state |
 
 | Line | Section | What lives there |
 |---|---|---|
@@ -863,6 +916,30 @@ New decisions from the Phase 12 slice 4 session (2026-08-06):
     deliberately does not ask it**, since that path exists to guarantee a completable world at any
     cost. A thin dream realm still ships; an unwinnable one does not.
 
+New decisions from the Phase 12 slice 5 session (2026-08-06):
+
+53. **Whether the Well's Soul is redeemable is a PURE FUNCTION of `shards_held`, not a stored
+    "locked" flag.** `entity_in_reach` excludes `WELL_SOUL_IDX` while `shards_held <
+    SHARD_REQUIRED` and nothing else changes about her — no bit to set on unlock, no state that
+    can go stale relative to the count that actually governs it. Same philosophy as `tile_reveal`
+    being derived rather than stored.
+54. **`place_shards` has NO non-dream fallback**, unlike the generic entity placement it otherwise
+    mirrors. A region that cannot supply a dream-sector tile is simply skipped rather than falling
+    back to anywhere in it — a "dream shard" found in the overworld would defeat the point. If too
+    few land, `shards_sufficient()` rejects the seed and the existing retry loop tries again; no
+    new mechanism, the same shape as `entities_split_ok`.
+55. **The autopilot searches shards and entities in ONE combined nearest-target loop, and excludes
+    the locked well-soul from it — for the same reason `entity_in_reach` does.** Without the
+    exclusion the autopilot would walk straight to her, find `try_restore` refuses, and retarget
+    her again next tick: the livelock shape decision 29 already names, just with a lock instead of
+    a deadband. Caught before it ever ran, by reasoning from the existing pattern, rather than by
+    watching `--play-test` hang.
+56. **A shard pickup and a portal crossing both return 0, not 1, from `autopilot_tick`.** That
+    function's contract is "1 if it RESTORED something"; neither is a restoration, and returning 1
+    for either would inflate `--play-test`'s restored count past `ENTITY_COUNT` — the exact
+    "restored 20/19" bug the portal-crossing code already fixed once, in the neighbourhood of
+    decision 29.
+
 ---
 
 ## 7. Traps — each of these already cost time once
@@ -1086,6 +1163,27 @@ true and are not repeated in full here — see git history at `545598f` for verb
   The bitmap font is the reference this project already has for "how big is a readable glyph here":
   10×14 logical px.
 
+**New in the Phase 12 slice 5 session (2026-08-06), both found by looking, neither by a test:**
+
+- **A ring search that starts too close puts a landmark inside the thing it is supposed to stand
+  beside.** `near_open_tile`'s first version started at Chebyshev radius 2, and at this projection
+  a 2-tile diagonal offset is about one arch-height of screen distance — so the Dream Well's sprite
+  drew overlapping the portal arch's own silhouette, and a screenshot of "every Well stage" showed
+  only a portal. No test caught it because none had asserted the *distance* — `--shard-test`
+  correctly asserted the Well and its Soul are co-located, which stayed true throughout. **"Close
+  enough to read as separate" is a screen-space judgement, not a data invariant** — the same lesson
+  as sizing the prompt against the font, one slice earlier.
+- **Positioning a screenshot rig ON a landmark's own tile lets the player's sprite occlude it.**
+  The first version of `--shards N` stood the player exactly on the Well's ground-contact anchor —
+  the same point the Well's own sprite is anchored to — so her sprite covered it completely. Both
+  `--shards` and the later `--shard-at` now stand two tiles off. **A capture flag that puts you
+  where you want to LOOK is not the same as one that puts the camera where you want to SEE from.**
+- **A concurrent second agent, run against the same working directory with no git-level isolation,
+  reverted a shared doc to stale content while trying to help.** See the Agent Log at the top of
+  this file. Not this project's own trap, but worth carrying forward: if a shared status file
+  reads as surprisingly out of date, check whether something else has been writing to it before
+  assuming your own last edit didn't take.
+
 ---
 
 ## 8. Verified vs NOT verified
@@ -1216,6 +1314,26 @@ controls; audio callback timing; render cost). New this session:
   re-argued, after the seam landed: sprite, iso, font, fog, rng, move, land (30 + both controls),
   village (30 + both controls), region (30), reach (50 + control), gating (30), bridge (200/200),
   **play 50/50**.
+- **`--play-test` is 50/50 with the Well unlocked and redeemed on every seed** — not just the
+  portal crossed, the *whole* slice-5 loop exercised: shards collected, threshold crossed, the
+  once-locked Soul walked to and restored, by the same autopilot that plays everything else.
+  `attempts 1` in `--reach-test` on all 50 seeds: the shard/split quota is met first try, not by
+  falling back to a retry.
+- **`--shard-test`'s boundary IS its own control**, decision 36's shape applied a third time:
+  `SHARD_REQUIRED - 1` shards leaves the Well's Soul locked, `SHARD_REQUIRED` unlocks her, measured
+  through `entity_in_reach`/`try_restore` — the real interact path, not by inspecting `shards_held`
+  directly. A separate control starves a real world's shards by hand and requires
+  `shards_sufficient` to reject it.
+- **All placed shards sit in the dream sector on every seed measured** (30/30), and the Well and
+  its Soul are always co-located.
+- **Slice 5 cost +6,144 bytes** (768,000 → 774,144). Render went 0.974–1.089 → **1.14 ms mean** —
+  reported as a real increase rather than claimed as "no regression"; still 58.9 fps against the
+  60 Hz target, comfortably inside the 21.333 ms frame budget.
+- **The Well's two extreme stages are visually distinct, seen on screen, deliberately positioned
+  rather than found by luck.** Dormant (0 shards fed) is a small dim basin; fed (6+ shards) is a
+  bright vertical burst. `--shards N` and `--shard-at N` (self-test only) exist because nothing
+  else could reliably put a camera at either — both are reached by reservoir sampling, so no seed
+  or vantage shows one without positioning the player directly.
 
 ### NOT verified — be honest about these
 
@@ -1229,9 +1347,25 @@ controls; audio callback timing; render cost). New this session:
   starfield carries scattered rocks. Over water they read as rocks in the shallows; over a void they
   read as floating debris. May be on-concept for a floating-island biome, may be a fault. Unjudged.
 - **4 of 100 seeds land the player in a 6-to-30 tile pocket** on arrival. Standable — that is
-  asserted — but small. Legitimate gated design (the overworld spawn works the same way), and left
-  to task 9, where the entity quota makes the existing verifier reject a landing that opens onto
-  nothing, with **no invented number anywhere**. `--portal-test` reports the count meanwhile.
+  asserted — but small. Legitimate gated design (the overworld spawn works the same way).
+  `--portal-test` reports the count; nothing further was needed since task 9's entity quota
+  already makes the verifier reject a landing that opens onto nothing.
+- **SHARD PICKUPS WERE NOT VISUALLY DISTINGUISHABLE FROM AMBIENT DECORATION.** A dozen seeds were
+  swept looking for one in a static screenshot; none was identifiable against the dream forest's
+  own scattered `PROP_CRYSTAL` decorations, which share the same tapering silhouette and a similar
+  cyan palette family. `draw_shard`'s bob would help in motion, but a still cannot show it. **This
+  is an honest, unresolved risk, not a nice-to-have**: if a human cannot tell a shard from
+  decoration by eye, the collect-8-find-6 loop reduces to wandering. The mechanism (placement,
+  collection, the autopilot finding all 8) is fully proven; the legibility is not. Likely fix is a
+  palette or size pass, decided by looking — the same way every other art judgement here has been.
+- **The Well's animation has not been watched playing, only captured as single frames.** The
+  "calm → stirring → full loop" progression is implemented and its extremes are visually distinct
+  in stills; whether it reads as the Well coming alive over several seconds of real play is
+  unjudged.
+- **The render-time increase this slice (≈1.01 → 1.14 ms mean) was not attributed to a specific
+  cause.** Candidates: the Well's per-band draw, the shard loop's per-band `shard_in_reach` scan,
+  16 more sprite records in the bake. None investigated individually — none threatens the 60 fps
+  budget.
 - **The user's verdict on the dream realm's look was "all good for now"**, which discharges the
   slice 3 gate. That is not the same as "this is the final art direction".
 - **The prompt has not been seen in MOTION** — whether a ±2 px bob at 1.6 Hz reads as inviting or as
@@ -1450,37 +1584,43 @@ the roof).
 **Phase 07** (the bake pipeline **and** 37 of the team's real sprites, +62,976 bytes) landed the
 same day the art arrived, which absorbed most of what Phase 09 was holding.
 
-**START HERE: [[Phase 12 - Dream Realm]] slice 5**, which is tasks 10–11 of
-[[Phase 12 - Dream Realm Plan]]. The direction changed on 2026-08-05 and this supersedes the old
-"start at Phase 08" instruction that four handovers carried.
+**PHASE 12 IS DONE. All 11 tasks, all 5 slices, built tested and committed.** The direction change
+of 2026-08-05 ran its full course in one calendar day. This supersedes the old "start at Phase 08"
+instruction that several handovers carried, and also supersedes this section's own former "slice 5
+is next" line.
 
-**Task 9's run has been made, and it passed.** `--play-test` now crosses the portal on **all 50
-seeds, 2–4 times each**, completing 19/19 — so travel is exercised end to end rather than proven by
-assertion. Four handovers carried "the portal's effect on completability is untested" as a known
-gap; it is closed. Crossings are **counted**, so a future change that accidentally joined the
-landmasses fails the seed instead of quietly retiring the only end-to-end test travel has.
-
-**Phase 12 progress, slice by slice:**
+**Phase 12 progress, slice by slice — all done:**
 
 | Slice | Tasks | State |
 |---|---|---|
 | 1 | Grid growth, dream sector, `--sector-test`, `--land-test` re-aimed | **DONE** — `cd8e9d3` |
 | 2 | `tile_neighbours`, portal, `--portal-test`, travel | **DONE** — `bf66217`, `4f4cf64` |
 | 3 | Dream palettes (tier-1 recolour) + baked FX. It looks like Lumiara | **DONE** — `b35f25a`, `c3e4d30`. Look-gate discharged by the user 2026-08-06 |
-| 4 | Prompt indicator + fragments into the dream sector | **DONE** — `50e8427`, `3d03421`. `--play-test` now crosses the portal on all 50 seeds |
-| **5** | **Shards + the Dream Well + `--shard-test`** | **NEXT** — tasks 10–11 |
+| 4 | Prompt indicator + fragments into the dream sector | **DONE** — `50e8427`, `3d03421`. `--play-test` crosses the portal on all 50 seeds |
+| 5 | Shards + the Dream Well + `--shard-test` | **DONE** — tasks 10–11. `--play-test` 50/50 with the Well unlocked and redeemed on every seed |
 
-**Slice 3 in one paragraph:** the biome recolour is nearly free because `ArtSprite` stores
-`pal_off` into a shared `ART_PAL[]` *separately* from `data_off` into the shared pixel stream — a
-dream tree is the same pixel data with a new palette, ~70 bytes against ~1,700 to re-author, so
-~20 props come to ~1.4 KB. Then bake **8 `fx_portal`, 8 `fx_well`, 4 `fx_crystal`** (every second
-frame, so a halved set is still a complete loop); `fx_rift` stays unbaked because nothing draws it.
-Budget ~22 KB. **This is the slice the user has to look at and judge** — no test has an opinion on
-whether it reads as Lumiara.
+**Slice 5 in one paragraph:** 8 dream shards, own array, feed a fixed landmark beside the portal's
+dream end. Feeding `SHARD_REQUIRED` (6 of 8) unlocks the Well's own Found Soul —
+`entity_in_reach` excludes her while `shards_held < SHARD_REQUIRED`, a pure function of a count
+rather than a stored flag with sync to worry about. `shards_sufficient()` sits beside
+`entities_split_ok` in the same generate-then-verify loop, same reasoning: kept out of
+`world_solvable`, never re-checked by the ungating fallback. Cost **+6,144 bytes** (768,000 →
+774,144); render went **0.974–1.089 → 1.14 ms mean** — a real increase, reported rather than
+smoothed over, still comfortably inside the 60 fps budget. Two placement bugs found by looking, not
+by a test: the Well's first ring-search radius (2 tiles) put it inside the portal arch's own
+silhouette, and the first screenshot rig stood the player directly on the Well's tile, her own
+sprite occluding it. Both fixed; see decisions 53–54 and §7.
+
+**What is now honestly still open, from Phase 12 itself:** shard pickups were not visually
+distinguishable from ambient `PROP_CRYSTAL` decoration across a dozen seeds swept looking for one —
+the mechanism is fully proven (placement, collection, the autopilot finding all of them), the
+*legibility* is not, and this is the kind of thing that needs a human's eye, not another test. See
+[[Phase 12 - Dream Realm]] Evidence, slice 5, for the rest.
 
 After Phase 12: **[[Phase 08 - Save Load]]**, then motion (Phase 10) and what remains of Phase 09
-(the restoration rebuild, worn paths, and decisions 40–42's siblings). **Hard stop 2026-08-14**,
-after which Phase 11 (audio, font-dependent HUD, QA, submission) takes over regardless.
+(the restoration rebuild, worn paths, and decisions 40–42's siblings — **check the Agent Log above
+first**, another agent may already be on this). **Hard stop 2026-08-14**, after which Phase 11
+(audio, font-dependent HUD, QA, submission) takes over regardless.
 
 > **Do not re-raise the schedule.** It was put to the user on 2026-08-05 with the full arithmetic;
 > they considered it and said there is time. That is their call and it has been made.
