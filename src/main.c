@@ -3484,14 +3484,14 @@ static void draw_text_shadow(SDL_Surface *fb, int x, int y, const char *str, Uin
  * shareable seed, one-line restore toasts, and a completion banner. Nothing
  * else — hearts and tool icons were cut once already.
  *
- * The minimap is a flat grid (2 px per world tile) drawn into a cached surface
+ * The minimap is a flat grid (1 px per world tile) drawn into a cached surface
  * and blitted, so the per-frame cost is one blit plus a handful of markers.
  * The cache refreshes on explicit dirty (restore / seed change) or every 15
  * frames, which is enough to follow the fog/restoration easing. */
 
 #define HUD_TOAST_FRAMES 180 /* 3 s at 60 Hz */
 #define HUD_WIN_FRAMES   360 /* 6 s */
-#define MM_TILE  2           /* minimap px per world tile */
+#define MM_TILE  1           /* minimap px per world tile */
 #define MM_W     (WORLD_W * MM_TILE)
 #define MM_H     (WORLD_H * MM_TILE)
 #define MM_X     (LOGICAL_W - MM_W - 8)
@@ -3580,10 +3580,10 @@ static void mm_draw(SDL_Surface *fb, const Game *g)
                              g->ents[i].is_soul ? 0x9a : 0xff,
                              g->ents[i].is_soul ? 0xa8 : 0xd7,
                              g->ents[i].is_soul ? 0xb8 : 0x6a),
-                  4);
+                  MM_TILE * 2);
     }
     mm_marker(fb, (int)(g->p.x / TILE), (int)(g->p.y / TILE),
-              SDL_MapRGB(fb->format, 0xff, 0xff, 0xff), 5);
+              SDL_MapRGB(fb->format, 0xff, 0xff, 0xff), MM_TILE * 2 + 1);
 }
 
 static void hud_draw(SDL_Surface *fb, const Game *g, int seed)
