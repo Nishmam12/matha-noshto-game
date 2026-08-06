@@ -25,6 +25,7 @@ Running log: [[INDEX]]
 | Agent | Focus | Branch | Tree state | Since | Notes |
 |---|---|---|---|---|---|
 | qwen | Phase 09: restoration rebuild + worn paths + ground marks | `feat/phase-09-restoration` | **DONE** — all three DoD items committed | 2026-08-06 | Rebuild → baked at 1.0; RNG-free paths; hash-gated marks |
+| qwen | Phase 08: save/load | `feat/phase-08-save-load` | **DONE** — committed | 2026-08-06 | 28-byte versioned save; regen-from-seed + deltas; `--save-test` with 5 negative controls; +1,536 bytes |
 
 **Resolved 2026-08-06, same day.** `fx_well` is baked, slice 5 (dream shards + the Dream Well) is
 finished and committed on `feat/phase-12-dream-realm` — the branch qwen's row names does not
@@ -35,6 +36,13 @@ to stale Phase-07-era text, since corrected; and it left `opencode.json` (its ow
 with live-looking API keys in plaintext) untracked at the vault root. That file is now gitignored
 and was never committed, but it is still on disk — if a fresh clone doesn't have it, that is
 expected, not a regression.
+
+**Correction 2026-08-06, later session (qwen).** The Phase 09 work the note above describes as
+having landed on `feat/phase-12-dream-realm` did not: it was committed on its own branch,
+`feat/phase-09-restoration` (`57b7de9`, created from `098d232`), now pushed to origin — so the
+"branch does not exist" statement above is stale. Phase 09's three items (restoration rebuild,
+worn paths, ground marks) are DONE there. Phase 08 (save/load) is DONE on `feat/phase-08-save-load`
+(`0752672`). Both are now merged into `feat/phase-08-and-09`, which carries the combined work.
 
 ---
 

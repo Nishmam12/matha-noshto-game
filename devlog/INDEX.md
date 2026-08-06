@@ -7,16 +7,16 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 774,144 bytes
-**Current status:** **Phase 12 is feature-complete** — all 11 tasks across all 5 slices built,
-tested and committed on `feat/phase-12-dream-realm`. Portal, dream biome, prompt indicator,
-fragments/Souls split, dream shards and the Dream Well all in and green. See [[Handover]] for the
-honest list of what remains unverified (shard legibility, motion not yet watched, save/load, audio).
-**Forward plan:** see [[Phase Roadmap]] — **Phases 00–07 all done**; 07 absorbed most of 09. Phase
-09's three remaining items (restoration rebuild, worn paths, ground marks) are still open — see the
-2026-08-06 session note below. Next: Phase 08 (save/load), then Phase 10 (motion), then Phase 11
-(ship-critical) from 2026-08-14 regardless.
-**Headroom:** 665,856 bytes under the 1,440,000 ship target
+**Current `.exe` size:** 775,680 bytes (on `feat/phase-08-save-load`)
+**Current status:** **Phase 08 (save/load) is done** — 28-byte versioned save, regen-from-seed +
+deltas, F5/F9 wired, `--save-test` green at 10 seeds with five negative controls. Phase 12 remains
+feature-complete. Phase 09's three remaining items are done on `feat/phase-09-restoration`
+(`57b7de9`, pushed, unmerged — this index's base predates it, so its code is NOT in the branch
+Phase 08 was built on).
+**Forward plan:** see [[Phase Roadmap]] — **Phases 00–08 all done**; 07 absorbed most of 09 and the
+rest of 09 shipped on its own branch. Next: Phase 10 (motion), then Phase 11 (ship-critical) from
+2026-08-14 regardless.
+**Headroom:** 664,320 bytes under the 1,440,000 ship target
 
 > **Note on the entry below:** written by a second, separately-run agent (`qwen`, via a tool called
 > `opencode`) that was pointed at this same working directory while Phase 12 slice 5 was mid-flight.
@@ -28,6 +28,17 @@ honest list of what remains unverified (shard legibility, motion not yet watched
 
 ## Sessions
 
+- [[2026-08-06-session-04]] *(Session 10)* — **Phase 08: save/load, done.** `SDL_RWFromFile`
+  confirmed to link despite `SDL_FILESYSTEM=OFF` (measured with a probe before writing any save
+  code). 28-byte flat versioned save — seed + position + abilities + restored/shard masks; load
+  regenerates from the seed through `game_init` and replays deltas via `apply_restore` (split out
+  of `try_restore` so play and load share one definition of "restored"). Validation-first load:
+  the live game is only touched after every check passes, position included against the
+  regenerated solid map. F5/F9, title-bar feedback. `--save-test`: round-trip bit-identical,
+  deterministic, five negative controls (truncated, wrong version, bad magic, out-of-bounds
+  position, missing file) each leaving the game untouched — 10/10 seeds. Full suite green.
+  +1,536 bytes. Also pushed `feat/phase-09-restoration` (`57b7de9`), which the handover notes had
+  called nonexistent.
 - [[2026-08-06-session-03]] *(Session 09)* — **Phase 12 slices 4 and 5: the phase is done.** The
   prompt indicator (procedural, sized against the bitmap font), a real Kindle-gate fix
   (`try_portal` now requires the far end be standable — `--gating-test` had modelled a stricter
