@@ -1,7 +1,7 @@
 ---
 tags: [process, handover, wayfarer]
 updated: 2026-08-06
-exe_size_bytes: 786432
+exe_size_bytes: 786944
 ---
 
 # Handover — Wayfarer
@@ -29,16 +29,18 @@ Running log: [[INDEX]]
 | opencode | Phase 10: motion | `feat/phase-10-motion` | **DONE** — all 7 DoD items, committed | 2026-08-06 | sway/shimmer/fall-lines/smoke/fireflies/soul-bob; `--motion-test` 8 checks green; full suite green; +2,048 bytes → 781,824 |
 | opencode | Phase 11: ship critical | `feat/phase-11-ship-complete` | **DONE** — all DoD items, committed (`8a27404`), PR pending | 2026-08-06 | 5-layer softsynth (deterministic, 0.325 ms worst case vs 21.333 ms deadline), chime/shard/portal SFX; HUD (counters, minimap, toasts, win banner) on the font extended with lowercase a–z + `/` (0x20–0x7A, 91 glyphs); `--hud-test` + `--font-test` green; full suite green; `nm` clean (no SDL_image/ttf/mixer); +4,608 bytes → 786,432 |
 | opencode | Phase 11 bugfix: shard pickup | `feat/phase-11-ship-complete` | **DONE** — committed (`7cd408a`), pushed | 2026-08-06 | E-key restructure left the shard branch unreachable (nothing caught it: autopilot and `--shard-test` both bypassed the key path). Extracted the whole interaction into `try_interact()`, handler now calls it, `--shard-test` drives it (`shard pickup: PASS`); full suite re-run green; release size unchanged 786,432 |
+| opencode | Rescale TILE 18 + HUD | `feat/phase-11-ship-complete` | **DONE** — committed (`068fea8` + `a8b178f`), pushed | 2026-08-06 | `TILE 24→18` denser tiles Option B (`144×138` world, 19,872 tiles, `REVEAL_TILES 7→9`, villages `4→6`/`12→16`/`29→39`/`22→32`), stack guard `400→700KB`, `soul_bob` floor 2px, minimap `2→1px/tile` (19,872px vs 79,488px); full 23/23 PASS, render 1.393ms, `+512` → 786,944 |
 
 **Resolved 2026-08-06, later still.** Phases 08 and 09 merged into `feat/phase-08-and-09`, PR #1
 merged into `main` (`b4f2fde` — that branch also carried all of Phase 12, so `main` already has the
 dream realm). Everything after `main` now sits in ONE straight line on **`feat/phase-11-ship-complete`**:
-Phase 10 (`d78b106`, `0f90bb2`), Phase 11 (`8a27404`, `95e8872`, `0f87552`), and the shard-pickup
-fix (`7cd408a`) plus its docs (`7a39eac`) — all pushed, branch tracking origin. The older
-`feat/phase-10-motion`, `feat/phase-11-ship` and `feat/phase-11-ship-latest` branches are
-superseded; PR and merge should come from `-complete`. **Phase 11 (ship critical) is the last
-required phase and it is DONE.** What remains is the submission checklist: merge to `main`,
-second-machine smoke test, repo visibility at submission time, final wrap.
+Phase 10 (`d78b106`, `0f90bb2`), Phase 11 (`8a27404`, `95e8872`, `0f87552`), shard-pickup fix
+(`7cd408a`) plus docs (`7a39eac`, `b2f24b0`, `aa4336f`), rescale `TILE 18` (`068fea8`) and minimap
+`1px/tile` (`a8b178f`) — all pushed, branch tracking origin. The older `feat/phase-10-motion`,
+`feat/phase-11-ship` and `feat/phase-11-ship-latest` branches are superseded; PR and merge should
+come from `-complete`. **Phase 11 (ship critical) is the last required phase and it is DONE.**
+What remains is the submission checklist: merge to `main`, second-machine smoke test, repo
+visibility at submission time, final wrap.
 
 **Resolved 2026-08-06, same day.** `fx_well` is baked, slice 5 (dream shards + the Dream Well) is
 finished and committed on `feat/phase-12-dream-realm` — the branch qwen's row names does not
@@ -63,11 +65,11 @@ worn paths, ground marks) are DONE there. Phase 08 (save/load) is DONE on `feat/
 
 | | |
 |---|---|
-| **State** | 786,432 bytes, builds clean, full suite green (incl. `--hud-test`, `--font-test`, `--audio-test --layers --sfx`, and the `try_interact` shard-pickup regression), plays to completion on 50/50 seeds. All twelve phases done |
-| **Branch** | **`feat/phase-11-ship-complete`** (Phase 10+11+the shard fix, pushed through `7a39eac`, PR pending) — `main` is at `b4f2fde` (Phases 08+09 merged via PR #1); this branch is that `main` + Phases 10/11 in a straight line. Working tree clean |
+| **State** | 786,944 bytes, builds clean, full suite green (incl. `--hud-test`, `--font-test`, `--audio-test --layers --sfx`, and the `try_interact` shard-pickup regression), plays to completion on 50/50 seeds. All twelve phases done — plus `TILE 18` denser world and `1px` minimap |
+| **Branch** | **`feat/phase-11-ship-complete`** (Phase 10+11+the shard fix+rescale+minimap, pushed through `a8b178f`, PR pending) — `main` is at `b4f2fde` (Phases 08+09 merged via PR #1); this branch is that `main` + Phases 10/11 in a straight line. Working tree clean |
 | **Deadline** | 2026-09-04 — **all development phases are complete**; only the submission checklist remains |
-| **Do first** | **Everything is built.** Audio (5-layer softsynth), HUD, save/load, dream realm, motion, art — all in, all green, and the one bug play found (shard pickup) is fixed with a regression. Remaining: merge `feat/phase-11-ship-complete` to `main`, run the [[QA Checklist]]'s human items on a second machine, confirm the repo's visibility for submission, final wrap |
-| **Then** | Submission: final size audit (653,568 headroom), tag the submission commit, push |
+| **Do first** | **Everything is built.** Audio (5-layer softsynth), HUD (now `1px` minimap), save/load, dream realm (`144×138`), motion, art — all in, all green. Rescale `TILE 18` and shard pickup both fixed with regressions. Remaining: merge `feat/phase-11-ship-complete` to `main`, run the [[QA Checklist]]'s human items on a second machine, confirm the repo's visibility for submission, final wrap |
+| **Then** | Submission: final size audit (653,056 headroom), tag the submission commit, push |
 | **Biggest risk** | **Nothing has been heard, watched or played by a human outside the dev loop.** Audio and motion are measured, not judged; the second-machine smoke test has never run |
 
 > **THE PROJECT CHANGED DIRECTION ON 2026-08-05, AND THAT WHOLE PHASE IS NOW DONE.** A portal in the
@@ -77,14 +79,15 @@ worn paths, ground marks) are DONE there. Phase 08 (save/load) is DONE on `feat/
 > reading only §11's old ordering would still pick the wrong task — the roadmap in §11 below is the
 > current one.
 
-**Where Phase 12 landed:** the grid is **108×104**, holding two landmasses — overworld rows 0–59,
-an always-solid void band 60–63, dream archipelago 64–103. A portal pair links them, travel is an
-`E` interact gated by whether you could actually stand on the far end, and `--gating-test` passes
-30/30 with that edge live. The dream realm has a look, the portal has art, a prompt indicator is
-the first UI and first ambient motion this game has had, 4 fragments and 2 Found Souls live past
-the portal, and 8 dream shards feed a Dream Well that unlocks the second one. **`--play-test` is
-50/50 with the whole loop exercised** — portal crossings, shard collection, the Well unlocking and
-redeeming its Soul, all by the same autopilot that plays everything else.
+**Where Phase 12 landed (now denser at `TILE 18`):** the grid is **144×138**, holding two
+landmasses — overworld rows 0–79, an always-solid void band 80–84, dream archipelago 85–137. A
+portal pair links them, travel is an `E` interact gated by whether you could actually stand on the
+far end, and `--gating-test` passes 30/30 with that edge live. The dream realm has a look, the
+portal has art, a prompt indicator is the first UI and first ambient motion this game has had, 4
+fragments and 2 Found Souls live past the portal, and 8 dream shards feed a Dream Well that unlocks
+the second one. **`--play-test` is 50/50 with the whole loop exercised** — portal crossings, shard
+collection, the Well unlocking and redeeming its Soul, all by the same autopilot that plays everything
+else. Original was `108×104`; rescale `068fea8` kept the same screen footprint with 77% more tiles.
 
 > **PLAY IT, NOT JUST THE TESTS — 2026-08-06 made the case again.** Slice 3 was reported done with
 > the whole suite green. The user opened seed 1, walked through the portal, and **could not move**:
@@ -183,19 +186,21 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 | | |
 |---|---|
-| **`build\wayfarer.exe`** | **786,432 bytes** — 653,568 under the ship target |
-| `build\wayfarer-selftest.exe` | 853,504 bytes — **not a deliverable**, never shipped |
-| `src\main.c` | ~10,530 lines, single translation unit |
+| **`build\wayfarer.exe`** | **786,944 bytes** — 653,056 under the ship target |
+| `build\wayfarer-selftest.exe` | 854,016 bytes — **not a deliverable**, never shipped |
+| `src\main.c` | ~11,427 lines, single translation unit |
 | `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. **64 records over 53 pixel streams** (11 are dream palette variants sharing a twin's stream), 76,048 bytes of const data. Never edit by hand |
 | Warnings | zero, under `-Wall -Wextra` |
 | Plan progress | **Phases 00–12 all done** — including 08 (save/load), 09 (restoration rebuild), 10 (motion), 11 (audio + HUD, ship critical) and 12 (dream realm, 5/5 slices). See [[Phase Roadmap]]. Only the submission checklist remains |
 
-> **If you are starting here: all twelve phases are done, and the one bug the day's play found is
-> fixed.** Phase 11 (ship critical) landed audio and the HUD; the E-key restructure had silently
-> made shard pickups unreachable, now extracted into `try_interact` and covered by a `--shard-test`
-> regression. Everything ships from `feat/phase-11-ship-complete` (pushed). What remains is the
-> human submission checklist — merge to `main`, second-machine smoke test, repo visibility, final
-> wrap. Check the Agent Log at the top of this file for anything another agent may have picked up.
+> **If you are starting here: all twelve phases are done, and the two visual/gameplay tweaks
+> since are the denser `TILE 18` world and the smaller minimap.** Phase 11 landed audio and the HUD;
+> the E-key restructure had silently made shard pickups unreachable, now extracted into `try_interact`
+> and covered by a `--shard-test` regression; the grid went `108×104→144×138` at `TILE 18` keeping
+> the same screen extent with 77% more tiles. Everything ships from `feat/phase-11-ship-complete`
+> (pushed `a8b178f`). What remains is the human submission checklist — merge to `main`,
+> second-machine smoke test, repo visibility, final wrap. Check the Agent Log at the top of this
+> file for anything another agent may have picked up.
 
 ### What actually works right now
 
@@ -208,15 +213,16 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
   0.9151, no NaN/clip/partial writes. Chime/shard/portal SFX beyond the confirm beat.
 - **A HUD, on the un-gated bitmap font** — counters top-left (fragments, souls, "the land is
   whole" when complete), restore toasts bottom-centre (fading), a one-shot win banner, the
-  shareable seed bottom-right, and a minimap top-right (2 px/tile, cached, redrawn on dirty or
+  shareable seed bottom-right, and a minimap top-right (1 px/tile, cached, redrawn on dirty or
   every 15 frames) with the confirmed legend You / Restored / Unrestored / Soul / Fragment. The
   font was extended from uppercase-only (0x20–0x5F) to 91 glyphs (0x20–0x7A): lowercase a–z and
   `/` — the original table silently skipped every lowercase char, which is why the first HUD
   pass rendered nothing but digits. `--hud-test` probes every element's pixels; `--font-test`
   now covers all 91 glyphs with its stride negative control
 - **TWO landmasses in one grid, and a portal between them** — [[Phase 12 - Dream Realm]], now
-  **entirely done, all 5 slices**. The grid is **108×104**: overworld rows 0–59, an always-solid
-  void band 60–63, dream archipelago 64–103. `world_gen` runs `gen_sector` twice, normalising `fy`
+  **entirely done, all 5 slices**. The grid is **144×138** (was `108×104`): overworld rows 0–79,
+  an always-solid void band 80–84, dream archipelago 85–137. `world_gen` runs `gen_sector` twice,
+  normalising `fy`
   *inside* each row range so the radial term makes two islands rather than one lobed one, and
   giving each its own water rim so they share no tile edge. `dream_sector(ty)` is the only thing
   that knows where the sector is
@@ -529,8 +535,8 @@ rebuild : PASS  ruin->whole phase gate; control (always-baked predicate) rejecte
 ground  : PASS  determinism: two marks-on frames identical
 motion  : PASS  render determinism at one clock; 23,552 px differ at a second;
                 per-helper bounds and the 8-row mote gate table
-perf    : render 1.017 ms mean (1.880 ms max) of a 16.67 ms budget, 59.6 fps
-          — measured with the HUD and minimap live; still ~9x headroom
+perf    : render 1.393 ms mean (2.185 ms max) of a 16.67 ms budget, 59.5 fps
+          — measured with the HUD (1px minimap) live at `TILE 18`/`144×138`; still ~12× headroom
 ```
 
 > **`--land-test` has now been re-aimed THREE times for the two-sector grid, and never loosened.**
@@ -690,15 +696,15 @@ Treat this as a map of the file's *order* and **trust the grep, not the number.*
 
 | Constant | Value | Notes |
 |---|---|---|
-| `TILE` | **24** (was 32) | Diamonds are 48×24. **Changing it now really is free**: every authored dimension goes through `PX()`, so the whole visual scale follows. It did not before — see decision 26 |
+| `TILE` | **18** (was 32, then 24) | Diamonds are 36×18. **Changing it now really is free**: every authored dimension goes through `PX()`, so the whole visual scale follows. It did not before — see decision 26 |
 | `PX(n)` / `PXF(n)` | — | "n px, as authored at a 32 px tile" (`TILE_REF`). Wrap **every** new hand-authored pixel dimension in it, or that art stops scaling with `TILE` and re-creates the "everything is too big" bug |
-| `WORLD_W` × `WORLD_H` | **108 × 104** (was 108×60) | Two landmasses. `WORLD_H` is now *derived*: `DREAM_Y0 + DREAM_H`. `ISO_MAP_W/H`, `ISO_OX` and `BAND_MAX` all follow automatically |
-| `OVERWORLD_H` / `DREAM_GAP` / `DREAM_Y0` / `DREAM_H` | **60 / 4 / 64 / 40 (new)** | Overworld rows 0–59, always-solid void band 60–63, dream archipelago 64–103 |
+| `WORLD_W` × `WORLD_H` | **144 × 138** (was 108×104) | Two landmasses. `WORLD_H` is now *derived*: `DREAM_Y0 + DREAM_H`. `ISO_MAP_W/H`, `ISO_OX` and `BAND_MAX` all follow automatically. Rescale `24→18` kept the same screen footprint with 77% more tiles |
+| `OVERWORLD_H` / `DREAM_GAP` / `DREAM_Y0` / `DREAM_H` | **80 / 5 / 85 / 53** | Overworld rows 0–79, always-solid void band 80–84, dream archipelago 85–137 |
 | `DREAM_ROUGH` | **0.78 (new)** | Dream coast roughness vs `LAND_ROUGH` 0.55. **Roughness, not a higher sea threshold** — fragmenting the sector into genuinely separate islets would strand entities and the verifier would reject seeds forever |
 | `PORTAL_REACH` | **`PXF(34)` (new)** | Interact radius for travel, same shape as `INTERACT_RADIUS` |
 | `LOGICAL_W` × `LOGICAL_H` | 960 × 540 | Rasterised size; window is this × an integer scale |
 | `PLAYER_SPEED` / `PLAYER_SIZE` | `PXF(220)` / `PX(24)` = 165 / 18 | Both scale with `TILE`; collision is scale-invariant because `player_blocked` divides by `TILE` |
-| `REVEAL_TILES` | **7** (was 5) | In *tiles*, so it does not scale with tile size — raised by hand to keep the sight circle ~160 world px |
+| `REVEAL_TILES` | **9** (was 5, then 7) | In *tiles*, so it does not scale with tile size — raised by hand to keep the sight circle ~160 world px (7×24≈9×18) |
 | `CAM_DEADZONE` / `CAM_EASE` | `PX(30)` / 0.16 | Follow-camera feel. **First guesses, never judged by a human.** Y deadzone is halved because the projection compresses screen y 2:1 |
 | `SIGHT_MAX` | **0.50** (was 0.42) | Raised alongside the fog rewrite so walked ground keeps more colour |
 | `FOG_TINT_R/G/B` | **60 / 70 / 86** | Was (44, 52, 68) — a *dark* blue-grey. Now a light cool haze. Took three tuning passes; **tune these with the F3 overlay in a self-test build, never by rebuild-and-screenshot again** |
@@ -716,8 +722,8 @@ Treat this as a map of the file's *order* and **trust the grep, not the number.*
 | `WALK_FRAMES` / `WALK_FPS` | **4 / 8.0 (new)** | Character walk cycle. `anim` resets to 0 on key release so a standing player shows frame 0 rather than freezing mid-stride |
 | Prop density (`prop_at`) | **tree 12.5%, bush 9.4%, stump 6.3%, flower 18.8%** | Was 22/15.6/6.3/15.6 — **retuned because baked sprites are far bigger than the procedural props they replaced.** Cumulative thresholds on a 0..31 roll |
 | `RIVER_FALL_STEPS` / `RIVER_FALL_EVERY` | **4 / 5 (new)** | Waterfall terracing: 4 drops between a source and the mouth, one per 5 BFS hops of `sea_dist`. **`EVERY` was measured, not guessed** — at 8 a river reached only 2–3 of its 4 steps. Read as *depth*, see decision 35 |
-| `VILLAGE_SITES` / `VILLAGE_RADIUS` / `VILLAGE_SPACING` | **4 / 12 / 29** | All in *tiles*, so all re-derived by hand for `TILE` 24. Radius/spacing × 32/24 keeps a village the same physical size; sites raised because 3 in a 1.8× larger world read as an empty island |
-| `BUILDING_TARGET` / `BUILDING_MAX` | **22** / 40 | Raised with the world size; mean is 21 per world. `BUILDING_MAX` stays the array bound |
+| `VILLAGE_SITES` / `VILLAGE_RADIUS` / `VILLAGE_SPACING` | **6 / 16 / 39** | All in *tiles*, so all re-derived by hand for `TILE` 24 then 18. Radius/spacing × 24/18 keeps a village the same physical size; sites raised because 4 in a 1.77× larger world read as empty |
+| `BUILDING_TARGET` / `BUILDING_MAX` | **32** / 40 | Raised with the world size; mean is 32 per world at `144×138`. `BUILDING_MAX` stays the array bound |
 | `STOREY_H` / `WALL_BASE` | 14 / 10 | Unchanged |
 | `LOBES` | 6 | Unchanged, but lobes are now `fill_ellipse` calls, not `fill_rect` |
 | `REGION_COUNT` | 16 | **Hard cap 32** — adjacency is a `Uint32` bitmask |
@@ -1631,7 +1637,7 @@ be re-derived:
 - **Indexed pixel art, small.** A 32×32 sprite at 4 bpp bakes to 512 bytes. Against 747,776 bytes
   free that is room for well over a thousand. **Bytes are not the constraint** — authoring effort
   and pixel density are.
-- **Authored against the tile.** Diamonds are 48×24 at `TILE 24`; anything hand-drawn should be
+- **Authored against the tile.** Diamonds are 36×18 at `TILE 18` (was 48×24 at `TILE 24`); anything hand-drawn should be
   sized to that, and its dimensions wrapped in `PX()` so it survives another scale change.
 - **A shared fixed palette** across assets is what keeps the bake small and the look coherent.
 - The bake script is a build-time PNG→`src/assets.h` converter (.NET's `System.Drawing` reads PNG
