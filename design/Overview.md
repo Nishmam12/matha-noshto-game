@@ -79,11 +79,13 @@ The mockup HUD shows a combined counter reading **23/40**. That's roughly 3x the
 ## System map
 - [[World Generation]] — landmass, region graph, reachability invariant, world-growth stages
 - [[Fog and Reveal]] — the core visual hook
+- [[Isometric Rendering]] — 36×18 diamonds at `TILE 18`, band-sweep depth, tile-position-ordered draw for walls/cliffs/trees
 - [[Abilities]] — Wade / Climb / Kindle, terrain gating
 - [[Fragments]] — placement + restoration interaction
 - [[Found Souls]] — Lost → Found → Remembered subtype of fragments
 - [[Audio and Synth]] — softsynth, named layers (Base / Strings / Pad / Bells / Voice of Souls), SFX
-- [[Save and UI]] — save/seed system, bitmap font, minimal HUD
+- [[Save and UI]] — save/seed system, bitmap font, minimal HUD (1px minimap at `144×138`)
+- [[Phase 13 - Aetherhold Castle]] — **NEW** first handcrafted chapter: castle island + connecting land (two reference maps) + modular dungeon, hybrid fixed-layout + procedural decoration
 
 ## Timeline (5 weeks + buffer, working back from Sept 4, 2026)
 - **Week 1** — build pipeline, PRNG, movement, first-pass fog reveal over a placeholder area. Milestone: does the reveal feel good with zero other content?
@@ -92,6 +94,7 @@ The mockup HUD shows a combined counter reading **23/40**. That's roughly 3x the
 - **Week 4** — [[Audio and Synth]] (softsynth, pattern data, layering hook, SFX, callback profiling)
 - **Week 5** — [[Save and UI]], win/completion state, full playthroughs, game feel pass
 - **Buffer week** — run [[QA Checklist]] in full, final size audit, submit early
+- **Next** — [[Phase 13 - Aetherhold Castle]] — handcrafted castle island + connecting land + modular dungeon (approached after this timeline, spec approved 2026-08-06)
 
 ## Judging-criteria alignment
 | Criterion | How this design serves it |

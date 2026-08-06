@@ -1771,12 +1771,18 @@ the mechanism is fully proven (placement, collection, the autopilot finding all 
 *legibility* is not, and this is the kind of thing that needs a human's eye, not another test. See
 [[Phase 12 - Dream Realm]] Evidence, slice 5, for the rest.
 
-**All of it is done.** Phases 08 (save/load), 09 (restoration rebuild), 10 (motion) and 11 (audio +
-HUD) landed on schedule after Phase 12; every phase's DoD is ticked and the full suite is green.
-The only outstanding engine bug found by play was the unreachable shard pickup, fixed same-day
-(`7cd408a`) with a regression that drives the real key path. What remains is the **human submission
-checklist**: merge `feat/phase-11-ship-complete` into `main`, run the [[QA Checklist]]'s
-second-machine smoke test, decide the repo's visibility, tag the submission commit, push.
+**All of it is done through ship-critical.** Phases 08 (save/load), 09 (restoration rebuild), 10
+(motion) and 11 (audio + HUD) landed on schedule after Phase 12; every phase's DoD is ticked and the
+full suite is green. The only outstanding engine bug found by play was the unreachable shard pickup,
+fixed same-day (`7cd408a`) with a regression that drives the real key path. What remains before
+submission is the **human checklist**: merge `feat/phase-11-ship-complete` into `main`, run the
+[[QA Checklist]]'s second-machine smoke test, decide the repo's visibility, tag the submission
+commit, push. **After that, Phase 13 — [[Phase 13 - Aetherhold Castle]] — is PLANNED** (spec approved
+2026-08-06 with the two reference maps: Castle Island + Connecting Land). It is the first handcrafted
+chapter after ship-critical: a causeway-gated castle island with courtyards/keep, a connecting
+forest/path, and a modular dungeon beneath — hybrid fixed-layout + procedural decoration, two
+modular bake parts, vertical exploration. See that phase file for the five-slice approach and the
+`tile_blocked`-pure gating rule.
 
 > **Do not re-raise the schedule.** It was put to the user on 2026-08-05 with the full arithmetic;
 > they considered it and said there is time. That is their call and it has been made.

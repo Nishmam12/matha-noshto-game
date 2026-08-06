@@ -21,6 +21,7 @@ Exploration-driven memory-restoration game for the 2P Game Arcade 1.44MB Floppy 
 - [[Found Souls]]
 - [[Audio and Synth]]
 - [[Save and UI]]
+- [[Phase 13 - Aetherhold Castle]] — **NEW** handcrafted castle island + connecting land + modular dungeon (spec + two reference maps)
 - [[Open Decisions]] — unresolved questions to settle before/during Week 1–2
 - [[Cut List]] — pre-committed descoping order if time runs short
 - [[QA Checklist]] — continuous verification rules
