@@ -7,16 +7,13 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 775,680 bytes (on `feat/phase-08-save-load`)
-**Current status:** **Phase 08 (save/load) is done** — 28-byte versioned save, regen-from-seed +
-deltas, F5/F9 wired, `--save-test` green at 10 seeds with five negative controls. Phase 12 remains
-feature-complete. Phase 09's three remaining items are done on `feat/phase-09-restoration`
-(`57b7de9`, pushed, unmerged — this index's base predates it, so its code is NOT in the branch
-Phase 08 was built on).
-**Forward plan:** see [[Phase Roadmap]] — **Phases 00–08 all done**; 07 absorbed most of 09 and the
-rest of 09 shipped on its own branch. Next: Phase 10 (motion), then Phase 11 (ship-critical) from
-2026-08-14 regardless.
-**Headroom:** 664,320 bytes under the 1,440,000 ship target
+**Current `.exe` size:** 779,776 bytes (on `feat/phase-08-and-09`, merged from Phases 08 + 09)
+**Current status:** **Phases 00–09 all done.** Phase 08 (save/load) and Phase 09 (restoration
+rebuild + worn paths + ground marks) are merged into `feat/phase-08-and-09` and green across the
+full test suite. Phase 12 (dream realm) remains feature-complete on its own branch.
+**Forward plan:** see [[Phase Roadmap]] — next is Phase 10 (motion), then Phase 11 (ship-critical)
+from 2026-08-14 regardless.
+**Headroom:** 660,224 bytes under the 1,440,000 ship target
 
 > **Note on the entry below:** written by a second, separately-run agent (`qwen`, via a tool called
 > `opencode`) that was pointed at this same working directory while Phase 12 slice 5 was mid-flight.
