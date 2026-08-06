@@ -44,7 +44,7 @@ param(
     # they are named one by one in $FxFrames below rather than by taking the whole folder.
     # Baking a sprite nothing draws is pure byte cost - the same rule that kept the bitmap font
     # at +0 shipping bytes until something called it.
-    [string[]] $Categories = @("player", "nature", "buildings")
+    [string[]] $Categories = @("player", "nature", "buildings", "castle")
 )
 
 $ErrorActionPreference = "Stop"
