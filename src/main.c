@@ -245,13 +245,107 @@ static FogTune fog_tune = { FOG_TINT_R, FOG_TINT_G, FOG_TINT_B, FOG_KEEP };
 #define TONE_HZ        440.0
 #define TONE_AMP       0.20f
 
-/* Restore confirm beat. A plain decaying sine for now; the real layered synth
- * is Week 4 (design/systems/Audio and Synth.md). */
-#define SFX_HZ    660.0
-#define SFX_AMP   0.28f
-#define SFX_DECAY 3.2f /* envelope units/sec; ~0.3 s tail */
-
 #define TWO_PI 6.283185307179586
+
+/* ---------------------------------------------------------------- synth -- */
+/* Phase 11 layered music. Five voices driven by static const pattern tables;
+ * the game thread bumps atomics on restores, the callback latches and advances.
+ * No allocation, no locks, no RNG in the callback (the audio thread's hard
+ * deadline is a release blocker per Agent Prompt.md). Musical notes are a pure
+ * function of a sample counter, so two runs from the same state are identical. */
+
+typedef enum { W_SAW, W_SQUARE, W_SINE, W_NOISE } Wave;
+
+#define NUM_LAYERS 5
+enum { LAYER_BASE=0, LAYER_STRINGS=1, LAYER_PAD=2, LAYER_BELLS=3, LAYER_VOICE=4 };
+
+/* Ambient C minor. 16 steps; step = 0.5s; loop = 8s. Chord prog Cm-Ab-Eb-Bb
+ * (i-VI-III-VII). 0.0f = rest; legato layers hold the last note across rests. */
+#define SYNTH_STEPS 16
+#define SYNTH_STEP_S 0.5f
+
+static const float SYNTH_BASE[1] = { 65.41f }; /* C2 drone */
+
+static const float SYNTH_STRINGS[SYNTH_STEPS] = {
+    130.81f, 311.13f, 196.00f, 261.63f,   /* Cm: C3, Eb4, G3, C4  */
+    103.83f, 261.63f, 155.56f, 207.65f,   /* Ab: Ab2, C4, Eb3, Ab3 */
+    155.56f, 392.00f, 233.08f, 311.13f,   /* Eb: Eb3, G4, Bb3, Eb4 */
+    116.54f, 293.66f, 349.23f, 233.08f    /* Bb: Bb2, D4, F4, Bb3  */
+};
+static const float SYNTH_PAD[SYNTH_STEPS] = {
+    130.81f, 0.0f, 0.0f, 0.0f,  103.83f, 0.0f, 0.0f, 0.0f,
+    155.56f, 0.0f, 0.0f, 0.0f,  116.54f, 0.0f, 0.0f, 0.0f
+};
+static const float SYNTH_BELLS[SYNTH_STEPS] = {
+    0.0f, 0.0f, 523.25f, 0.0f,  0.0f, 622.25f, 0.0f, 0.0f,
+    0.0f, 0.0f, 783.99f, 0.0f,  0.0f, 932.33f, 0.0f, 0.0f
+};
+static const float SYNTH_VOICE[SYNTH_STEPS] = {
+    261.63f, 0.0f, 311.13f, 0.0f,  392.00f, 349.23f, 311.13f, 293.66f,
+    261.63f, 0.0f, 311.13f, 0.0f,  392.00f, 0.0f, 349.23f, 0.0f
+};
+
+typedef struct {
+    Wave         wave;
+    const float *pat;
+    int          pat_len;
+    float        amp;     /* target amplitude when active            */
+    float        attack;  /* swell layers: env rise per second       */
+    float        decay;   /* pluck layers: 1 / tail-seconds (0=legato) */
+    float        cutoff;  /* one-pole lowpass coefficient (0..1)      */
+    int          always_on;
+} LayerCfg;
+
+static const LayerCfg LAYER_CFG[NUM_LAYERS] = {
+    [LAYER_BASE]    = { W_SAW,  SYNTH_BASE,    1,  0.30f, 0.50f, 0.0f, 0.12f, 1 },
+    [LAYER_STRINGS] = { W_SAW,  SYNTH_STRINGS, 16, 0.16f, 0.33f, 0.0f, 0.20f, 0 },
+    [LAYER_PAD]     = { W_SINE, SYNTH_PAD,     16, 0.13f, 0.20f, 0.0f, 0.30f, 0 },
+    [LAYER_BELLS]   = { W_SINE, SYNTH_BELLS,   16, 0.16f, 0.0f,  1.5f, 0.60f, 0 },
+    [LAYER_VOICE]   = { W_SINE, SYNTH_VOICE,   16, 0.20f, 1.00f, 0.0f, 0.45f, 0 },
+};
+
+typedef struct {
+    float phase;    /* 0..1 oscillator phase   */
+    float env;      /* 0..amp current envelope */
+    float filt;     /* one-pole lowpass state  */
+    float cur_freq; /* current note (0 = uninitialised) */
+    int   step;     /* last pattern step rendered */
+    int   trig;     /* pluck is ringing        */
+} Voice;
+
+#define NUM_SFX 3
+enum { SFX_CHIME=0, SFX_SHARD=1, SFX_PORTAL=2 };
+
+typedef struct {
+    SDL_atomic_t fire;
+    int   seen;
+    double phase;
+    float env;
+} Sfx;
+
+typedef struct {
+    float freq;
+    float amp;
+    float decay;   /* 1 / tail-seconds (same semantics as layer decay) */
+    Wave  wave;
+} SfxCfg;
+
+static const SfxCfg SFX_CFG[NUM_SFX] = {
+    [SFX_CHIME]  = { 660.0f,  0.28f, 3.2f, W_SINE  },
+    [SFX_SHARD]  = { 1318.0f, 0.22f, 6.0f, W_SINE  },
+    [SFX_PORTAL] = { 0.0f,    0.30f, 1.5f, W_NOISE },
+};
+
+typedef struct {
+    int    synth_on;
+    int    layers;     /* bitmask of active layers              */
+    int    frag_cnt;  /* fragment restores latched             */
+    int    voice_cnt;  /* Found Soul restores latched          */
+    Uint64 sample;     /* total samples since synth start      */
+    Voice  v[NUM_LAYERS];
+    int    layer_seen; /* callback latch for layer_fire        */
+    int    voice_seen; /* callback latch for voice_fire        */
+} Synth;
 
 /* ------------------------------------------------------------------ RNG -- */
 /* PCG32. Every procedural generator draws from a seeded stream so any bad
@@ -357,15 +451,16 @@ typedef struct {
     int    tone;  /* ambient test tone; off in the game, on in audio selftests */
     Rng    rng;
 
-    /* Restore confirm beat. The main thread only ever bumps an atomic counter;
-     * the callback owns everything else. No lock, no allocation, no shared
-     * mutable state on the audio thread's critical path — the audio callback
-     * has a hard deadline and Agent Prompt.md treats faults there as release
-     * blockers. */
-    SDL_atomic_t sfx_fire;
-    int          sfx_seen;
-    double       sfx_phase;
-    float        sfx_env;
+    /* Phase 11: layered music + multi-SFX. Same real-time discipline as the old
+     * single confirm beat — the main thread bumps atomics, the callback owns
+     * every other byte of state. No lock, no allocation, no shared mutable
+     * state on the audio thread's critical path (Agent Prompt.md: faults here
+     * are release blockers). */
+    Sfx          sfx[NUM_SFX];
+    SDL_atomic_t layer_fire;   /* bumped per fragment restore             */
+    SDL_atomic_t voice_fire;   /* bumped per Found Soul restore          */
+    SDL_atomic_t reset_req;    /* main thread asks callback to zero state */
+    Synth        synth;
 #if WAYFARER_SELFTEST
     Uint64 calls;
     Uint64 frames;
@@ -377,6 +472,115 @@ typedef struct {
 #endif
 } Audio;
 
+/* One sample of the chosen waveform. W_NOISE draws from the audio stream's
+ * callback-owned RNG — never used by music layers, only by the portal SFX, so
+ * musical determinism (pure function of the sample counter) is unaffected. */
+static float wave_sample(Wave w, float ph, Audio *a)
+{
+    switch (w) {
+    case W_SAW:    return 2.0f * ph - 1.0f;
+    case W_SQUARE: return ph < 0.5f ? 1.0f : -1.0f;
+    case W_SINE:   return SDL_sinf(ph * (float)TWO_PI);
+    case W_NOISE:  return rng_bipolar(&a->rng);
+    default:       return 0.0f;
+    }
+}
+
+static void sfx_fire(Audio *a, int kind) { SDL_AtomicAdd(&a->sfx[kind].fire, 1); }
+
+/* Latch the game-thread triggers into callback-owned state. Called once per
+ * callback, not per sample. The reset_req path lets the main thread ask for a
+ * synth zero-out (on seed regen / load) without writing callback-owned fields
+ * itself — that would be a data race, and the callback's hard deadline makes
+ * locks a non-option. */
+static void synth_latch(Audio *a)
+{
+    Synth *s = &a->synth;
+    int lf, vf;
+
+    if (SDL_AtomicGet(&a->reset_req)) {
+        SDL_AtomicSet(&a->reset_req, 0);
+        s->layers = 0; s->frag_cnt = 0; s->voice_cnt = 0; s->sample = 0;
+        SDL_memset(s->v, 0, sizeof(s->v));
+        s->layer_seen = SDL_AtomicGet(&a->layer_fire);
+        s->voice_seen = SDL_AtomicGet(&a->voice_fire);
+    }
+
+    lf = SDL_AtomicGet(&a->layer_fire);
+    while (s->layer_seen != lf) {
+        s->layer_seen++;
+        if (++s->frag_cnt == 1) s->layers |= (1 << LAYER_STRINGS);
+        else if (s->frag_cnt == 2) s->layers |= (1 << LAYER_PAD);
+        else if (s->frag_cnt == 3) s->layers |= (1 << LAYER_BELLS);
+    }
+    vf = SDL_AtomicGet(&a->voice_fire);
+    while (s->voice_seen != vf) {
+        s->voice_seen++;
+        if (++s->voice_cnt >= 1) s->layers |= (1 << LAYER_VOICE);
+    }
+    if (s->synth_on && !(s->layers & (1 << LAYER_BASE)))
+        s->layers |= (1 << LAYER_BASE);
+}
+
+/* Render one mixed sample of all active layers. Pure modulo the Voice state it
+ * advances (which is callback-owned). */
+static float synth_step(Audio *a)
+{
+    Synth *s = &a->synth;
+    float mix = 0.0f;
+    int li;
+    int cur_step = (int)((double)s->sample / ((double)a->rate * SYNTH_STEP_S)) % SYNTH_STEPS;
+    s->sample++;
+
+    for (li = 0; li < NUM_LAYERS; li++) {
+        Voice *v = &s->v[li];
+        const LayerCfg *c = &LAYER_CFG[li];
+        if (!((s->layers >> li) & 1)) continue;
+
+        /* Advance the pattern on a step boundary (or the first ever sample). */
+        if (v->step != cur_step || v->cur_freq <= 0.0f) {
+            v->step = cur_step;
+            {
+                int idx = cur_step % c->pat_len;
+                float nf = c->pat[idx];
+                if (nf > 0.0f) {
+                    v->cur_freq = nf;
+                    if (c->decay > 0.0f) { v->phase = 0.0f; v->env = c->amp; v->trig = 1; }
+                } else if (c->decay > 0.0f) {
+                    v->trig = 0; /* rest: let the pluck ring out */
+                }
+            }
+        }
+
+        /* Envelope: plucks decay, swells ramp toward their target. */
+        if (c->decay > 0.0f) {
+            v->env -= c->decay * c->amp / (float)a->rate;
+            if (v->env < 0.0f) v->env = 0.0f;
+        } else if (v->env < c->amp) {
+            v->env += c->attack / (float)a->rate;
+            if (v->env > c->amp) v->env = c->amp;
+        }
+        if (v->env <= 0.0f) continue;
+
+        {
+            float out = wave_sample(c->wave, v->phase, a);
+            v->phase += v->cur_freq / (float)a->rate;
+            if (v->phase >= 1.0f) v->phase -= 1.0f;
+            /* One-pole lowpass for warmth. */
+            v->filt += c->cutoff * (out - v->filt);
+            out = v->filt;
+            /* Voice of Souls: a slow tremolo for a distinctly vocal quality. */
+            if (li == LAYER_VOICE) {
+                float trem = 0.7f + 0.3f * SDL_sinf(
+                    (float)((double)s->sample * 6.0 / a->rate) * (float)TWO_PI);
+                out *= trem;
+            }
+            mix += out * v->env;
+        }
+    }
+    return mix;
+}
+
 /* Runs on SDL's real-time audio thread against a hard deadline. No allocation,
  * no locks, no syscalls, no unbounded work. */
 static void SDLCALL audio_cb(void *userdata, Uint8 *stream, int len)
@@ -386,20 +590,22 @@ static void SDLCALL audio_cb(void *userdata, Uint8 *stream, int len)
     int nfloats = len / (int)sizeof(float);
     int frames = nfloats / a->channels;
     double inc = TONE_HZ / (double)a->rate;
-    int i, c;
+    int i, c, si;
 #if WAYFARER_SELFTEST
     Uint64 t0 = SDL_GetPerformanceCounter();
     if (nfloats % a->channels != 0)
         a->partial_len++;
 #endif
 
-    /* Latch the trigger once per callback, not per sample. */
-    {
-        int fired = SDL_AtomicGet(&a->sfx_fire);
-        if (fired != a->sfx_seen) {
-            a->sfx_seen = fired;
-            a->sfx_env = 1.0f;
-            a->sfx_phase = 0.0;
+    /* Latch triggers once per callback, not per sample. The game thread only
+     * ever bumps atomics; every other byte of state here is callback-owned. */
+    synth_latch(a);
+    for (si = 0; si < NUM_SFX; si++) {
+        int fired = SDL_AtomicGet(&a->sfx[si].fire);
+        if (fired != a->sfx[si].seen) {
+            a->sfx[si].seen = fired;
+            a->sfx[si].env = 1.0f;
+            a->sfx[si].phase = 0.0;
         }
     }
 
@@ -412,15 +618,21 @@ static void SDLCALL audio_cb(void *userdata, Uint8 *stream, int len)
             a->phase += inc;
             if (a->phase >= 1.0)
                 a->phase -= 1.0;
+        } else if (a->synth.synth_on) {
+            v = synth_step(a);
         }
-        if (a->sfx_env > 0.0f) {
-            v += SDL_sinf((float)(a->sfx_phase * TWO_PI)) * a->sfx_env * SFX_AMP;
-            a->sfx_phase += SFX_HZ / (double)a->rate;
-            if (a->sfx_phase >= 1.0)
-                a->sfx_phase -= 1.0;
-            a->sfx_env -= SFX_DECAY / (float)a->rate;
-            if (a->sfx_env < 0.0f)
-                a->sfx_env = 0.0f;
+        for (si = 0; si < NUM_SFX; si++) {
+            if (a->sfx[si].env > 0.0f) {
+                const SfxCfg *sc = &SFX_CFG[si];
+                v += wave_sample(sc->wave, (float)a->sfx[si].phase, a)
+                     * a->sfx[si].env * sc->amp;
+                a->sfx[si].phase += (double)sc->freq / (double)a->rate;
+                if (a->sfx[si].phase >= 1.0)
+                    a->sfx[si].phase -= 1.0;
+                a->sfx[si].env -= sc->decay / (float)a->rate;
+                if (a->sfx[si].env < 0.0f)
+                    a->sfx[si].env = 0.0f;
+            }
         }
         if (v > 1.0f) v = 1.0f;
         if (v < -1.0f) v = -1.0f;
@@ -3115,22 +3327,16 @@ static void fill_rect(SDL_Surface *s, int x, int y, int w, int h, Uint32 colour)
     }
 }
 
-#if WAYFARER_SELFTEST
 /* ---- Bitmap font ---------------------------------------------------------
  *
  * 5x7, hand-rolled and bit-packed rather than a sprite (decision 3, Handover
- * §6: no SDL_ttf, ever). Covers uppercase, digits and the punctuation a
- * restoration line or a tuning HUD is likely to need — see design/phases/
+ * §6: no SDL_ttf, ever). Covers uppercase and lowercase, digits and the
+ * punctuation a restoration line or the HUD needs — see design/phases/
  * Phase 03 - Legibility Tools.md, task 1.
  *
- * Gated behind WAYFARER_SELFTEST for now, the same way WAYFARER_PERF is
- * (Handover §6 decision 8): nothing in the shipping build calls draw_text
- * yet — wiring it into a real restoration line or HUD is Phase 09/11's job,
- * not this phase's. This phase only has to prove the tool itself works, via
- * --font-test and the tuning overlay built on top of it next. Un-gating is a
- * one-line change once a real caller exists; leaving it gated until then
- * keeps "the shipping build carries none of this" true by construction
- * rather than by remembering not to call it.
+ * Un-gated by Phase 11: the HUD, minimap labels, toasts and win banner are the
+ * real callers that gating was waiting for (Handover §6 decision 8). The
+ * tuning overlay built on this font in Phase 03 remains self-test-only.
  *
  * FONT_5X7 is FLAT and indexed with an explicit stride rather than declared
  * as [glyph][row], on purpose: font_selftest's negative control corrupts
@@ -3140,7 +3346,7 @@ static void fill_rect(SDL_Surface *s, int x, int y, int w, int h, Uint32 colour)
 #define FONT_H      7
 #define FONT_SCALE  2      /* logical px per font px; legible at --scale 1 */
 #define FONT_FIRST  0x20   /* space */
-#define FONT_LAST   0x5F   /* underscore; covers digits, A-Z, punctuation */
+#define FONT_LAST   0x7A   /* lowercase z; covers digits, A-Z, a-z, punctuation */
 #define FONT_GLYPHS (FONT_LAST - FONT_FIRST + 1)
 #define FONT_STRIDE FONT_H /* rows per glyph in FONT_5X7 — see note above */
 
@@ -3155,7 +3361,7 @@ static const Uint8 FONT_5X7[FONT_GLYPHS * FONT_H] = {
     /* 0x2C ',' */ 0,0,0,0,0, GR(0,0,1,0,0), GR(0,1,0,0,0),
     /* 0x2D '-' */ 0,0,0, GR(0,1,1,1,0), 0,0,0,
     /* 0x2E '.' */ 0,0,0,0,0,0, GR(0,0,1,0,0),
-    /* 0x2F unused */ 0,0,0,0,0,0,0,
+    /* 0x2F '/' */ GR(0,0,0,0,1), GR(0,0,0,1,0), GR(0,0,1,0,0), GR(0,1,0,0,0), GR(1,0,0,0,0), 0, 0,
     /* 0x30 '0' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
     /* 0x31 '1' */ GR(0,0,1,0,0), GR(0,1,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,1,1,1,0),
     /* 0x32 '2' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(0,0,0,0,1), GR(0,0,0,1,0), GR(0,0,1,0,0), GR(0,1,0,0,0), GR(1,1,1,1,1),
@@ -3199,7 +3405,33 @@ static const Uint8 FONT_5X7[FONT_GLYPHS * FONT_H] = {
     /* 0x58 'X' */ GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,0,1,0), GR(0,0,1,0,0), GR(0,1,0,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1),
     /* 0x59 'Y' */ GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,0,1,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0),
     /* 0x5A 'Z' */ GR(1,1,1,1,1), GR(0,0,0,0,1), GR(0,0,0,1,0), GR(0,0,1,0,0), GR(0,1,0,0,0), GR(1,0,0,0,0), GR(1,1,1,1,1),
-    /* 0x5B-0x5F unused */ 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0,
+    /* 0x5B-0x60 unused */ 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0,
+    /* 0x61 'a' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(0,0,0,0,1), GR(0,1,1,1,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x62 'b' */ GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,1,1,0), GR(1,1,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x63 'c' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x64 'd' */ GR(0,0,0,0,1), GR(0,0,0,0,1), GR(0,1,1,0,1), GR(1,0,0,1,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x65 'e' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,1,1,1,1), GR(1,0,0,0,0), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x66 'f' */ GR(0,0,1,1,0), GR(0,1,0,0,1), GR(0,1,0,0,0), GR(1,1,1,0,0), GR(0,1,0,0,0), GR(0,1,0,0,0), GR(0,1,0,0,0),
+    /* 0x67 'g' */ GR(0,1,1,1,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,1), GR(0,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x68 'h' */ GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,1,1,0), GR(1,1,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1),
+    /* 0x69 'i' */ GR(0,0,1,0,0), 0, GR(0,1,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,1,1,1,0),
+    /* 0x6A 'j' */ GR(0,0,0,1,0), 0, GR(0,0,0,1,0), GR(0,0,0,1,0), GR(0,0,0,1,0), GR(1,0,0,1,0), GR(0,1,1,0,0),
+    /* 0x6B 'k' */ GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,1,0), GR(1,0,1,0,0), GR(1,1,0,0,0), GR(1,0,1,0,0), GR(1,0,0,1,0),
+    /* 0x6C 'l' */ GR(0,1,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,0,1,0,0), GR(0,1,1,1,0),
+    /* 0x6D 'm' */ GR(1,1,0,1,1), GR(1,0,1,0,1), GR(1,0,1,0,1), GR(1,0,1,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1),
+    /* 0x6E 'n' */ GR(1,0,1,1,0), GR(1,1,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1),
+    /* 0x6F 'o' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x70 'p' */ GR(1,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,1,1,1,0), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,0),
+    /* 0x71 'q' */ GR(0,1,1,1,0), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,0,1), GR(0,0,0,1,1), GR(0,0,0,0,1),
+    /* 0x72 'r' */ GR(1,0,1,1,0), GR(1,1,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(1,0,0,0,0),
+    /* 0x73 's' */ GR(0,1,1,1,1), GR(1,0,0,0,0), GR(1,0,0,0,0), GR(0,1,1,1,0), GR(0,0,0,0,1), GR(0,0,0,0,1), GR(1,1,1,1,0),
+    /* 0x74 't' */ GR(0,1,0,0,0), GR(0,1,0,0,0), GR(1,1,1,0,0), GR(0,1,0,0,0), GR(0,1,0,0,0), GR(0,1,0,0,1), GR(0,0,1,1,0),
+    /* 0x75 'u' */ 0, 0, GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,1,1), GR(0,1,1,0,1),
+    /* 0x76 'v' */ 0, 0, GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,0,1,0), GR(0,0,1,0,0),
+    /* 0x77 'w' */ 0, 0, GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,1,0,1), GR(1,0,1,0,1), GR(0,1,0,1,0),
+    /* 0x78 'x' */ 0, 0, GR(1,0,0,0,1), GR(0,1,0,1,0), GR(0,0,1,0,0), GR(0,1,0,1,0), GR(1,0,0,0,1),
+    /* 0x79 'y' */ GR(1,0,0,0,1), GR(1,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,1), GR(0,0,0,0,1), GR(1,0,0,0,1), GR(0,1,1,1,0),
+    /* 0x7A 'z' */ 0, 0, GR(1,1,1,1,1), GR(0,0,0,1,0), GR(0,0,1,0,0), GR(0,1,0,0,0), GR(1,1,1,1,1),
 };
 
 #undef GR
@@ -3241,7 +3473,171 @@ static void draw_text_shadow(SDL_Surface *fb, int x, int y, const char *str, Uin
     draw_text(fb, x + FONT_SCALE, y + FONT_SCALE, str, 0);
     draw_text(fb, x, y, str, colour);
 }
-#endif /* WAYFARER_SELFTEST */
+
+/* ---- HUD (Phase 11) -------------------------------------------------------
+ * Minimal screen-space UI on the bitmap font, scoped against design/systems/
+ * Save and UI.md: two separate counters, a minimap with the confirmed legend
+ * (You / Restored Region / Unrestored Region / Found Soul / Fragment), the
+ * shareable seed, one-line restore toasts, and a completion banner. Nothing
+ * else — hearts and tool icons were cut once already.
+ *
+ * The minimap is a flat grid (2 px per world tile) drawn into a cached surface
+ * and blitted, so the per-frame cost is one blit plus a handful of markers.
+ * The cache refreshes on explicit dirty (restore / seed change) or every 15
+ * frames, which is enough to follow the fog/restoration easing. */
+
+#define HUD_TOAST_FRAMES 180 /* 3 s at 60 Hz */
+#define HUD_WIN_FRAMES   360 /* 6 s */
+#define MM_TILE  2           /* minimap px per world tile */
+#define MM_W     (WORLD_W * MM_TILE)
+#define MM_H     (WORLD_H * MM_TILE)
+#define MM_X     (LOGICAL_W - MM_W - 8)
+#define MM_Y     8
+
+static struct {
+    char        toast[64];
+    int         toast_left;
+    int         win_left;
+    int         win_shown;
+    int         mm_dirty;
+    int         mm_tick;
+    SDL_Surface *mm;
+} hud;
+
+static Uint32 mm_col(const Game *g, int tx, int ty)
+{
+    Uint32 c;
+    float reveal = g->w.reveal[ty][tx];
+
+    if (g->w.solid[ty][tx]) {
+        c = SDL_MapRGB(hud.mm->format, 0x0c, 0x0c, 0x10);
+    } else if (g->w.surf[ty][tx] == SURF_OCEAN || g->w.surf[ty][tx] == SURF_RIVER) {
+        c = SDL_MapRGB(hud.mm->format, 0x34, 0x5f, 0x8a);
+    } else {
+        /* Region colour eases unrestored -> restored with the same float the
+         * world renderer uses, so the minimap legend stays in sync with it. */
+        float r = 0.0f;
+        Uint8 reg = g->w.region[ty][tx];
+        if (reg < g->w.region_count)
+            r = g->w.regions[reg].restoration;
+        c = SDL_MapRGB(hud.mm->format,
+                       (Uint8)(0x3a + (0x55 - 0x3a) * r),
+                       (Uint8)(0x40 + (0x85 - 0x40) * r),
+                       (Uint8)(0x45 + (0x60 - 0x45) * r));
+    }
+    if (reveal < 1.0f) {
+        int r1 = (int)((c >> 16) & 0xff), g1 = (int)((c >> 8) & 0xff), b1 = (int)(c & 0xff);
+        c = SDL_MapRGB(hud.mm->format,
+                       (Uint8)(0x18 + (r1 - 0x18) * reveal),
+                       (Uint8)(0x22 + (g1 - 0x22) * reveal),
+                       (Uint8)(0x2e + (b1 - 0x2e) * reveal));
+    }
+    return c;
+}
+
+static void mm_redraw(const Game *g)
+{
+    int tx, ty;
+    for (ty = 0; ty < WORLD_H; ty++)
+        for (tx = 0; tx < WORLD_W; tx++)
+            fill_rect(hud.mm, tx * MM_TILE, ty * MM_TILE, MM_TILE, MM_TILE,
+                      mm_col(g, tx, ty));
+    hud.mm_dirty = 0;
+}
+
+static void mm_marker(SDL_Surface *fb, int tx, int ty, Uint32 col, int size)
+{
+    fill_rect(fb, MM_X + tx * MM_TILE - size / 2, MM_Y + ty * MM_TILE - size / 2,
+              size, size, col);
+}
+
+static void mm_draw(SDL_Surface *fb, const Game *g)
+{
+    int i;
+
+    if (!hud.mm)
+        hud.mm = SDL_CreateRGBSurface(0, MM_W, MM_H, fb->format->BitsPerPixel,
+                                      fb->format->Rmask, fb->format->Gmask,
+                                      fb->format->Bmask, fb->format->Amask);
+    if (!hud.mm)
+        return;
+
+    if (hud.mm_dirty || (hud.mm_tick++ % 15) == 0)
+        mm_redraw(g);
+    {
+        SDL_Rect dst = { MM_X, MM_Y, 0, 0 };
+        SDL_BlitSurface(hud.mm, NULL, fb, &dst);
+    }
+
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        if (g->ents[i].restored || g->ents[i].tile < 0)
+            continue;
+        mm_marker(fb, g->ents[i].tile % WORLD_W, g->ents[i].tile / WORLD_W,
+                  SDL_MapRGB(fb->format,
+                             g->ents[i].is_soul ? 0x9a : 0xff,
+                             g->ents[i].is_soul ? 0xa8 : 0xd7,
+                             g->ents[i].is_soul ? 0xb8 : 0x6a),
+                  4);
+    }
+    mm_marker(fb, (int)(g->p.x / TILE), (int)(g->p.y / TILE),
+              SDL_MapRGB(fb->format, 0xff, 0xff, 0xff), 5);
+}
+
+static void hud_draw(SDL_Surface *fb, const Game *g, int seed)
+{
+    char buf[64];
+    Uint32 warm = SDL_MapRGB(fb->format, 0xf0, 0xd8, 0xb0);
+    Uint32 pale = SDL_MapRGB(fb->format, 0x9a, 0xa8, 0xb8);
+
+    if (game_complete(g) && !hud.win_shown) {
+        hud.win_shown = 1;
+        hud.win_left = HUD_WIN_FRAMES;
+    }
+
+    /* Counters: two separate lines, per design/systems/Save and UI.md. */
+    SDL_snprintf(buf, sizeof(buf), "fragments  %d/%d", g->frags_restored, FRAGMENT_COUNT);
+    draw_text_shadow(fb, 12, 8, buf, warm);
+    SDL_snprintf(buf, sizeof(buf), "souls  %d/%d", g->souls_restored, SOUL_COUNT);
+    draw_text_shadow(fb, 12, 8 + 14, buf, warm);
+
+    if (game_complete(g))
+        draw_text_shadow(fb, 12, 8 + 28, "the land is whole", warm);
+
+    /* Restore toast, bottom-centre, fading out. */
+    if (hud.toast_left > 0) {
+        if (hud.toast_left < 30) { /* last half second fades via colour blend */
+            int f = hud.toast_left;
+            Uint32 c = SDL_MapRGB(fb->format, (Uint8)(0xf0 + (0x18 - 0xf0) * f / 30),
+                                  (Uint8)(0xd0 + (0x22 - 0xd0) * f / 30),
+                                  (Uint8)(0x90 + (0x2e - 0x90) * f / 30));
+            draw_text_shadow(fb, (LOGICAL_W - (int)strlen(hud.toast) * 12) / 2,
+                             LOGICAL_H - 14 - 16, hud.toast, c);
+        } else {
+            draw_text_shadow(fb, (LOGICAL_W - (int)strlen(hud.toast) * 12) / 2,
+                             LOGICAL_H - 14 - 16, hud.toast,
+                             SDL_MapRGB(fb->format, 0xf0, 0xd0, 0x90));
+        }
+        hud.toast_left--;
+    }
+
+    /* Completion banner: one announcement at the moment of completion. */
+    if (hud.win_left > 0) {
+        draw_text_shadow(fb, (LOGICAL_W - (int)strlen("the land is whole") * 12) / 2,
+                         LOGICAL_H / 2 - 30, "the land is whole",
+                         SDL_MapRGB(fb->format, 0xff, 0xf0, 0xc0));
+        draw_text_shadow(fb, (LOGICAL_W - (int)strlen("all 19 are remembered") * 12) / 2,
+                         LOGICAL_H / 2 - 16, "all 19 are remembered",
+                         SDL_MapRGB(fb->format, 0xff, 0xf0, 0xc0));
+        hud.win_left--;
+    }
+
+    /* Seed, bottom-right. */
+    SDL_snprintf(buf, sizeof(buf), "seed %d", seed);
+    draw_text_shadow(fb, LOGICAL_W - 12 - (int)strlen(buf) * 12, LOGICAL_H - 14 - 8,
+                     buf, pale);
+
+    mm_draw(fb, g);
+}
 
 /* Integer nearest-neighbour upscale, logical -> window, centred with the
  * leftover margin cleared. Nearest-neighbour and integer-only on purpose:
@@ -9035,6 +9431,145 @@ static int font_selftest(const char *shot_path)
     return fails;
 }
 
+/* ---- Phase 11: HUD -------------------------------------------------------
+ * The shipping HUD, verified headlessly: a real seed's world, the HUD drawn
+ * with the exact call the main loop makes, and pixel probes for each element —
+ * counters, minimap (with the player marker where the tile maths says it must
+ * be), seed line, toast appearing then expiring, and the completion banner.
+ * A bitmap font pixel is a FONT_SCALE² block, so these are generous regions;
+ * the point is presence/absence, not pixel perfection. */
+typedef struct { int x0, y0, w, h; } HudRect;
+
+static Uint32 hud_px(SDL_Surface *s, int x, int y)
+{
+    return ((Uint32 *)((Uint8 *)s->pixels + y * s->pitch))[x];
+}
+
+static int hud_count_non(SDL_Surface *s, HudRect r, Uint32 fill)
+{
+    int x, y, n = 0;
+    for (y = r.y0; y < r.y0 + r.h; y++)
+        for (x = r.x0; x < r.x0 + r.w; x++) {
+            if (x < 0 || y < 0 || x >= s->w || y >= s->h)
+                continue;
+            if (hud_px(s, x, y) != fill)
+                n++;
+        }
+    return n;
+}
+
+static int hud_selftest(const char *shot_path)
+{
+    const int W = LOGICAL_W, H = LOGICAL_H;
+    SDL_Surface *fb;
+    Rngs rngs;
+    Game g;
+    int fails = 0;
+    Uint32 fillv, whitev;
+    HudRect counters = { 0, 0, 260, 60 };
+    HudRect minimap   = { MM_X, MM_Y, MM_W, MM_H };
+    HudRect seedline  = { W - 200, H - 30, 192, 14 };
+    HudRect toast_r   = { (W - 150) / 2, H - 14 - 16, 150, 14 };
+    HudRect banner    = { (W - 300) / 2, H / 2 - 40, 300, 40 };
+
+    SDL_zero(hud);
+    rngs_init(&rngs, 4242);
+    (void)game_init(&g, &rngs);
+
+    fb = SDL_CreateRGBSurfaceWithFormat(0, W, H, 32, SDL_PIXELFORMAT_RGB888);
+    if (!fb) {
+        printf("FAIL  SDL_CreateRGBSurfaceWithFormat\n");
+        return 1;
+    }
+    /* A distinct fill so presence tests cannot accidentally pass, and the
+     * expected HUD colours computed through the same mapping the HUD uses. */
+    fillv  = SDL_MapRGB(fb->format, 0x0d, 0x0d, 0x0d);
+    whitev = SDL_MapRGB(fb->format, 0xff, 0xff, 0xff);
+    fill_rect(fb, 0, 0, W, H, fillv);
+
+    /* ---- 1. base draw: counters, minimap (+ player marker), seed ---- */
+    hud_draw(fb, &g, 4242);
+    {
+        int c = hud_count_non(fb, counters, fillv);
+        printf("counters      : %d lit px (expect > 100): %s\n", c,
+               c > 100 ? "PASS" : "FAIL");
+        if (c <= 100) fails++;
+    }
+    {
+        int c = hud_count_non(fb, minimap, fillv);
+        if (c < MM_W * MM_H / 2) fails++;
+        printf("minimap       : %d of %d px covered: %s\n", c, MM_W * MM_H,
+               c >= MM_W * MM_H / 2 ? "PASS" : "FAIL");
+    }
+    {
+        int mx = MM_X + (int)(g.p.x / TILE) * MM_TILE;
+        int my = MM_Y + (int)(g.p.y / TILE) * MM_TILE;
+        Uint32 p = hud_px(fb, mx, my);
+        printf("player marker : %08X at minimap tile (%d,%d): %s\n",
+               p, (int)(g.p.x / TILE), (int)(g.p.y / TILE),
+               p == whitev ? "PASS" : "FAIL");
+        if (p != whitev) fails++;
+    }
+    {
+        int c = hud_count_non(fb, seedline, fillv);
+        printf("seed line     : %d lit (expect > 20): %s\n", c,
+               c > 20 ? "PASS" : "FAIL");
+        if (c <= 20) fails++;
+    }
+
+    /* ---- 2. toast appears, then expires ---- */
+    SDL_snprintf(hud.toast, sizeof(hud.toast), "a soul is remembered  1/5");
+    hud.toast_left = 2;
+    hud_draw(fb, &g, 4242); /* draws, toast_left -> 1 */
+    {
+        int c = hud_count_non(fb, toast_r, fillv);
+        printf("toast shown   : %d lit (expect > 20): %s\n", c,
+               c > 20 ? "PASS" : "FAIL");
+        if (c <= 20) fails++;
+    }
+    /* In the game the world redraws every frame, erasing the previous toast;
+     * simulate that with a refill so "expired" tests what the game shows. */
+    fill_rect(fb, 0, 0, W, H, fillv);
+    hud_draw(fb, &g, 4242); /* draws, toast_left -> 0 */
+    fill_rect(fb, 0, 0, W, H, fillv);
+    hud_draw(fb, &g, 4242); /* toast_left 0: nothing drawn */
+    {
+        int c = hud_count_non(fb, toast_r, fillv);
+        printf("toast expired : %d lit (expect 0): %s\n", c,
+               c == 0 ? "PASS" : "FAIL");
+        if (c != 0) fails++;
+    }
+
+    /* ---- 3. completion banner + persistent line ---- */
+    g.frags_restored = FRAGMENT_COUNT;
+    g.souls_restored = SOUL_COUNT;
+    hud.win_shown = 0;
+    hud_draw(fb, &g, 4242);
+    {
+        int c = hud_count_non(fb, banner, fillv);
+        printf("win banner    : %d lit (expect > 20): %s\n", c,
+               c > 20 ? "PASS" : "FAIL");
+        if (c <= 20) fails++;
+    }
+    {
+        HudRect whole = { 0, 36, 320, 20 };
+        int c = hud_count_non(fb, whole, fillv);
+        printf("whole-land ln : %d lit (expect > 20): %s\n", c,
+               c > 20 ? "PASS" : "FAIL");
+        if (c <= 20) fails++;
+    }
+
+    if (shot_path) {
+        SDL_SaveBMP(fb, shot_path);
+        printf("wrote %s\n", shot_path);
+    }
+
+    SDL_FreeSurface(fb);
+    if (hud.mm) { SDL_FreeSurface(hud.mm); hud.mm = NULL; }
+    printf("%s\n", fails ? "FAIL" : "PASS");
+    return fails;
+}
+
 /* Structural invariants for building placement.
  *
  * Absolute, not relative — design/Toolchain Setup.md records that every
@@ -9797,7 +10332,7 @@ static int audio_selftest(int argc, char **argv, int ms)
     SDL_AudioDeviceID dev;
     const char *dump = arg_val(argc, argv, "--dump");
     double period_ms, max_ms, freq;
-    int i;
+    int i, layers;
 
     SDL_zero(a);
     a.noise = arg_flag(argc, argv, "--noise");
@@ -9806,6 +10341,18 @@ static int audio_selftest(int argc, char **argv, int ms)
     a.req_rate = arg_int(argc, argv, "--rate", AUDIO_RATE);
     a.tone = 1; /* the audio selftests measure this tone; the game is silent */
     rng_seed(&a.rng, (Uint64)arg_int(argc, argv, "--seed", 1), STREAM_AUDIO);
+
+    /* --layers: exercise the full 5-layer music engine instead of the 440 Hz
+     * test tone. Activates every layer + fires the restore chime, so the
+     * callback runs under the same load a late-game run sees. */
+    layers = arg_flag(argc, argv, "--layers");
+    if (layers) {
+        a.tone = 0;
+        a.synth.synth_on = 1;
+        SDL_AtomicAdd(&a.layer_fire, 3);  /* Strings + Pad + Bells */
+        SDL_AtomicAdd(&a.voice_fire, 1);  /* Voice of Souls */
+        printf("signal   : + full 5-layer music\n");
+    }
 
     if (SDL_Init(SDL_INIT_AUDIO) != 0) {
         printf("FAIL  SDL_Init(AUDIO): %s\n", SDL_GetError());
@@ -9838,7 +10385,8 @@ static int audio_selftest(int argc, char **argv, int ms)
             have.channels == AUDIO_CHANNELS)
                ? "no - device matched the request exactly"
                : "YES - SDL inserted a conversion");
-    printf("signal   : %s, seed %d\n", a.noise ? "seeded white noise" : "440 Hz sine",
+    printf("signal   : %s, seed %d\n",
+           layers ? "5-layer music" : (a.noise ? "seeded white noise" : "440 Hz sine"),
            arg_int(argc, argv, "--seed", 1));
 
     SDL_PauseAudioDevice(dev, 0);
@@ -9849,7 +10397,7 @@ static int audio_selftest(int argc, char **argv, int ms)
         int left = ms;
         printf("signal   : + restore beat every 40 ms (real-time safety probe)\n");
         while (left > 0) {
-            SDL_AtomicAdd(&a.sfx_fire, 1);
+            sfx_fire(&a, SFX_CHIME);
             SDL_Delay(40);
             left -= 40;
         }
@@ -9893,13 +10441,46 @@ static int audio_selftest(int argc, char **argv, int ms)
                    ? (double)crossings * (double)have.freq / (2.0 * (double)a.cap_len / a.channels)
                    : 0.0;
         printf("\n--- signal (%d samples captured) ---\n", a.cap_len);
-        printf("peak           : %.4f  (amplitude is %.2f)\n", peak, (double)TONE_AMP);
+        printf("peak           : %.4f%s\n", peak,
+               layers ? "" : (a.noise ? "" : "  (amplitude is 0.20)"));
         printf("rms            : %.4f\n",
                a.cap_len ? SDL_sqrt(sumsq / a.cap_len) : 0.0);
         printf("NaN            : %d  (must be 0)\n", nan);
         printf("out of range   : %d  (must be 0)\n", clipped);
         printf("zero crossings : %d -> %.1f Hz%s\n", crossings, freq,
-               a.noise ? " (meaningless for noise)" : " (expected 440.0)");
+               (layers || a.noise) ? " (meaningless for this signal)" : " (expected 440.0)");
+        if (layers) {
+            /* The music engine is a real pass/fail probe, not just informational:
+             * non-silent, no NaN, no clipping, and the callback stayed in budget. */
+            int ok = (nan == 0 && clipped == 0 && peak > 0.01);
+            printf("\nmusic probe    : %s  (peak %.4f, nan %d, clipped %d)\n",
+                   ok ? "PASS" : "FAIL", peak, nan, clipped);
+            /* Offline determinism: the engine is a pure function of the sample
+             * counter, so two fresh states must render bit-identical output.
+             * (The device capture above cannot be compared across runs — its
+             * length is wall-clock driven — so this is the repeatable check.) */
+            {
+                Audio x, y;
+                int k, det = 1;
+                SDL_zero(x); SDL_zero(y);
+                x.rate = a.rate; y.rate = a.rate;
+                for (k = 0; k < NUM_LAYERS; k++) {
+                    x.synth.layers |= (1 << k);
+                    y.synth.layers |= (1 << k);
+                }
+                for (k = 0; k < 96000; k++) {
+                    if (synth_step(&x) != synth_step(&y)) { det = 0; break; }
+                }
+                printf("determinism   : %s  (96000 samples, fresh states)\n",
+                       det ? "PASS" : "FAIL");
+                ok = ok && det;
+            }
+            if (!ok) {
+                SDL_free(a.cap);
+                SDL_Quit();
+                return 1;
+            }
+        }
     }
 
     if (dump) {
@@ -10246,6 +10827,8 @@ int main(int argc, char **argv)
             return iso_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
         if (arg_flag(argc, argv, "--font-test"))
             return font_selftest(arg_val(argc, argv, "--shot"));
+        if (arg_flag(argc, argv, "--hud-test"))
+            return hud_selftest(arg_val(argc, argv, "--shot"));
         if (arg_flag(argc, argv, "--fog-test"))
             return fog_selftest();
         if (arg_flag(argc, argv, "--sprite-test"))
@@ -10436,8 +11019,10 @@ int main(int argc, char **argv)
     dev = 0;
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0) {
         dev = audio_open(&audio, &have);
-        if (dev)
+        if (dev) {
+            audio.synth.synth_on = 1; /* the game runs the music engine */
             SDL_PauseAudioDevice(dev, 0);
+        }
     }
 
     (void)game_init(&game, &rngs);
@@ -10576,17 +11161,36 @@ int main(int argc, char **argv)
                      * cannot actually matter — but fixing it makes the interaction unambiguous
                      * rather than dependent on that staying true. */
                     if (!grid && try_portal(&game))
-                        SDL_AtomicAdd(&audio.sfx_fire, 1);
-                    else if (!grid && try_restore(&game) >= 0)
-                        SDL_AtomicAdd(&audio.sfx_fire, 1);
-                    else if (!grid && try_collect_shard(&game) >= 0)
-                        SDL_AtomicAdd(&audio.sfx_fire, 1);
+                        sfx_fire(&audio, SFX_PORTAL);
+                    else if (!grid) {
+                        int ri = try_restore(&game);
+                        if (ri >= 0) {
+                            sfx_fire(&audio, SFX_CHIME);
+                            if (game.ents[ri].is_soul) {
+                                SDL_AtomicAdd(&audio.voice_fire, 1); /* Voice of Souls */
+                                SDL_snprintf(hud.toast, sizeof(hud.toast),
+                                             "a soul is remembered  %d/%d",
+                                             game.souls_restored, SOUL_COUNT);
+                            } else {
+                                SDL_AtomicAdd(&audio.layer_fire, 1); /* Strings/Pad/Bells */
+                                SDL_snprintf(hud.toast, sizeof(hud.toast),
+                                             "a memory is restored  %d/%d",
+                                             game.frags_restored, FRAGMENT_COUNT);
+                            }
+                            hud.toast_left = HUD_TOAST_FRAMES;
+                            hud.mm_dirty = 1;
+                        }
+                    } else if (!grid && try_collect_shard(&game) >= 0)
+                        sfx_fire(&audio, SFX_SHARD);
                     break;
                 case SDLK_r: /* regenerate with the next seed */
                     seed++;
                     rngs_init(&rngs, seed);
                     (void)game_init(&game, &rngs);
                     audio.rng = rngs.audio;
+                    SDL_AtomicSet(&audio.reset_req, 1); /* music restarts with the world */
+                    hud.win_shown = 0;
+                    hud.mm_dirty = 1;
                     dirty = 1;
                     break;
                 case SDLK_F5: /* save */
@@ -10598,6 +11202,9 @@ int main(int argc, char **argv)
                     if (game_load(&game, &rngs, SAVE_FILENAME, &ls) == 0) {
                         seed = (int)ls;
                         audio.rng = rngs.audio; /* same sync the R key does */
+                        SDL_AtomicSet(&audio.reset_req, 1); /* music restarts with the world */
+                        hud.win_shown = 0;
+                        hud.mm_dirty = 1;
                         note = "  [loaded]";
                     } else {
                         note = "  [no save]";
@@ -10658,6 +11265,10 @@ int main(int argc, char **argv)
             camera_follow(&game, draw->w, draw->h);
             render(draw, &game, overlay);
         }
+        /* Screen-space HUD on top of the world; hidden in the F1 debug overlay
+         * (which is already a prompt-suppressed diagnostic view). */
+        if (!grid && !overlay)
+            hud_draw(draw, &game, (int)seed);
 #if WAYFARER_SELFTEST
         /* After render, before present: the overlay reads as a HUD over the
          * world, which is also the only honest test of whether the shadowed
@@ -10762,6 +11373,8 @@ int main(int argc, char **argv)
     if (back)
         SDL_FreeSurface(back);
     SDL_free(back_px);
+    if (hud.mm)
+        SDL_FreeSurface(hud.mm);
     SDL_DestroyWindow(win);
     SDL_Quit();
     return 0;
