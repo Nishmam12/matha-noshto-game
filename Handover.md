@@ -1,7 +1,7 @@
 ---
 tags: [process, handover, wayfarer]
 updated: 2026-08-06
-exe_size_bytes: 766976
+exe_size_bytes: 768000
 ---
 
 # Handover — Wayfarer
@@ -21,11 +21,11 @@ Running log: [[INDEX]]
 
 | | |
 |---|---|
-| **State** | 766,976 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
+| **State** | 768,000 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
 | **Branch** | **`feat/phase-12-dream-realm`**. `main` is at `ae788b4`. Working tree clean |
 | **Deadline** | 2026-09-04. **Hard stop on art/backbone work 2026-08-14** — eight days from now |
-| **Do first** | **[[Phase 12 - Dream Realm]] slice 4** — the plan is [[Phase 12 - Dream Realm Plan]], tasks 8–9. Slices 1–3 are done and the look-gate is discharged |
-| **Then** | Phase 12 slice 5 → [[Phase 08 - Save Load]] → 10 (motion) → **11 is non-negotiable** |
+| **Do first** | **[[Phase 12 - Dream Realm]] slice 5** — the plan is [[Phase 12 - Dream Realm Plan]], tasks 10–11: dream shards and the Dream Well |
+| **Then** | [[Phase 08 - Save Load]] → 10 (motion) → **11 is non-negotiable** |
 | **Biggest risk** | **Audio does not exist at all.** A softsynth from zero, plus save/load and a HUD, all still ahead |
 
 > **THE PROJECT CHANGED DIRECTION ON 2026-08-05.** A portal in the `TERRAIN_DARK` region now leads
@@ -138,7 +138,7 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 | | |
 |---|---|
-| **`build\wayfarer.exe`** | **766,976 bytes** — 673,024 under the ship target |
+| **`build\wayfarer.exe`** | **768,000 bytes** — 672,000 under the ship target |
 | `build\wayfarer-selftest.exe` | 815,616 bytes — **not a deliverable**, never shipped |
 | `src\main.c` | ~7,850 lines, single translation unit |
 | `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. **56 records over 45 pixel streams** (11 are dream palette variants sharing a twin's stream), 71,977 bytes of const data. Never edit by hand |
@@ -165,6 +165,15 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
   speckle with a pale colour. See decisions 46–47
 - **The portal is drawn**, at both ends: `ART_BLD_PORTAL_ARCH` (baked since Phase 07 and drawn by
   nothing until now) with 8 `fx_portal` frames turning in its opening, driven by `Game.clock`
+- **A PROMPT INDICATOR — the first UI this game has drawn.** `draw_prompt` is procedural (four
+  rectangles make the `E`), sized against the bitmap font's legible 10×14 so it is not a speck, and
+  bobs ±2 px off `Game.clock`. Three states: interact, travel, and a **padlock** for a portal you
+  cannot use yet. See decision 51
+- **The Kindle gate on the portal actually gates.** `try_portal` requires the end to be *standable*,
+  not merely within `PORTAL_REACH` — which is 25.5 px against a 24 px tile step, so it used to fire
+  from the tile next to the portal and the ability gated nothing. See decision 50
+- **4 fragments and 2 Found Souls live past the portal**, quota-placed inside the reachability
+  filter, and `--play-test` crosses on all 50 seeds. See decision 52
 - **A portal that is a graph edge, not a collision case.** `portal_link()` is read by
   `tile_neighbours()`, which **six** traversals route through, so walk-reachable ==
   graph-reachable is true by construction and `--gating-test` needs no weakening. Travel is an
@@ -230,12 +239,10 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
   Phase 09/11. Un-gating is a one-line change once a real caller exists, and the gate is what keeps
   the +0-byte property true by construction rather than by remembering
 - **Save/load**
-- **Almost any ambient animation.** The *character* walks and **the portal vortex now turns** (8
-  frames off `Game.clock`, the first world-side animation in the game) — but nothing else sways,
-  shimmers, bobs or smokes. Phase 12 task 8's prompt indicator is next
-- **A HUD, a prompt, or any on-screen affordance except the interact ring.** Task 8
-- **Anything in the dream sector to DO.** The biome is furnished but empty: every fragment and Soul
-  still lives in the overworld, so `--play-test` never crosses the portal. That is task 9
+- **Most ambient animation.** The *character* walks, **the portal vortex turns** and **the prompt
+  keycap bobs** — but nothing else sways, shimmers or smokes. The world is still largely static
+- **A HUD, or any on-screen text.** The prompt is a keycap, not writing; the font is still
+  self-test-only and nothing in the shipping build draws a letter
 - **Buildings do not respond to restoration.** The ruin→whole rebuild is designed but not built
 - **No worn paths between buildings.** The village reads as buildings-in-a-field, not as inhabited
 - Idle sway/breathe for Found Souls
@@ -381,11 +388,14 @@ portal  : PASS  100/100 seeds shrank when the portal was suppressed; travel work
                 both ways and lands on open ground; control (E away from a portal)
                 does nothing. LANDING: 100/100 seeds standable with no abilities,
                 mean 818 tiles walkable, worst 6, 4 under 40; control (arrival
-                region gated by hand) caught
+                region gated by hand) caught. GATE: with the end gated by hand E is
+                refused ON the tile and BESIDE it, and works again with Kindle
 fade    : PASS  selection 8/8 cases; blend 1,808 px exact half-blend vs an
                 SDL_GetRGB-derived reference; both controls fire (band-blind
                 predicate rejected on the 2 cases that matter, fade-ignoring
-                blitter caught)
+                blitter caught). PROMPT: bob within +/-2 AND asserted to move;
+                NONE writes 0 px; the 3 kinds render 400/475/438 px so none is a
+                duplicate; control (unclamped sine) rejected on 264/400 samples
 sprite  : PASS  round-trip 700 px -> 283 bytes -> 700 px pixel-exact; 56 records,
                 127,757 px from 83,762 RLE bytes (1.53x), 1,391 palette entries;
                 anchors all bottom-centre; no key magenta in any baked palette;
@@ -412,11 +422,15 @@ village : PASS (0 failures across 30 seeds), mean 12 buildings per world (cluste
 rng     : PASS (0 checks failed)
 move    : PASS (0 failures across 20 seeds); direction-independent speed confirmed
 region  : PASS (0 failures across 30 seeds)
-reach   : PASS (0 failures across 50 seeds); negative control PASS; gating relaxed on 0/50
+reach   : PASS (0 failures across 50 seeds); negative control PASS; gating relaxed on 0/50;
+                SPLIT: >=4 fragments and >=2 Souls past the portal on every seed,
+                with an all-or-nothing control
 gating  : PASS (0 failures across 30 seeds)
-play    : PASS (0 seeds could not be completed) — still 50/50 on a 1.7x bigger grid
+play    : PASS (0 seeds could not be completed) — and CROSSES THE PORTAL on
+                every seed, 2-4 times each, now that 4 fragments and 2 Souls
+                live past it. A crossing count of 0 fails the seed
 audio   : worst case 0.136 ms of a 21.333 ms deadline; 0 partial writes
-perf    : render 0.974 ms mean (1.778 ms max), frame 16.704 ms = 59.9 fps
+perf    : render 1.089 ms mean (1.750 ms max), frame 16.913 ms = 59.1 fps
           — FASTER than before slice 3 despite 19 more sprite records and a
             recoloured biome, because the band sweep still only draws what is
             on screen
@@ -820,6 +834,35 @@ New decisions from the Phase 12 slice 3 session (2026-08-06):
     `dream_sector` instead would have quietly handed four rows to the dream side in
     `--sector-test`'s counts and `--land-test`'s per-sector bounds.
 
+New decisions from the Phase 12 slice 4 session (2026-08-06):
+
+50. **`try_portal` requires the end to be STANDABLE, not merely within reach.** `PORTAL_REACH` is
+    25.5 px and an orthogonally adjacent tile centre is 24 px away, so the interact fired from the
+    tile *next to* the portal — and a portal in a Kindle-gated region could be taken from the
+    ungated ground beside it. `--gating-test` could not see it: every traversal reaches the portal
+    edge through `tile_neighbours` and expands from an end only after standing **on** it, so
+    walk-vs-graph parity was true of a model *stricter than the real interact*. Requiring the end
+    to be standable makes the two agree exactly. **This adds no input to collision** — collision
+    still reads `solid` and `regions[].terrain` and nothing else; it is the interact consulting
+    collision, which was always the allowed direction.
+51. **The prompt indicator is PROCEDURAL, not three baked keycaps.** A departure from the plan,
+    taken because nobody is authoring that art and a keycap generated by a script and then baked is
+    the same machine drawing with a build step and ~900 bytes of blob in front of it. Drawn in code
+    it costs no art data and **a real authored keycap later replaces the body of one function** —
+    the same seam the team's sprites came in through. Not the bitmap font either, for the plan's own
+    reason: `draw_text` is behind `WAYFARER_SELFTEST` and calling it would spend decision 25's
+    +0-byte gate on a single letter. **Sized against the font rather than by eye:** the first
+    version was a 10 px cap with a 4×5 px `E` and read on screen as a dark speck.
+52. **The dream-sector entity quota is counted on TILE ROWS, applied INSIDE the reachability
+    filter, and kept OUT of `world_solvable`.** Rows not regions, because `regions_build`
+    partitions through `tile_neighbours` and a region can straddle both sectors — "which sector is
+    this region in" has no answer for those. Inside the filter, because a dream region that cannot
+    be entered must not be a candidate. Out of `world_solvable`, because that function means
+    exactly one thing — every entity reachable in ability order — and should keep meaning it; the
+    split is asked only by the primary generate-then-verify loop, and **the ungating fallback
+    deliberately does not ask it**, since that path exists to guarantee a completable world at any
+    cost. A thin dream realm still ships; an unwinnable one does not.
+
 ---
 
 ## 7. Traps — each of these already cost time once
@@ -1024,6 +1067,25 @@ true and are not repeated in full here — see git history at `545598f` for verb
   Conversely the plan asked for `fx_well` and `fx_crystal` to be baked here, and nothing draws
   either until slice 5 or at all; that would have been ~16 KB of dead weight.
 
+**New in the Phase 12 slice 4 session (2026-08-06):**
+
+- **TWO THINGS THAT AGREE WITH EACH OTHER CAN BOTH DISAGREE WITH THE GAME.** `--gating-test` compares
+  walk-reachable against graph-reachable and they matched perfectly — because *both* model the
+  portal as an edge you traverse by standing on an end, while the real interact fired from 25.5 px
+  away. A parity test proves two implementations agree; it says nothing about whether either one is
+  what ships. **When a test compares two models, ask what the game actually does.**
+- **`fake_surface` zeroes the struct, so `format` is NULL and `SDL_MapRGB` returns 0.** Anything
+  drawn onto it is written as *black*, which against a cleared buffer is indistinguishable from
+  nothing being drawn at all. The prompt checker reported a perfectly good keycap as blank. Use
+  `SDL_CreateRGBSurfaceWithFormat` whenever the test counts *coloured* pixels rather than positions.
+- **A clamp is not a check.** "The bob stays within ±2 px" is satisfied perfectly by a bob that
+  never moves. Any bounded-value assertion needs a companion assertion that the value *varies*, or
+  it is a checker the null implementation passes.
+- **Size UI against something legible, not against the thing it sits on.** The prompt was first
+  authored relative to the portal arch and came out a 10 px cap with a 4×5 px glyph — invisible.
+  The bitmap font is the reference this project already has for "how big is a readable glyph here":
+  10×14 logical px.
+
 ---
 
 ## 8. Verified vs NOT verified
@@ -1136,6 +1198,17 @@ controls; audio callback timing; render cost). New this session:
   implementations of one formula, kept in step by a checker rather than by discipline.
 - **The dream value hierarchy holds, and its control has teeth.** Ground 52, stone 49, void 38; the
   control rejects a mechanically shifted sea ramp at 62, which is the version the plan specified.
+- **`--play-test` CROSSES THE PORTAL on all 50 seeds**, 2-4 times each, completing 19/19. Four
+  handovers carried "the portal's effect on completability is untested"; that is closed. Crossings
+  are counted rather than inferred, so a change that accidentally joined the landmasses fails the
+  seed instead of quietly retiring the only end-to-end exercise travel has.
+- **The Kindle gate on the portal is enforced and asserted from both positions** — refused standing
+  on a gated end AND standing beside it, which is the half that was broken, and working again with
+  Kindle. See decision 50.
+- **The prompt renders three distinguishable states and nothing at all when there is nothing to
+  do**: 400 / 475 / 438 px, and exactly 0 for `PROMPT_NONE`. Its bob is clamped to +/-2 px *and*
+  asserted to move, because a clamp alone is a check the null implementation passes.
+- **Slice 4 cost +1,024 bytes** (766,976 -> 768,000), of which **task 9 cost +0**.
 - **The portal now lands the player somewhere she can stand, on 100 of 100 seeds** — 11 of 100
   failed that before, with no test able to see it. Mean walkable area from the arrival point 739 →
   818 tiles. Control: gate the arrival region by hand, require rejection.
@@ -1161,12 +1234,18 @@ controls; audio callback timing; render cost). New this session:
   nothing, with **no invented number anywhere**. `--portal-test` reports the count meanwhile.
 - **The user's verdict on the dream realm's look was "all good for now"**, which discharges the
   slice 3 gate. That is not the same as "this is the final art direction".
-- **`--play-test`'s 50/50 does not exercise travel.** Every entity still lives in the overworld, so
-  the autopilot never needs to cross. The portal's effect on *reachability* is measured; its effect
-  on *completability* is untested until task 9 puts fragments in the dream sector.
-- **The portal is not in a `TERRAIN_DARK` region.** Regions do not exist when `place_portal` runs,
-  so its overworld end is an arbitrary tile in the largest component. The Kindle framing is
-  currently fiction, not mechanism.
+- **The prompt has not been seen in MOTION** — whether a ±2 px bob at 1.6 Hz reads as inviting or as
+  jitter is unjudged, the same gap the portal vortex has.
+- **Nobody has played a seed through the portal by hand.** The autopilot crosses on all 50 seeds; a
+  human has crossed once, in the session that found the arrival bug.
+- **Whether 4 fragments and 2 Souls is the right split** is a pacing question, and pacing has not
+  been measured since before the grid doubled.
+- **The interact prompt has not been photographed over a dream-side entity**, only over overworld
+  ones. One call, one function, so this is a gap in the picture rather than in the code.
+- **The portal is still not deliberately placed in a `TERRAIN_DARK` region.** Regions do not exist
+  when `place_portal` runs, so its overworld end is an arbitrary tile in the largest component —
+  it lands in a gated region only by chance. What changed in slice 4 is that the gate now *works*
+  when it does land in one (decision 50); choosing the region is still not done.
 - **Nobody has judged whether the dream sector's shape is attractive.** `--sector-test` and
   `--land-test` bound its size and connectivity; neither has an opinion on whether a ragged
   archipelago at `DREAM_ROUGH 0.78` looks good. Seen only in the 12-seed `--grid` view.
@@ -1371,15 +1450,15 @@ the roof).
 **Phase 07** (the bake pipeline **and** 37 of the team's real sprites, +62,976 bytes) landed the
 same day the art arrived, which absorbed most of what Phase 09 was holding.
 
-**START HERE: [[Phase 12 - Dream Realm]] slice 4**, which is tasks 8–9 of
+**START HERE: [[Phase 12 - Dream Realm]] slice 5**, which is tasks 10–11 of
 [[Phase 12 - Dream Realm Plan]]. The direction changed on 2026-08-05 and this supersedes the old
 "start at Phase 08" instruction that four handovers carried.
 
-**Task 9 is the run to watch.** It puts 4 fragments and 2 Souls in the dream sector, which is the
-first time `--play-test` has any reason to cross the portal — so it turns travel from a thing
-proven by assertion into a thing exercised 50 times. It is also what makes the arrival-pocket
-question enforce itself: a landing that opens onto nothing gets rejected by the verifier that
-already exists, with no new threshold to invent.
+**Task 9's run has been made, and it passed.** `--play-test` now crosses the portal on **all 50
+seeds, 2–4 times each**, completing 19/19 — so travel is exercised end to end rather than proven by
+assertion. Four handovers carried "the portal's effect on completability is untested" as a known
+gap; it is closed. Crossings are **counted**, so a future change that accidentally joined the
+landmasses fails the seed instead of quietly retiring the only end-to-end test travel has.
 
 **Phase 12 progress, slice by slice:**
 
@@ -1388,8 +1467,8 @@ already exists, with no new threshold to invent.
 | 1 | Grid growth, dream sector, `--sector-test`, `--land-test` re-aimed | **DONE** — `cd8e9d3` |
 | 2 | `tile_neighbours`, portal, `--portal-test`, travel | **DONE** — `bf66217`, `4f4cf64` |
 | 3 | Dream palettes (tier-1 recolour) + baked FX. It looks like Lumiara | **DONE** — `b35f25a`, `c3e4d30`. Look-gate discharged by the user 2026-08-06 |
-| **4** | **Prompt indicator + fragments into the dream sector** | **NEXT** — tasks 8–9 |
-| 5 | Shards + the Dream Well + `--shard-test` | Planned |
+| 4 | Prompt indicator + fragments into the dream sector | **DONE** — `50e8427`, `3d03421`. `--play-test` now crosses the portal on all 50 seeds |
+| **5** | **Shards + the Dream Well + `--shard-test`** | **NEXT** — tasks 10–11 |
 
 **Slice 3 in one paragraph:** the biome recolour is nearly free because `ArtSprite` stores
 `pal_off` into a shared `ART_PAL[]` *separately* from `data_off` into the shared pixel stream — a
