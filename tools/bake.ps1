@@ -44,7 +44,7 @@ param(
     # they are named one by one in $FxFrames below rather than by taking the whole folder.
     # Baking a sprite nothing draws is pure byte cost - the same rule that kept the bitmap font
     # at +0 shipping bytes until something called it.
-    [string[]] $Categories = @("player", "nature", "buildings", "castle")
+    [string[]] $Categories = @("player", "nature", "buildings")
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,7 +77,22 @@ $script:DreamCategories = @("nature")
 $script:FxFrames = @("fx_portal_0",  "fx_portal_2",  "fx_portal_4",  "fx_portal_6",
                      "fx_portal_8",  "fx_portal_10", "fx_portal_12", "fx_portal_14",
                      "fx_well_0",    "fx_well_2",    "fx_well_4",    "fx_well_6",
-                     "fx_well_8",    "fx_well_10",   "fx_well_12",   "fx_well_14")
+                      "fx_well_8",    "fx_well_10",   "fx_well_12",   "fx_well_14")
+
+# Phase 13: the actual dark-fantasy castle pack supplied under assets/dark_fantasy.
+# Keep this explicit: dungeon/interior/environment sets stay source-only until a caller exists.
+$script:DarkFantasyFiles = @(
+    "walls/wall_piece_05.png", "walls/wall_piece_06.png", "walls/wall_piece_07.png",
+    "walls/wall_piece_08.png", "walls/wall_piece_09.png", "walls/wall_piece_10.png",
+    "walls/wall_arch_01.png", "walls/wall_arch_02.png", "walls/wall_arch_03.png",
+    "walls/wall_arch_04.png", "walls/arch_stone_01.png", "walls/arch_bridge_01.png",
+    "buildings/bld_gatehouse_large.png", "buildings/bld_gate_stone.png",
+    "buildings/bld_keep_small.png", "buildings/bld_tower_round_ruined.png",
+    "buildings/bld_tower_square_ruined.png", "buildings/bld_ruin_stone.png",
+    "buildings/bld_chapel_stone.png", "buildings/bld_guardhouse_banner.png",
+    "props/prop_01.png", "props/prop_02.png", "props/prop_03.png", "props/prop_04.png",
+    "props/prop_05.png", "props/prop_06.png", "props/prop_07.png",
+    "props/prop_dock_01.png", "props/prop_stall_01.png")
 
 # ------------------------------------------------------------ dream recolour --
 # A dream sprite is the SAME pixel stream with a different palette: ArtSprite keeps pal_off
@@ -268,6 +283,18 @@ foreach ($fx in $script:FxFrames) {
     $name = ($fx -replace '[^A-Za-z0-9]', '_').ToUpperInvariant()
     $sp = ConvertTo-Sprite -Path $path -Name $name
     $sp | Add-Member -NotePropertyName Category -NotePropertyValue "magical"
+    $sprites += $sp
+}
+
+# The Aetherhold files are already authored at the project's isometric scale.
+# Prefix their C names so they cannot collide with village art identifiers.
+foreach ($rel in $script:DarkFantasyFiles) {
+    $path = Join-Path (Join-Path $AssetRoot "dark_fantasy") $rel
+    if (-not (Test-Path $path)) { throw "missing dark-fantasy asset: $path" }
+    $leaf = [System.IO.Path]::GetFileNameWithoutExtension($rel)
+    $name = ("AETHER_" + ($leaf -replace '[^A-Za-z0-9]', '_')).ToUpperInvariant()
+    $sp = ConvertTo-Sprite -Path $path -Name $name
+    $sp | Add-Member -NotePropertyName Category -NotePropertyValue "dark_fantasy"
     $sprites += $sp
 }
 

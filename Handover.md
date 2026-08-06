@@ -1,7 +1,7 @@
 ---
 tags: [process, handover, wayfarer]
 updated: 2026-08-06
-exe_size_bytes: 786944
+exe_size_bytes: 899584
 ---
 
 # Handover — Wayfarer
@@ -30,6 +30,7 @@ Running log: [[INDEX]]
 | opencode | Phase 11: ship critical | `feat/phase-11-ship-complete` | **DONE** — all DoD items, committed (`8a27404`), PR pending | 2026-08-06 | 5-layer softsynth (deterministic, 0.325 ms worst case vs 21.333 ms deadline), chime/shard/portal SFX; HUD (counters, minimap, toasts, win banner) on the font extended with lowercase a–z + `/` (0x20–0x7A, 91 glyphs); `--hud-test` + `--font-test` green; full suite green; `nm` clean (no SDL_image/ttf/mixer); +4,608 bytes → 786,432 |
 | opencode | Phase 11 bugfix: shard pickup | `feat/phase-11-ship-complete` | **DONE** — committed (`7cd408a`), pushed | 2026-08-06 | E-key restructure left the shard branch unreachable (nothing caught it: autopilot and `--shard-test` both bypassed the key path). Extracted the whole interaction into `try_interact()`, handler now calls it, `--shard-test` drives it (`shard pickup: PASS`); full suite re-run green; release size unchanged 786,432 |
 | opencode | Rescale TILE 18 + HUD | `feat/phase-11-ship-complete` | **DONE** — committed (`068fea8` + `a8b178f`), pushed | 2026-08-06 | `TILE 24→18` denser tiles Option B (`144×138` world, 19,872 tiles, `REVEAL_TILES 7→9`, villages `4→6`/`12→16`/`29→39`/`22→32`), stack guard `400→700KB`, `soul_bob` floor 2px, minimap `2→1px/tile` (19,872px vs 79,488px); full 23/23 PASS, render 1.393ms, `+512` → 786,944 |
+| opencode | Phase 13 Aetherhold Slice 1–2 | `feat/phase-11-ship-complete` | **IN PROGRESS** — `5630985`, `42a4081`, `86fad03`, supplied pack integration in progress | 2026-08-06 | Replaced bad rectangle/old Dream-gap gate with southeast fixed island rows 35–76, mainland key `(88,59)`, overworld causeway `x94..107,y56`; actual `assets/dark_fantasy` wall/building/prop pack baked as `AETHER_*` (93 records / 82 streams / 11 dream variants); full suite + `--aether-test` green; dungeon/keep follow-up deferred |
 
 **Resolved 2026-08-06, later still.** Phases 08 and 09 merged into `feat/phase-08-and-09`, PR #1
 merged into `main` (`b4f2fde` — that branch also carried all of Phase 12, so `main` already has the
@@ -65,11 +66,11 @@ worn paths, ground marks) are DONE there. Phase 08 (save/load) is DONE on `feat/
 
 | | |
 |---|---|
-| **State** | 786,944 bytes, builds clean, full suite green (incl. `--hud-test`, `--font-test`, `--audio-test --layers --sfx`, and the `try_interact` shard-pickup regression), plays to completion on 50/50 seeds. All twelve phases done — plus `TILE 18` denser world and `1px` minimap |
-| **Branch** | **`feat/phase-11-ship-complete`** (Phase 10+11+the shard fix+rescale+minimap, pushed through `a8b178f`, PR pending) — `main` is at `b4f2fde` (Phases 08+09 merged via PR #1); this branch is that `main` + Phases 10/11 in a straight line. Working tree clean |
+| **State** | 899,584 bytes, builds clean, full suite green (incl. `--hud-test`, `--font-test`, `--audio-test --layers --sfx`, `--aether-test`, and the `try_interact` shard/key regressions), plays to completion on 50/50 seeds. All twelve phases done — plus `TILE 18` denser world, `1px` minimap, and Aetherhold Slice 1–2 wiring |
+| **Branch** | **`feat/phase-11-ship-complete`** (Phase 10+11+shard fix+rescale+minimap+Aetherhold, pushed through current work) — `main` is at `b4f2fde` (Phases 08+09 merged via PR #1); this branch is that `main` + later work. Working tree clean |
 | **Deadline** | 2026-09-04 — **all development phases are complete**; only the submission checklist remains |
-| **Do first** | **Everything is built.** Audio (5-layer softsynth), HUD (now `1px` minimap), save/load, dream realm (`144×138`), motion, art — all in, all green. Rescale `TILE 18` and shard pickup both fixed with regressions. Remaining: merge `feat/phase-11-ship-complete` to `main`, run the [[QA Checklist]]'s human items on a second machine, confirm the repo's visibility for submission, final wrap |
-| **Then** | Submission: final size audit (653,056 headroom), tag the submission commit, push |
+| **Do first** | **Everything through Aetherhold Slice 2 is built.** Audio (5-layer softsynth), HUD (`1px` minimap), save/load, dream realm (`144×138`), motion, supplied dark-fantasy castle assets, southeast island/causeway/courtyard — all in, all green. Remaining: merge `feat/phase-11-ship-complete` to `main`, run the [[QA Checklist]]'s human items on a second machine, confirm repo visibility, final wrap; dungeon/keep expansion remains Phase 13 follow-up |
+| **Then** | Submission: final size audit (**540,416 headroom**), tag the submission commit, push |
 | **Biggest risk** | **Nothing has been heard, watched or played by a human outside the dev loop.** Audio and motion are measured, not judged; the second-machine smoke test has never run |
 
 > **THE PROJECT CHANGED DIRECTION ON 2026-08-05, AND THAT WHOLE PHASE IS NOW DONE.** A portal in the
@@ -186,10 +187,10 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 | | |
 |---|---|
-| **`build\wayfarer.exe`** | **786,944 bytes** — 653,056 under the ship target |
-| `build\wayfarer-selftest.exe` | 854,016 bytes — **not a deliverable**, never shipped |
-| `src\main.c` | ~11,427 lines, single translation unit |
-| `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. **64 records over 53 pixel streams** (11 are dream palette variants sharing a twin's stream), 76,048 bytes of const data. Never edit by hand |
+| **`build\wayfarer.exe`** | **899,584 bytes** — 540,416 under the ship target |
+| `build\wayfarer-selftest.exe` | 968,192 bytes — **not a deliverable**, never shipped |
+| `src\main.c` | ~11,840 lines, single translation unit |
+| `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. **93 records over 82 pixel streams** (11 are dream palette variants sharing a twin's stream), 186,436 bytes of const data. Includes the supplied `assets/dark_fantasy` Aetherhold walls/buildings/props; never edit by hand |
 | Warnings | zero, under `-Wall -Wextra` |
 | Plan progress | **Phases 00–12 all done** — including 08 (save/load), 09 (restoration rebuild), 10 (motion), 11 (audio + HUD, ship critical) and 12 (dream realm, 5/5 slices). See [[Phase Roadmap]]. Only the submission checklist remains |
 
@@ -366,19 +367,22 @@ never need saying again.
 to a GitHub Release if a playable download is wanted.
 
 > **THE TEAM'S ART IS IN THE BUILD.** `assets/` holds **130 PNGs** across `buildings/`, `nature/`,
-> `player/`, `magical/`, `generated/`, plus 81 Godot `.import` sidecars, 1.2 MB total. **64 records
-> are baked and wired** via `tools/bake.ps1` → `src/art_data.h`: the original 37 (player, nature,
-> buildings) plus the portal/Well frames and 11 dream palette variants (which share pixel streams).
+> `player/`, `magical/`, `generated/`, and `dark_fantasy/`, plus Godot `.import` sidecars. **93 records
+> are baked and wired** via `tools/bake.ps1` → `src/art_data.h`: the original village art, portal/Well
+> frames, 11 dream palette variants, and the supplied Aetherhold wall/building/prop subset (`AETHER_*`).
 > What is deliberately NOT baked, and why:
 > - **`magical/`'s remaining frames** (`fx_rift`, `fx_crystal`) — still no caller in the renderer.
 >   Baking a sprite nothing draws is pure byte cost.
 > - **`generated/`** — duplicates of the building sprites plus two sprite *sheets*.
+> - **`dark_fantasy/dungeon/` and `dark_fantasy/interior/`** — supplied source art reserved for the
+>   deferred dungeon/interior slices; baking a sprite before a caller exists only spends bytes.
 > - **The `.import` files** are Godot editor metadata: not shipped, not baked, and arguably should
 >   not be committed at all. That is still undecided.
 >
-> **The scale worry turned out to be unfounded**: the base unit across the set is 48 px, exactly one
-> diamond width at `TILE 24`. The team authored against the scale already shipping, so nothing
-> needed re-authoring and no resolution change was required. See §9.
+> **The scale worry turned out to be unfounded**: supplied dark-fantasy assets are baked at their
+> authored pixel scale and remain intentionally larger than a single `TILE 18` diamond, which is
+> what makes the keep/walls skyline-readable. Procedural dimensions still use `PX()`; assets are
+> not rescaled at runtime. See §9.
 >
 > **`tree.glb` is gone** — verified absent from disk on 2026-08-05. Any older note treating it as a
 > live risk is stale. An empty `devlog.md` (0 bytes) is still at the vault root, created by nobody
@@ -535,8 +539,9 @@ rebuild : PASS  ruin->whole phase gate; control (always-baked predicate) rejecte
 ground  : PASS  determinism: two marks-on frames identical
 motion  : PASS  render determinism at one clock; 23,552 px differ at a second;
                 per-helper bounds and the 8-row mote gate table
-perf    : render 1.393 ms mean (2.185 ms max) of a 16.67 ms budget, 59.5 fps
-          — measured with the HUD (1px minimap) live at `TILE 18`/`144×138`; still ~12× headroom
+perf    : render 1.832 ms mean (4.697 ms max) of a 16.67 ms budget, 59.7 fps
+          — measured with the HUD (1px minimap) and supplied Aetherhold pack live at
+          `TILE 18`/`144×138`; mean remains under 2 ms
 ```
 
 > **`--land-test` has now been re-aimed THREE times for the two-sector grid, and never loosened.**
@@ -1606,7 +1611,7 @@ controls; audio callback timing; render cost). New this session:
 | Landform generation method | **RESOLVED, this session** — radial height field + layered noise, not a cave. See decision 16 |
 | Building placement pattern | **RESOLVED, this session** — clustered village sites, not uniform scatter. See decision 17 |
 | Fog destination colour | **RESOLVED, this session, but tuned by eye and unmeasured** — light haze, `FOG_KEEP` contrast preservation. See decision 19 and Phase 05 |
-| Asset pipeline for team-authored art | **RESOLVED AND BUILT, 2026-08-05, extended through Phase 12.** `tools/bake.ps1` → `src/art_data.h`, committed, compiled in, nothing loaded at runtime. **64 records now baked** (was 37): the original 37 plus 16 `fx_portal` and `fx_well` frames and 11 dream palette variants. `magical/`'s remaining frames (`fx_rift`, `fx_crystal`) stay unbaked — nothing calls them. See decisions 37–39, 46–47 and [[Phase 07 - Asset Seam]] |
+| Asset pipeline for team-authored art | **RESOLVED AND BUILT, extended through Phase 13 Slice 2.** `tools/bake.ps1` → `src/art_data.h`, committed, compiled in, nothing loaded at runtime. **93 records now baked** (82 streams + 11 dream palette variants): the original village art, portal/Well frames, and the supplied `assets/dark_fantasy` wall/building/prop subset as `AETHER_*`. Dungeon/interior/environment source remains unbaked until called. See decisions 37–39, 46–47 and [[Phase 07 - Asset Seam]] |
 | **Player occlusion behind props** | **RESOLVED AND SHIPPED 2026-08-05** — props fade over the player, `--fade-test`, +0 bytes, seen on screen. Carried as the top open item by four handovers. See decision 40 |
 | **The bush's magenta base disc** | **RESOLVED AND SHIPPED 2026-08-05** — 163 px stripped at bake, real contact shadow drawn instead, guarded by `--sprite-test`. See decision 41 |
 | **Rock outcrops as pale floating cubes** | **RESOLVED AND SHIPPED 2026-08-05** — stone tops out at luminance 74 against grass at 78, guarded by `--fog-test`. Outcrops kept, so no generator change and no re-argued proof. See decision 42 |
@@ -1655,8 +1660,9 @@ HUD, six test harnesses with negative controls — still comes to about **23 KB*
 next to SDL2's ~664 KB.
 
 **Art is the first thing to cost real bytes: 62,976 for the first 37 sprites**, and the bake now
-carries **64 records / 76,048 const-data bytes** (the portal/Well frames and dream palette variants
-added since). Even so it is ~11% of the free space. So the conclusion is unchanged in substance —
+carries **93 records / 186,436 const-data bytes** (portal/Well frames, dream variants, and the
+supplied dark-fantasy castle wall/building/prop subset). Even so it is ~13% of the free space. So
+the conclusion is unchanged in substance —
 **bytes are not the constraint** — but the *shape* is now worth knowing: if anything ever threatens
 the limit it will be assets, not code, and the lever is which sprites get baked, not how the game
 is written.
@@ -1777,16 +1783,20 @@ full suite is green. The only outstanding engine bug found by play was the unrea
 fixed same-day (`7cd408a`) with a regression that drives the real key path. What remains before
 submission is the **human checklist**: merge `feat/phase-11-ship-complete` into `main`, run the
 [[QA Checklist]]'s second-machine smoke test, decide the repo's visibility, tag the submission
-commit, push. **After that, Phase 13 — [[Phase 13 - Aetherhold Castle]] — is READY** for Slice 1–2
-(plan approved `Phase 13 - Aetherhold Castle Plan.md`: new `castle_key` at mainland watchtower
-`112,18`, NE reserve `92,8,52×34`, causeway + outer courtyard first, dungeon deferred). See that phase
-file and its plan for the five-slice approach and the `tile_blocked`-pure gating rule.
+commit, push. **Phase 13 Slice 1–2 is now implemented**: `castle_key` at mainland watchtower
+`88,59`, a fixed southeast overworld island in rows `35–76`, causeway `x94..107,y56`, supplied
+`assets/dark_fantasy` walls/buildings/props, and the outer courtyard composition. The actual
+castle pack is baked as `AETHER_*` records (`93` total / `82` streams / `11` dream variants); no
+generated placeholder castle sprites are used. Dungeon, interior, and deeper keep remain deferred
+per `Phase 13 - Aetherhold Castle Plan.md`. The full suite plus `--aether-test` is green; current
+release is `899,584` bytes with `540,416` headroom. See the phase file and plan for the remaining
+five-slice approach and the `tile_blocked`-pure gating rule.
 
 > **Do not re-raise the schedule.** It was put to the user on 2026-08-05 with the full arithmetic;
 > they considered it and said there is time. That is their call and it has been made.
 
 **Schedule reality, as of this handover:** today is **2026-08-06**; the contest deadline is
-**2026-09-04** — development is complete a month early, with **653,568 bytes of headroom**. The
+**2026-09-04** — development through Aetherhold Slice 2 is complete, with **540,416 bytes of headroom**. The
 buffer week is real: submit early, not at the deadline. **Judging order is finished → under size →
 fun.** The only remaining *fun* risk is the unjudged stuff in §8 — nothing else needs to give;
 [[Cut List]] stays pre-committed but nothing is expected to be cut.

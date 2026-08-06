@@ -7,16 +7,17 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 786,432 bytes (on `feat/phase-11-ship-complete`)
-**Current status:** **Phases 00–12 all done.** Phase 11 (ship-critical) is built and verified:
+**Current `.exe` size:** 899,584 bytes (on `feat/phase-11-ship-complete`)
+**Current status:** **Phases 00–12 all done; Phase 13 Aetherhold Slice 1–2 implemented.** Phase 11
+(ship-critical) is built and verified:
 5-layer procedural softsynth (Base/Strings/Pad/Bells/Voice of Souls, deterministic, measured
 0.325 ms worst case vs a 21.333 ms deadline), chime/shard/portal SFX, and the HUD on the Phase 03
 font — counters, minimap, restore toasts, win banner, seed line — which required extending the
 font with lowercase a–z and `/` (the old table was uppercase-only; every HUD string silently
 skipped). Phase 12 (dream realm) remains feature-complete on its own branch.
-**Forward plan:** see [[Phase Roadmap]] — Phase 11 was the last required phase; remaining work is
-the submission checklist (second-machine smoke test, repo visibility, final wrap).
-**Headroom:** 653,568 bytes under the 1,440,000 ship target
+**Forward plan:** see [[Phase Roadmap]] — Aetherhold's keep/dungeon slices remain deferred; submission
+checklist is second-machine smoke test, repo visibility, final wrap.
+**Headroom:** 540,416 bytes under the 1,440,000 ship target
 
 > **Note on the entry below:** written by a second, separately-run agent (`qwen`, via a tool called
 > `opencode`) that was pointed at this same working directory while Phase 12 slice 5 was mid-flight.
@@ -27,6 +28,14 @@ the submission checklist (second-machine smoke test, repo visibility, final wrap
 > in plaintext) was found untracked at the vault root and is now gitignored — never commit it.
 
 ## Sessions
+
+- [[2026-08-06-session-07]] *(Session 13)* — **Aetherhold layout corrected and supplied dark-fantasy
+  assets integrated.** The previous rectangle/NE/Dream-gap implementation was replaced with a fixed
+  southeast overworld island (rows 35–76), mainland watchtower key `(88,59)`, overworld causeway
+  `x94..107,y56`, and an inner fortress/courtyard. `tools/bake.ps1` now emits the supplied
+  `assets/dark_fantasy` walls/buildings/props as `AETHER_*`: 93 records, 82 streams, 11 dream
+  variants. Full suite + `--aether-test` green; release 899,584 bytes, 540,416 headroom; render
+  mean 1.832 ms, 59.7 fps.
 
 - [[2026-08-06-session-06]] *(Session 12)* — **Phase 11: ship critical, done.** 5-layer softsynth
   on static pattern tables, pure functions of a sample counter (deterministic: two fresh states,

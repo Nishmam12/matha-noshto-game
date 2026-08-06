@@ -1,7 +1,7 @@
 ---
 tags: [design, phase, wayfarer]
 phase: 13
-status: planned
+status: in_progress
 updated: 2026-08-06
 ---
 
@@ -10,7 +10,7 @@ updated: 2026-08-06
 **Status:** PLANNED — spec approved 2026-08-06. First major handcrafted region outside the starting village. Builds on Phase 12's portal/dream-realm pattern but is **not** a second biome — it is a handcrafted island connected by a causeway, with a modular dungeon beneath it.
 **Depends on:** [[Phase 12 - Dream Realm]] (island generation pattern, portal gating, `tile_blocked` invariant), [[Phase 07 - Asset Seam]] (bake pipeline for castle arch art), [[Isometric Rendering]] (band-sweep depth, elevation), [[Save and UI]] (ability gating, HUD). World must already be `TILE 18` / `144×138` — this phase does not re-derive those.
 **Blocks:** Nothing — first chapter after the village; later regions reuse its hybrid-generation and dungeon-module patterns.
-**Approach reference images:** `AETHERHOLD CASTLE (CASTLE ISLAND)` + `AETHERHOLD PATH (CONNECTING LAND)` — the pair supplied with this spec. Left = Castle Island (keep / courtyards / walls / causeway / dock), right = Connecting Land (forest, S-path, watchtower, campsite, coastline). Both sections connect seamlessly at the causeway at runtime.
+**Approach reference images:** `AETHERHOLD CASTLE (CASTLE ISLAND)` + `AETHERHOLD PATH (CONNECTING LAND)` — the pair supplied with this spec. Left = Castle Island (keep / courtyards / walls / causeway / dock), right = Connecting Land (forest, S-path, watchtower, campsite, coastline). Both sections connect seamlessly at the causeway at runtime. The shipped placement is the **southeast overworld coast**, not the northeast: reserve rows `35–76`, above the Dream gap `80–84`.
 
 ## Why this phase
 
@@ -109,7 +109,7 @@ Both from the same `art_data.h` contract (`art/<category>_<name>[_<variant>].png
 
 **Part 2 — Mainland Approach:** forest, causeway, roads, watchtower, campsite, ruins, coastline, bridge connection.
 
-Both sections connect at the causeway at runtime. Each part bakes independently so the team can iterate on one without rebaking the other. `assets/` already holds `buildings/`, `nature/`, `magical/` — new categories are `castle/` and `causeway/` (or reuse `buildings/` + `nature/` with `castle_` prefix; decide before baking and keep naming `category_name_variant`).
+Both sections connect at the causeway at runtime. The supplied pack is under `assets/dark_fantasy/`: `walls/`, `buildings/`, `props/`, `environment/`, `bridges/`, `interior/`, and `dungeon/`. `tools/bake.ps1` explicitly bakes the Slice 2 wall/building/prop subset as `AETHER_*` records; dungeon/interior/environment source remains available for later slices. No generated placeholder castle art is used by the renderer.
 
 ### Collision / gating
 `tile_blocked` still reads only `solid` + `regions[].terrain`. The causeway's *closed* state is a gated region or a `solid` bridge segment cleared on unlock — not a second collision input. Reuse the portal-gating pattern (standable check) rather than inventing a new one.
@@ -143,7 +143,7 @@ This is not a single "build a castle" task. It is sequenced so each slice is shi
 - Verify: `--aether-test` (new) can assert closed→no path to keep, open→path, and that `tile_blocked` still reads only `solid`/`terrain`/`mask`.
 
 ### Slice 2 — Outer courtyard ruins (first art, first storytelling)
-- Author `castle/` wall modules + rubble + statues (6–8 sprites). Bake, wire through `art_data.h`.
+- Use the supplied `assets/dark_fantasy/walls/` and `assets/dark_fantasy/buildings/` modules. Bake, wire through `art_data.h`, and keep each large architectural piece at an intentional fixed location rather than repeating it as a tile texture.
 - Populate outer courtyard from the authored mask + `tile_hash` decoration. Add 2–3 environmental storytelling vignettes (fallen banners, broken carts) that have no interaction — they exist to be seen.
 - Verify by screenshot, not by test: does the courtyard read as ruined and navigable?
 
@@ -177,7 +177,7 @@ This is not a single "build a castle" task. It is sequenced so each slice is shi
 
 1. Decide the story flag (`castle_unlocked` vs reuse `souls_restored`) and the mask representation before writing any generation code — one `Uint8` flag and one `Uint8 mask[WORLD_H][WORLD_W]`, both beside `WORLD_W` in `src/main.c`.
 2. Implement the mask + gate + `--aether-test` (closed/open path, `tile_blocked` still pure) in `src/main.c` beside `dream_sector`.
-3. Author first wall/rubble sprites (`assets/castle/wall_*`, `assets/castle/rubble_*`), bake, wire `art_data.h` — keep naming `castle_*`, reuse `draw_building`/`draw_prop` dispatch.
+3. Bake/use the supplied dark-fantasy wall/building modules (`assets/dark_fantasy/walls/`, `assets/dark_fantasy/buildings/`, `assets/dark_fantasy/props/`), prefixing generated identifiers `AETHER_*`; reuse `draw_sprite`/`draw_building` dispatch. Do not fabricate flat rectangular wall tiles.
 4. Populate courtyard decoration via `tile_hash` (reuse `prop_at` pattern) — no new RNG stream.
 5. Add keep elevation (stairs as `SURF_LEDGE` strips, reuse `world_heights` branch) and keep interior.
 6. Define dungeon room modules as static `Uint8` patches + shuffle + `--dungeon-test`.
@@ -201,4 +201,4 @@ This is not a single "build a castle" task. It is sequenced so each slice is shi
 
 ## Evidence
 
-Not yet built — spec approved 2026-08-06 with the two reference maps (Castle Island + Connecting Land). See `PHASE_13_AETHERHOLD_CHANGES.md` once Slice 1 lands.
+Slice 1–2 is implemented on `feat/phase-11-ship-complete`: `5630985` (key/causeway/save/`--aether-test`), `42a4081` + `86fad03` (first castle wiring), followed by the supplied `assets/dark_fantasy` integration and southeast relocation. Current bake: 93 records / 82 streams / 11 dream variants; release `899,584` bytes with `540,416` headroom. Full suite plus `--aether-test` is green. The current implementation is intentionally not the final castle: keep interior, dungeon, enemies, lighting/audio polish, and Aetherhold story rewards remain deferred.
