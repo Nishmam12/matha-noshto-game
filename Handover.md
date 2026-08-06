@@ -28,6 +28,7 @@ Running log: [[INDEX]]
 | qwen | Phase 08: save/load | `feat/phase-08-save-load` | **DONE** — committed | 2026-08-06 | 28-byte versioned save; regen-from-seed + deltas; `--save-test` with 5 negative controls; +1,536 bytes |
 | opencode | Phase 10: motion | `feat/phase-10-motion` | **DONE** — all 7 DoD items, committed | 2026-08-06 | sway/shimmer/fall-lines/smoke/fireflies/soul-bob; `--motion-test` 8 checks green; full suite green; +2,048 bytes → 781,824 |
 | opencode | Phase 11: ship critical | `feat/phase-11-ship` | **DONE** — all DoD items, committed (`8a27404`), PR pending | 2026-08-06 | 5-layer softsynth (deterministic, 0.325 ms worst case vs 21.333 ms deadline), chime/shard/portal SFX; HUD (counters, minimap, toasts, win banner) on the font extended with lowercase a–z + `/` (0x20–0x7A, 91 glyphs); `--hud-test` + `--font-test` green; full suite green; `nm` clean (no SDL_image/ttf/mixer); +4,608 bytes → 786,432 |
+| opencode | Phase 11 bugfix: shard pickup | `feat/phase-11-ship` | **DONE** — committed | 2026-08-06 | E-key restructure left the shard branch unreachable (nothing caught it: autopilot and `--shard-test` both bypassed the key path). Extracted the whole interaction into `try_interact()`, handler now calls it, `--shard-test` drives it (`shard pickup: PASS`) |
 
 **Resolved 2026-08-06, later still.** Phases 08 and 09 merged into `feat/phase-08-and-09`, PR #1
 merged into `main` (`b4f2fde`). Phase 10 (motion) is DONE on `feat/phase-10-motion` from that
@@ -470,8 +471,10 @@ portal  : PASS  100/100 seeds shrank when the portal was suppressed; travel work
                 refused ON the tile and BESIDE it, and works again with Kindle
 shard   : PASS  30 seeds, all placements >=6/8 shards in the dream sector, Well
                 and its Soul co-located; control (shard-starved world) rejected;
-                WELL BOUNDARY: 5 shards locked, 6 shards unlocked, redeemed
-                through the real interact path
+                PICKUP: a shard under the player is collected through the exact
+                function E runs (try_interact) — regression for the branch that
+                was unreachable once; WELL BOUNDARY: 5 shards locked, 6 shards
+                unlocked, redeemed through the real interact path
 fade    : PASS  selection 8/8 cases; blend 1,808 px exact half-blend vs an
                 SDL_GetRGB-derived reference; both controls fire (band-blind
                 predicate rejected on the 2 cases that matter, fade-ignoring

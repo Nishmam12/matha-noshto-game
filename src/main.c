@@ -3639,6 +3639,47 @@ static void hud_draw(SDL_Surface *fb, const Game *g, int seed)
     mm_draw(fb, g);
 }
 
+/* The one interaction key: portal, then restore, then shard pickup. One
+ * function so the tests drive exactly what E runs — this ordering lived only
+ * in the event loop once, and a restructure left the shard branch unreachable
+ * while every shard test bypassed the key path and stayed green. A portal
+ * end, an unrestored entity and a shard are never on the same tile, so the
+ * order cannot actually matter — but fixing it makes the interaction
+ * unambiguous rather than dependent on that staying true.
+ * Returns 1 portal, 2 restore, 3 shard, 0 nothing. */
+static int try_interact(Game *g, Audio *a)
+{
+    if (try_portal(g)) {
+        sfx_fire(a, SFX_PORTAL);
+        return 1;
+    }
+    {
+        int ri = try_restore(g);
+        if (ri >= 0) {
+            sfx_fire(a, SFX_CHIME);
+            if (g->ents[ri].is_soul) {
+                SDL_AtomicAdd(&a->voice_fire, 1); /* Voice of Souls */
+                SDL_snprintf(hud.toast, sizeof(hud.toast),
+                             "a soul is remembered  %d/%d",
+                             g->souls_restored, SOUL_COUNT);
+            } else {
+                SDL_AtomicAdd(&a->layer_fire, 1); /* Strings/Pad/Bells */
+                SDL_snprintf(hud.toast, sizeof(hud.toast),
+                             "a memory is restored  %d/%d",
+                             g->frags_restored, FRAGMENT_COUNT);
+            }
+            hud.toast_left = HUD_TOAST_FRAMES;
+            hud.mm_dirty = 1;
+            return 2;
+        }
+    }
+    if (try_collect_shard(g) >= 0) {
+        sfx_fire(a, SFX_SHARD);
+        return 3;
+    }
+    return 0;
+}
+
 /* Integer nearest-neighbour upscale, logical -> window, centred with the
  * leftover margin cleared. Nearest-neighbour and integer-only on purpose:
  * anything smoother would undo the hard pixel edges this exists to produce.
@@ -8502,6 +8543,26 @@ static int shard_selftest(Uint64 seed, int nseeds)
             g->p.x = (float)(g->w.well % WORLD_W) * TILE + TILE * 0.5f;
             g->p.y = (float)(g->w.well / WORLD_W) * TILE + TILE * 0.5f;
 
+            /* The PICKUP path, driven through the exact function E runs. A
+             * shard placed under her at the Well: the locked Soul is the only
+             * other interact here, and she is skipped while starved, so a
+             * successful collection proves the shard branch is reachable —
+             * it was dead once, and no test then drove the key path. */
+            {
+                Audio a;
+                int r;
+                SDL_zero(a);
+                g->shards[0] = (int)g->w.well;
+                r = try_interact(g, &a);
+                if (r != 3 || g->shards_held != 1 || g->shards[0] != -1) {
+                    printf("FAIL  pickup: try_interact returned %d, shards_held %d\n",
+                           r, g->shards_held);
+                    fails++;
+                } else {
+                    printf("shard pickup  : PASS  collected through the real E path\n");
+                }
+            }
+
             g->shards_held = SHARD_REQUIRED - 1;
             ok_short = (entity_in_reach(g) == WELL_SOUL_IDX);
 
@@ -11156,32 +11217,11 @@ int main(int argc, char **argv)
                     break;
                 case SDLK_e:
                 case SDLK_SPACE:
-                    /* Portal first, then a restore, then a shard pickup. A portal end, an
-                     * unrestored entity and a shard are never on the same tile, so the order
-                     * cannot actually matter — but fixing it makes the interaction unambiguous
-                     * rather than dependent on that staying true. */
-                    if (!grid && try_portal(&game))
-                        sfx_fire(&audio, SFX_PORTAL);
-                    else if (!grid) {
-                        int ri = try_restore(&game);
-                        if (ri >= 0) {
-                            sfx_fire(&audio, SFX_CHIME);
-                            if (game.ents[ri].is_soul) {
-                                SDL_AtomicAdd(&audio.voice_fire, 1); /* Voice of Souls */
-                                SDL_snprintf(hud.toast, sizeof(hud.toast),
-                                             "a soul is remembered  %d/%d",
-                                             game.souls_restored, SOUL_COUNT);
-                            } else {
-                                SDL_AtomicAdd(&audio.layer_fire, 1); /* Strings/Pad/Bells */
-                                SDL_snprintf(hud.toast, sizeof(hud.toast),
-                                             "a memory is restored  %d/%d",
-                                             game.frags_restored, FRAGMENT_COUNT);
-                            }
-                            hud.toast_left = HUD_TOAST_FRAMES;
-                            hud.mm_dirty = 1;
-                        }
-                    } else if (!grid && try_collect_shard(&game) >= 0)
-                        sfx_fire(&audio, SFX_SHARD);
+                    /* Portal, then restore, then shard pickup — the ordering
+                     * decision lives in try_interact so the tests drive the
+                     * exact code a key press runs. */
+                    if (!grid)
+                        try_interact(&game, &audio);
                     break;
                 case SDLK_r: /* regenerate with the next seed */
                     seed++;
