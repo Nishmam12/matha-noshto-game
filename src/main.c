@@ -1440,6 +1440,28 @@ static void regions_assign_terrain(World *w, Rng *rng, const int *depth)
 {
     int i;
     int max_depth = 0;
+    /* THE PORTAL'S ARRIVAL REGION IS A SPAWN, and has to be exempted for exactly the reason the
+     * real spawn is.
+     *
+     * place_portal runs before regions_build — it must, or the region partition would never see
+     * the dream sector at all — so it picks its ends from `solid` alone and cannot know what
+     * terrain they will be given. The dream end then sits deep in the region graph by
+     * construction, which is precisely where the depth bias below gates hardest. Measured before
+     * this line existed: on 11 of 100 seeds the player teleported onto a tile tile_blocked
+     * refuses, so move_axis correctly rejected every direction and she could do nothing but press
+     * E to go back. Four more seeds landed her in a 6-to-30 tile pocket.
+     *
+     * A gate you arrive INSIDE is not a gate, it is a wall behind you. The fix belongs here, in
+     * the one function that decides terrain, rather than in try_portal — refusing to travel, or
+     * nudging her to a nearby open tile on arrival, would both be collision logic papering over a
+     * generation fault. */
+    int arrival = -1;
+
+    if (w->portal[1] >= 0) {
+        Uint8 r = w->region[w->portal[1] / WORLD_W][w->portal[1] % WORLD_W];
+        if (r != REGION_NONE)
+            arrival = (int)r;
+    }
 
     for (i = 0; i < w->region_count; i++)
         if (depth[i] > max_depth)
@@ -1447,8 +1469,8 @@ static void regions_assign_terrain(World *w, Rng *rng, const int *depth)
 
     for (i = 0; i < w->region_count; i++) {
         w->regions[i].terrain = TERRAIN_NORMAL;
-        if (i == w->spawn_region || depth[i] <= 1 || max_depth == 0)
-            continue; /* spawn and its immediate neighbours stay open */
+        if (i == w->spawn_region || i == arrival || depth[i] <= 1 || max_depth == 0)
+            continue; /* both spawns, and their immediate neighbours, stay open */
         {
             float t = (float)depth[i] / (float)max_depth;
             if (rng_float(rng) < t * 0.75f)
@@ -6295,6 +6317,44 @@ static int sector_selftest(Uint64 seed, int nseeds)
  * Written before the portal drew a single pixel. Phase 07 named a test to write first, it was
  * written second, and a screenshot loop then spent a stretch suspecting a decoder bug that the
  * test disproved in one run. */
+/* How many tiles can be walked from `start` with `abilities`, WITHOUT using the portal?
+ *
+ * Deliberately does not route through tile_neighbours, and this is the second documented
+ * exception alongside land_flood (decision 44). The question being asked is "having arrived,
+ * where can you go from here" — and an adjacency that includes the portal answers it by stepping
+ * straight back to the other sector, which is the one move that does not count. Same shape of
+ * exception, same reason: this is a question about a landmass on its own, not about the graph.
+ *
+ * Gated by tile_blocked, so it measures WALKING with a given ability set rather than geometry. */
+static int walk_from(const World *w, Uint8 abilities, int start, Uint8 *seen, int *stack)
+{
+    static const int dx[4] = { 1, -1, 0, 0 };
+    static const int dy[4] = { 0, 0, 1, -1 };
+    int top = 0, count = 0, i;
+
+    for (i = 0; i < WORLD_W * WORLD_H; i++)
+        seen[i] = 0;
+    if (start < 0 || tile_blocked(w, abilities, start % WORLD_W, start / WORLD_W))
+        return 0;
+    seen[start] = 1;
+    stack[top++] = start;
+    while (top > 0) {
+        int idx = stack[--top], x = idx % WORLD_W, y = idx / WORLD_W, d;
+        count++;
+        for (d = 0; d < 4; d++) {
+            int nx = x + dx[d], ny = y + dy[d], nidx;
+            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H)
+                continue;
+            nidx = ny * WORLD_W + nx;
+            if (seen[nidx] || tile_blocked(w, abilities, nx, ny))
+                continue;
+            seen[nidx] = 1;
+            stack[top++] = nidx;
+        }
+    }
+    return count;
+}
+
 static int portal_selftest(Uint64 seed, int nseeds)
 {
     int fails = 0, s, shrank = 0;
@@ -6340,6 +6400,86 @@ static int portal_selftest(Uint64 seed, int nseeds)
     } else {
         printf("negative control (portal is load-bearing): PASS  "
                "[%d/%d seeds shrank when suppressed]\n", shrank, nseeds);
+    }
+
+    /* YOU MUST BE ABLE TO STAND WHERE THE PORTAL PUTS YOU.
+     *
+     * This assertion exists because the code was wrong, and wrong in a way that looked fine from
+     * every other angle. place_portal runs before regions_build (it has to, or the partition
+     * never sees the dream sector), so it picks both ends out of `solid` alone and cannot know
+     * what terrain they will be given — and the dream end sits deep in the region graph by
+     * construction, exactly where the depth bias gates hardest. Measured: on 11 of 100 seeds the
+     * player teleported onto a tile tile_blocked refuses, move_axis then correctly rejected every
+     * direction, and the only thing she could do was press E to go back. Reported by a human
+     * looking at the screen, on the very first seed anyone tried.
+     *
+     * NOTHING ELSE COULD CATCH IT. --gating-test asserts walk-reachable == graph-reachable, and
+     * both agree perfectly that a gated arrival tile is unenterable. --portal-test's shrink
+     * measure was 100/100 either way, because a component you cannot STAND in is still a
+     * component you can REACH. world_solvable only ever asks about entities, and there are none
+     * in the dream sector yet. The invariant is about the arrival point itself, so it needs its
+     * own assertion.
+     *
+     * The bound is deliberately zero-versus-nonzero rather than a size: "can she stand up" needs
+     * no threshold and cannot be quietly loosened later. How much ROOM she gets is a different
+     * question, reported below and enforced properly by Task 9 — putting 4 fragments and 2 Souls
+     * in the dream sector makes the existing generate-then-verify loop reject a landing that
+     * opens onto nothing, with no invented number anywhere. */
+    {
+        int worst = 1 << 30, worst_seed = -1, bad = 0, total = 0, tight = 0;
+        for (s = 0; s < nseeds; s++) {
+            Game    *g  = (Game *)SDL_malloc(sizeof(Game));
+            Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+            Rngs rngs;
+            int reach, ty;
+            if (!g || !sc) { printf("FAIL  out of memory\n"); SDL_free(g); SDL_free(sc); return 1; }
+            rngs_init(&rngs, seed + (Uint64)s);
+            game_init(g, &rngs);
+            ty = g->w.portal[1] / WORLD_W;
+            reach = walk_from(&g->w, ABIL_NONE, g->w.portal[1], sc->seen, sc->stack);
+            if (reach == 0) {
+                printf("FAIL  seed %d: the dream end is on gated ground at row %d — the player "
+                       "arrives unable to move\n", s, ty);
+                bad++;
+            } else if (reach < 40) {
+                tight++;
+            }
+            if (reach < worst) { worst = reach; worst_seed = s; }
+            total += reach;
+            SDL_free(g); SDL_free(sc);
+        }
+        fails += bad;
+        printf("dream landing: %s  %d seeds standable, mean %d tiles walkable with no abilities, "
+               "worst %d (seed %d), %d under 40\n", bad ? "FAIL" : "PASS",
+               nseeds - bad, total / (nseeds ? nseeds : 1), worst, worst_seed, tight);
+
+        /* Negative control: gate the arrival region by hand and require the checker to reject it.
+         * A real construction of the exact fault that shipped, not an invented one — this is what
+         * every seed listed above actually looked like before regions_assign_terrain learned that
+         * the arrival region is a spawn. */
+        {
+            Game    *g  = (Game *)SDL_malloc(sizeof(Game));
+            Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+            Rngs rngs;
+            int ok_real = 0, ok_gated = 1;
+            if (!g || !sc) { printf("FAIL  out of memory\n"); SDL_free(g); SDL_free(sc); return 1; }
+            rngs_init(&rngs, seed);
+            game_init(g, &rngs);
+            if (g->w.portal[1] >= 0) {
+                Uint8 r = g->w.region[g->w.portal[1] / WORLD_W][g->w.portal[1] % WORLD_W];
+                ok_real = walk_from(&g->w, ABIL_NONE, g->w.portal[1], sc->seen, sc->stack) > 0;
+                if (r != REGION_NONE) {
+                    g->w.regions[r].terrain = TERRAIN_WATER;   /* needs Wade; she has nothing */
+                    ok_gated = walk_from(&g->w, ABIL_NONE, g->w.portal[1],
+                                         sc->seen, sc->stack) > 0;
+                }
+            }
+            printf("dream landing control (gated arrival rejected): %s  [real %s, gated %s]\n",
+                   (ok_real && !ok_gated) ? "PASS" : "FAIL",
+                   ok_real ? "standable" : "REJECTED", ok_gated ? "NOT CAUGHT" : "caught");
+            if (!(ok_real && !ok_gated)) fails++;
+            SDL_free(g); SDL_free(sc);
+        }
     }
 
     /* Travel. Asserted on the player's POSITION rather than on try_portal's return value: "it

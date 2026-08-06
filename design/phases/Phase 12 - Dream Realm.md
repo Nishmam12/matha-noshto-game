@@ -428,6 +428,49 @@ ship target. Render *improved*, 1.016 → 0.974 ms mean.
   to cross while every entity is still overworld-side. It positions her and calls the **real**
   `try_portal`, so a capture cannot show a place the game itself could not put you.
 
+### The bug the user found on the first seed anyone played
+
+**The portal teleported the player onto ground she could not stand on, on 11 of 100 seeds.**
+Reported from the screen, on seed 1, within minutes of the slice being called done.
+
+`place_portal` runs **before** `regions_build` — it has to, or the region partition never sees the
+dream sector at all — so it picks both ends out of `solid` alone and cannot know what terrain they
+will be given. The dream end then sits deep in the region graph *by construction*, which is exactly
+where `regions_assign_terrain`'s depth bias gates hardest. Arriving in a `TERRAIN_WATER` region with
+no Wade, `tile_blocked` refused her tile, `move_axis` correctly rejected every direction, and the
+only input that did anything was `E` to go back.
+
+**Nothing in the suite could have caught it**, and that is the part worth keeping:
+
+- `--gating-test` asserts walk-reachable == graph-reachable. Both agree perfectly that a gated
+  arrival tile is unenterable — they are *supposed* to.
+- `--portal-test`'s shrink measure was 100/100 before and after. A component you cannot **stand
+  in** is still a component you can **reach**.
+- `world_solvable` only ever asks about entities, and there are none in the dream sector until
+  Task 9.
+
+The invariant is about the arrival point itself, so it needed its own assertion. **Fixed at the
+source:** `regions_assign_terrain` now exempts the portal's arrival region exactly as it already
+exempts the spawn — a gate you arrive *inside* is not a gate, it is a wall behind you. Refusing to
+travel, or nudging her to a nearby open tile on arrival, were both rejected: they are collision
+logic papering over a generation fault.
+
+**Measured after: 0 of 100 seeds land on gated ground** (was 11), and the mean walkable area from
+the arrival point rose 739 → 818 tiles. The bound is deliberately **zero-versus-nonzero** — "can
+she stand up" needs no threshold and cannot be quietly loosened. The negative control gates the
+arrival region by hand and requires rejection, so the fault that shipped is the one the checker is
+proven to catch.
+
+Cost: **+512 bytes**, 766,464 → 766,976. Whole suite re-**run** because terrain assignment changed:
+sector 30, land 30, village 30, region 30, gating 30, reach 50 + control, bridge 200/200,
+**play 50/50**.
+
+**Still open, and deliberately not fixed with a number:** 4 of 100 seeds land in a 6-to-30 tile
+pocket — standable, but small. That is legitimate gated design (the overworld's spawn region works
+the same way) and the right enforcement is **Task 9**: putting 4 fragments and 2 Souls in the dream
+sector makes the existing generate-then-verify loop reject a landing that opens onto nothing, with
+no invented threshold anywhere. `--portal-test` reports the count so it stays visible.
+
 ### NOT verified by slice 3
 
 - **Whether it reads as Lumiara is the user's call and has not been made.** No test has an opinion.
