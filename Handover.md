@@ -1777,12 +1777,10 @@ full suite is green. The only outstanding engine bug found by play was the unrea
 fixed same-day (`7cd408a`) with a regression that drives the real key path. What remains before
 submission is the **human checklist**: merge `feat/phase-11-ship-complete` into `main`, run the
 [[QA Checklist]]'s second-machine smoke test, decide the repo's visibility, tag the submission
-commit, push. **After that, Phase 13 — [[Phase 13 - Aetherhold Castle]] — is PLANNED** (spec approved
-2026-08-06 with the two reference maps: Castle Island + Connecting Land). It is the first handcrafted
-chapter after ship-critical: a causeway-gated castle island with courtyards/keep, a connecting
-forest/path, and a modular dungeon beneath — hybrid fixed-layout + procedural decoration, two
-modular bake parts, vertical exploration. See that phase file for the five-slice approach and the
-`tile_blocked`-pure gating rule.
+commit, push. **After that, Phase 13 — [[Phase 13 - Aetherhold Castle]] — is READY** for Slice 1–2
+(plan approved `Phase 13 - Aetherhold Castle Plan.md`: new `castle_key` at mainland watchtower
+`112,18`, NE reserve `92,8,52×34`, causeway + outer courtyard first, dungeon deferred). See that phase
+file and its plan for the five-slice approach and the `tile_blocked`-pure gating rule.
 
 > **Do not re-raise the schedule.** It was put to the user on 2026-08-05 with the full arithmetic;
 > they considered it and said there is time. That is their call and it has been made.

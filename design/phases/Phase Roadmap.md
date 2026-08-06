@@ -13,10 +13,13 @@ from memory each session.
 
 > **Picking this up cold? Phases 00–12 are DONE.** Phase 12 (dream realm) is feature-complete;
 > Phase 11 (ship-critical) landed audio, the HUD, and the QA/submission items. Phase 13
-> (Aetherhold Castle) is **PLANNED** — spec approved with the two reference maps (Castle Island +
-> Connecting Land). The build is complete through ship-critical: real art, world motion, five-layer
-> synth, HUD, save/load. What remains is the Aetherhold build + the submission checklist — second-
-> machine smoke test, repo visibility, final wrap.
+> (Aetherhold Castle) is **READY** — plan for Slice 1–2 approved (new key @ mainland watchtower,
+> NE coast reserve `92,8,52×34`, causeway + courtyard first, dungeon deferred). Spec + two
+> reference maps (Castle Island + Connecting Land) are in `Phase 13 - Aetherhold Castle.md`; the
+> sliced plan is `Phase 13 - Aetherhold Castle Plan.md`. The build is complete through ship-
+> critical: real art, world motion, five-layer synth, HUD, save/load. What remains is the
+> Aetherhold Slice 1 build + the submission checklist — second-machine smoke test, repo visibility,
+> final wrap.
 
 **Deadline: 2026-09-04.** Today: 2026-08-06. **Hard stop on art/backbone work: 2026-08-14** — Phase
 11 (ship-critical) begins on that date regardless of how much of Phases 03–10 is finished, because
@@ -42,7 +45,7 @@ beautiful, unfinished game scores worse than a plain, complete one.
 | 10 | [[Phase 10 - Motion]] | **DONE** — `feat/phase-10-motion`, +2,048 bytes (781,824), `--motion-test` green | 09 | Motion on unfinished art just animates the wrong thing; static art should be right first |
 | 12 | [[Phase 12 - Dream Realm]] | **DONE** — all 11 tasks, all 5 slices, `feat/phase-12-dream-realm` | 01, 05, 06, 07 | A portal in the `TERRAIN_DARK` region to a second biome in the team's Lumiara style. Resolves three things at once: the dark region had no reason to visit, Kindle had no reason to exist, and 56 delivered magical FX frames had no caller. Timeboxed into five separately shippable slices — it did not move the 2026-08-14 hard stop |
 | 11 | [[Phase 11 - Ship Critical]] | **DONE** — `feat/phase-11-ship-complete` (`8a27404` + shard fix `7cd408a` + rescale `068fea8` + minimap `a8b178f`), 786,944 bytes (+5,120), 653,056 headroom. 5-layer softsynth (deterministic, 0.325 ms worst case), chime/shard/portal SFX, HUD (counters, minimap 1px, toasts, win banner) on the font extended with lowercase, `--hud-test` green, full suite green, `nm` clean of SDL_image/ttf/mixer | — | Audio, font-dependent HUD, save wiring, QA, submission. Not negotiable against the deadline |
-| 13 | [[Phase 13 - Aetherhold Castle]] | **PLANNED** — spec approved 2026-08-06, two reference maps (Castle Island + Connecting Land) | 12, 07 | First handcrafted chapter outside the village: causeway-gated castle island + connecting forest, hybrid fixed-layout + procedural decoration, modular dungeon. Sliceable into 5 vertical slices; adds the grounded Dark-Souls/Zelda castle the early game promises across the water |
+| 13 | [[Phase 13 - Aetherhold Castle]] | **READY** — plan for Slice 1–2 approved (new key @ `112,18` watchtower, NE reserve `92,8,52×34`, causeway + courtyard first, `Phase 13 - Aetherhold Castle Plan.md`) | 12, 07 | First handcrafted chapter outside the village: causeway-gated castle island + connecting forest, hybrid fixed-layout + procedural decoration, modular dungeon deferred — Slice 1 is NE reserve + gate + watchtower key + `--aether-test` + save `v2` |
 
 ## How to read a phase file
 
