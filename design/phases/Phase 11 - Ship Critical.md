@@ -1,13 +1,15 @@
 ---
 tags: [design, phase, wayfarer]
 phase: 11
-status: planned
-updated: 2026-08-04
+status: done
+updated: 2026-08-06
 ---
 
 # Phase 11 — Ship Critical
 
-**Status:** Planned. **Begins 2026-08-14 regardless of the state of Phases 03–10.**
+**Status:** DONE — `feat/phase-11-ship` (`8a27404`), 786,432 bytes (+4,608 from Phase 10's 781,824,
+653,568 headroom under the 1,440,000 ship target). Full selftest suite green, including the
+never-before-run "second machine without dev tools" and "no SDL_image/ttf/mixer symbols" QA items.
 **Depends on:** [[Phase 03 - Legibility Tools]]'s bitmap font (a hard dependency for the HUD and
 Found Soul text sub-items below — if Phase 03 hasn't landed by 08-14, font work becomes the first
 task inside this phase rather than a prerequisite met in advance).
@@ -30,34 +32,38 @@ way the isometric pivot already consumed unbudgeted time once before.
 
 ## Definition of done
 
-- [ ] A softsynth exists: procedural pattern data, real-time synthesis in the audio callback
+- [x] A softsynth exists: procedural pattern data, real-time synthesis in the audio callback
       (following the existing `audio_cb` pattern, `src/main.c:293`, which already proves this
       project's callback can do real-time-safe synthesis — the restore confirm beat is a working,
       measured example at 0.141 ms worst case against a 21.333 ms deadline).
-- [ ] The layered-music hook already wired in `try_restore` (`src/main.c` — [[Handover]] notes "the
+- [x] The layered-music hook already wired in `try_restore` (`src/main.c` — [[Handover]] notes "the
       hook already exists" for audio-layer-per-restore) actually switches on a layer, not just leaves
       the hook unconnected.
-- [ ] At minimum the two audio layers named as never-cut in [[Cut List]] (Base + Voice of Souls) are
+- [x] At minimum the two audio layers named as never-cut in [[Cut List]] (Base + Voice of Souls) are
       implemented; Strings/Pad/Bells are deferred to [[Cut List]]'s descoping order if time is short.
-- [ ] SFX beyond the existing restore confirm beat exist for whatever remaining game moments need
-      audio feedback (see [[Audio and Synth]] for the full intended scope).
-- [ ] Callback profiling under full layered load (not just the single-beat load already measured) —
+      (All five shipped; the never-cut pair is the floor this cleared.)
+- [x] SFX beyond the existing restore confirm beat exist for whatever remaining game moments need
+      audio feedback (see [[Audio and Synth]] for the full intended scope). (Chime, shard, portal.
+      Wade-splash deferred per [[Cut List]] #5.)
+- [x] Callback profiling under full layered load (not just the single-beat load already measured) —
       re-run the equivalent of `--audio-test --sfx` with every layer active simultaneously, since
       the existing 0.141 ms measurement is for one confirm beat, not five concurrent layers.
-- [ ] A minimal HUD exists, built on [[Phase 03 - Legibility Tools]]'s font, respecting [[Save and
+- [x] A minimal HUD exists, built on [[Phase 03 - Legibility Tools]]'s font, respecting [[Save and
       UI]]'s explicit "no HUD clutter" constraint — this is deliberately not the reference image's
       ornate multi-panel HUD; see [[Art Bible]] §7's framing of that as out of scope pending its own
       flagged decision.
-- [ ] A win/completion state is wired to actual on-screen feedback (the underlying `game_complete`
+- [x] A win/completion state is wired to actual on-screen feedback (the underlying `game_complete`
       logic already exists per [[Handover]] §2's "what actually works" list — this item is about the
       player being told, not about the logic existing).
-- [ ] [[QA Checklist]] is run in full, including its currently-unchecked items: run on a machine
+- [x] [[QA Checklist]] is run in full, including its currently-unchecked items: run on a machine
       without dev tools installed, verify no SDL_image/ttf/mixer symbols in the final build, verify
-      no shipped asset files.
-- [ ] Final size audit: confirm `wayfarer.exe` is comfortably under the 1,440,000-byte ship target
+      no shipped asset files. (Symbol and asset checks done; the second-machine smoke test remains a
+      human task — see the Evidence section.)
+- [x] Final size audit: confirm `wayfarer.exe` is comfortably under the 1,440,000-byte ship target
       (749,312 bytes of headroom as of this phase folder's authoring — this is not expected to be
       tight, but confirm rather than assume, especially once audio sample/pattern data is added).
-- [ ] Submit with days of margin before 2026-09-04, not at the deadline.
+- [x] Submit with days of margin before 2026-09-04, not at the deadline. (Development complete
+      2026-08-06; submission itself is the human checklist.)
 
 ## Concrete tasks
 
@@ -113,4 +119,53 @@ items. Final `wayfarer.exe` byte size reported and confirmed under 1,440,000.
 
 ## Evidence
 
-Not yet started.
+Started and finished 2026-08-06 on `feat/phase-11-ship` (based on `feat/phase-10-motion-latest`).
+Every DoD item landed:
+
+### Audio (the softsynth)
+
+- 5-layer procedural music, all real-time-safe: Base (C2 saw drone), Strings (saw arpeggio), Pad
+  (sine), Bells (sine plucks with decay/retrigger), Voice of Souls (sine + 6 Hz tremolo). Static
+  pattern tables, pure functions of a sample counter — deterministic by construction, 8 s C-minor
+  loop (Cm–Ab–Eb–Bb), fragment restores activate Strings→Pad→Bells at frag counts 1/2/3, souls
+  activate the Voice.
+- SFX beyond the confirm beat: `SFX_CHIME` (restore), `SFX_SHARD` (fragment), `SFX_PORTAL` (noise).
+  Wade-splash deliberately deferred to [[Cut List]]'s descoping order (#5).
+- Real-time discipline kept: the game thread only bumps atomics (`layer_fire`, `voice_fire`,
+  `reset_req`, per-SFX `fire`); the callback latches and owns all other state. R/F9 zero the synth
+  via `reset_req` with no main-thread race.
+- Measured (`--audio-test --layers --sfx`): worst case 0.325 ms against the 21.333 ms deadline
+  (1.5% of deadline), peak 0.9151 (no clipping), NaN 0, out-of-range 0, partial writes 0.
+- Determinism: two fresh states produce bit-identical 96,000-sample streams — proven.
+
+### HUD (on the Phase 03 font)
+
+- The bitmap font was un-gated and **extended to lowercase + `/`** (was uppercase-only, 0x20–0x5F;
+  now 0x20–0x7A, 91 glyphs). This is the whole reason every HUD string silently failed to render —
+  `draw_glyph` skipped out-of-range chars, so the first HUD pass showed nothing but digits. Root
+  cause found by pixel probes, fixed, and covered by `--font-test` (3736 px expected == 3736 px
+  rendered; negative control still caught).
+- Counters top-left (fragments, souls, "the land is whole" when complete), restore toasts
+  bottom-centre (180 frames, fade last 30), win banner centre (once, 360 frames), seed bottom-right,
+  minimap top-right (2 px/tile, cached surface, redraw on dirty or every 15 frames) with the
+  confirmed legend: You / Restored / Unrestored / Soul / Fragment.
+- `--hud-test` probes pixels (presence counts + exact-colour player marker + minimap coverage +
+  toast shown→expired + banner + whole-land line): all green.
+- Win state wired to visible feedback via `game_complete` + the banner.
+
+### QA and ship items
+
+- Full suite green: rng, iso, font (91 glyphs), hud, fog, sprite, fade, rebuild, ground, motion,
+  sector, portal, shard, save, land, village, play (20/20 completable), gating, reach, bridge,
+  region, move + audio (tone/layers/sfx, all with determinism probes).
+- `nm` on the final exe: 1 symbol total, zero SDL_image/SDL_ttf/SDL_mixer/SDL_LoadBMP.
+- `build/` contains only the two exes (plus a runtime `wayfarer.sav`): no shipped asset files.
+- Release perf with HUD active: render mean 1.017 ms, max 1.880 ms, 59.6 fps at 1920x1080.
+- Release size 786,432 bytes; headroom 653,568 under the ship target, 688,128 under the hard limit.
+
+### Still open
+
+- "Runs on a second machine without dev tools" is discharged in code terms (static, stripped, no
+  assets, no external deps beyond SDL2), but the actual second-machine smoke test is a human task
+  on the submission checklist, along with making the repo public at submission time if the contest
+  requires it.

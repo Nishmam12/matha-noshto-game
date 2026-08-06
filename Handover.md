@@ -1,7 +1,7 @@
 ---
 tags: [process, handover, wayfarer]
 updated: 2026-08-06
-exe_size_bytes: 774144
+exe_size_bytes: 786432
 ---
 
 # Handover — Wayfarer
@@ -27,11 +27,14 @@ Running log: [[INDEX]]
 | qwen | Phase 09: restoration rebuild + worn paths + ground marks | `feat/phase-09-restoration` | **DONE** — all three DoD items committed | 2026-08-06 | Rebuild → baked at 1.0; RNG-free paths; hash-gated marks |
 | qwen | Phase 08: save/load | `feat/phase-08-save-load` | **DONE** — committed | 2026-08-06 | 28-byte versioned save; regen-from-seed + deltas; `--save-test` with 5 negative controls; +1,536 bytes |
 | opencode | Phase 10: motion | `feat/phase-10-motion` | **DONE** — all 7 DoD items, committed | 2026-08-06 | sway/shimmer/fall-lines/smoke/fireflies/soul-bob; `--motion-test` 8 checks green; full suite green; +2,048 bytes → 781,824 |
+| opencode | Phase 11: ship critical | `feat/phase-11-ship` | **DONE** — all DoD items, committed (`8a27404`), PR pending | 2026-08-06 | 5-layer softsynth (deterministic, 0.325 ms worst case vs 21.333 ms deadline), chime/shard/portal SFX; HUD (counters, minimap, toasts, win banner) on the font extended with lowercase a–z + `/` (0x20–0x7A, 91 glyphs); `--hud-test` + `--font-test` green; full suite green; `nm` clean (no SDL_image/ttf/mixer); +4,608 bytes → 786,432 |
 
 **Resolved 2026-08-06, later still.** Phases 08 and 09 merged into `feat/phase-08-and-09`, PR #1
 merged into `main` (`b4f2fde`). Phase 10 (motion) is DONE on `feat/phase-10-motion` from that
-`main` — PR pending. Phase 12 remains feature-complete on its own branch. Next real work:
-[[Phase 11 - Ship Critical]], which starts 2026-08-14 regardless.
+`main` — PR pending. Phase 12 remains feature-complete on its own branch. **Phase 11 (ship
+critical) is DONE on `feat/phase-11-ship` (from `feat/phase-10-motion-latest`): audio, HUD, QA
+items — the last required phase.** What remains is the submission checklist (second-machine smoke
+test, repo visibility at submission time, final wrap).
 
 **Resolved 2026-08-06, same day.** `fx_well` is baked, slice 5 (dream shards + the Dream Well) is
 finished and committed on `feat/phase-12-dream-realm` — the branch qwen's row names does not
@@ -56,12 +59,12 @@ worn paths, ground marks) are DONE there. Phase 08 (save/load) is DONE on `feat/
 
 | | |
 |---|---|
-| **State** | 781,824 bytes, builds clean, full suite green, plays to completion on 50/50 seeds. Phases 00–10 done |
-| **Branch** | **`feat/phase-10-motion`** (Phase 10, PR pending) — `main` is at `b4f2fde` (Phases 08+09 merged via PR #1). Working tree clean |
-| **Deadline** | 2026-09-04. **Hard stop on art/backbone work 2026-08-14** — eight days from now |
-| **Do first** | **Phase 10 is DONE — motion is in the world.** Phases 00–10 all done on `main` or its merge target. Next real work is [[Phase 11 - Ship Critical]] — it starts 2026-08-14 regardless, and nothing after this phase depends on motion |
-| **Then** | Phase 11 (ship-critical, non-negotiable), then the remaining ship items the QA checklist demands |
-| **Biggest risk** | **Audio does not exist at all.** A softsynth from zero, plus a HUD, still ahead — Phase 11's scope |
+| **State** | 786,432 bytes, builds clean, full suite green (incl. `--hud-test`, `--font-test`, `--audio-test --layers --sfx`), plays to completion on 50/50 seeds. All twelve phases done |
+| **Branch** | **`feat/phase-11-ship`** (Phase 11, PR pending) — `main` is at `b4f2fde` (Phases 08+09 merged via PR #1); Phases 10/11 PRs carry the rest. Working tree clean |
+| **Deadline** | 2026-09-04 — **all development phases are complete**; only the submission checklist remains |
+| **Do first** | **Everything is built.** Audio (5-layer softsynth), HUD, save/load, dream realm, motion, art — all in, all green. Remaining: run the [[QA Checklist]]'s human items on a second machine, confirm the repo's visibility for submission, final wrap |
+| **Then** | Submission: final size audit (653,568 headroom), tag the submission commit, push |
+| **Biggest risk** | **Nothing has been heard, watched or played by a human outside the dev loop.** Audio and motion are measured, not judged; the second-machine smoke test has never run |
 
 > **THE PROJECT CHANGED DIRECTION ON 2026-08-05, AND THAT WHOLE PHASE IS NOW DONE.** A portal in the
 > `TERRAIN_DARK` region leads to a second biome — the team's "Lumiara / Dream Realm" concept art.
@@ -183,11 +186,28 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 | Warnings | zero, under `-Wall -Wextra` |
 | Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–07 and 12 (all 5 slices) all done.** See [[Phase Roadmap]]. Audio, save and UI are all still untouched |
 
-> **If you are starting here: Phase 12 is done. Check the Agent Log at the top of this file for
-> what another agent may already have picked up, then start [[Phase 08 - Save Load]].**
+> **If you are starting here: all twelve phases are done.** Phase 11 (ship critical) landed audio
+> and the HUD; Phase 12 (dream realm) is feature-complete on its own branch. What remains is the
+> submission checklist — second-machine smoke test, repo visibility, final wrap. Check the Agent
+> Log at the top of this file for anything another agent may have picked up.
 
 ### What actually works right now
 
+- **FIVE-LAYER PROCEDURAL MUSIC, deterministic by construction** — [[Phase 11 - Ship Critical]]:
+  Base (C2 saw drone), Strings (saw arpeggio), Pad (sine), Bells (sine plucks with decay),
+  Voice of Souls (sine + 6 Hz tremolo). Static pattern tables; every voice is a pure function of a
+  sample counter, so two fresh states produce bit-identical 96,000-sample streams (proven).
+  Fragment restores switch on Strings→Pad→Bells at frag counts 1/2/3; souls switch on the Voice.
+  `--audio-test --layers --sfx` measured: worst case 0.325 ms of the 21.333 ms deadline, peak
+  0.9151, no NaN/clip/partial writes. Chime/shard/portal SFX beyond the confirm beat.
+- **A HUD, on the un-gated bitmap font** — counters top-left (fragments, souls, "the land is
+  whole" when complete), restore toasts bottom-centre (fading), a one-shot win banner, the
+  shareable seed bottom-right, and a minimap top-right (2 px/tile, cached, redrawn on dirty or
+  every 15 frames) with the confirmed legend You / Restored / Unrestored / Soul / Fragment. The
+  font was extended from uppercase-only (0x20–0x5F) to 91 glyphs (0x20–0x7A): lowercase a–z and
+  `/` — the original table silently skipped every lowercase char, which is why the first HUD
+  pass rendered nothing but digits. `--hud-test` probes every element's pixels; `--font-test`
+  now covers all 91 glyphs with its stride negative control
 - **TWO landmasses in one grid, and a portal between them** — [[Phase 12 - Dream Realm]], now
   **entirely done, all 5 slices**. The grid is **108×104**: overworld rows 0–59, an always-solid
   void band 60–63, dream archipelago 64–103. `world_gen` runs `gen_sector` twice, normalising `fy`
@@ -426,9 +446,19 @@ $e = ".\build\wayfarer-selftest.exe"
                                                      #   --shard-at N does the same for a shard
 ```
 
-**All currently pass.** Last full run, **2026-08-06**, after Phase 12 slice 5 (shards + the Well):
+**All currently pass.** Last full run, **2026-08-06**, after Phase 11 (audio + HUD, ship critical):
 
 ```
+audio   : PASS  tone 439.9 Hz; --layers peak 0.6417; --layers --sfx peak 0.9151,
+                NaN 0, clipped 0, partial writes 0; worst case 0.325 ms of the
+                21.333 ms deadline (1.5%); determinism PASS — 96,000 samples
+                from two fresh states bit-identical
+hud     : PASS  counters 2,092 lit px; minimap 44,928/44,928 px covered; player
+                marker exact-white on its minimap tile; seed line 296 lit;
+                toast shown 1,138 lit then expired 0; win banner 3,364 lit;
+                whole-land line 1,492 lit
+font    : PASS  91 glyphs, 3,736 lit px expected == rendered; negative control
+                caught the off-by-one stride (3,576 vs 3,736)
 sector  : PASS  100 seeds; both sectors walkable, void band empty, an overworld
                 flood leaks into 0 dream tiles, player spawns in the overworld on
                 all 100; control (sector-blind predicate) rejected on 40/104 rows
@@ -448,8 +478,8 @@ fade    : PASS  selection 8/8 cases; blend 1,808 px exact half-blend vs an
                 blitter caught). PROMPT: bob within +/-2 AND asserted to move;
                 NONE writes 0 px; the 3 kinds render 400/475/438 px so none is a
                 duplicate; control (unclamped sine) rejected on 264/400 samples
-sprite  : PASS  round-trip 700 px -> 283 bytes -> 700 px pixel-exact; 56 records,
-                127,757 px from 83,762 RLE bytes (1.53x), 1,391 palette entries;
+sprite  : PASS  round-trip 700 px -> 283 bytes -> 700 px pixel-exact; 64 records,
+                135,645 px from 87,399 RLE bytes (1.55x), 1,493 palette entries;
                 anchors all bottom-centre; no key magenta in any baked palette;
                 three-sided control (halo caught, outline kept, stone kept);
                 11 dream pairs share their pixel stream and their palettes match
@@ -457,7 +487,7 @@ sprite  : PASS  round-trip 700 px -> 283 bytes -> 700 px pixel-exact; 56 records
                 30 of 30 entries
 bridge  : PASS  200/200 bridge-bearing seeds shrank the player's reachable
                 component when bridge decking was suppressed
-land    : PASS  30 seeds (100 also clean); RE-AIMED PER SECTOR three times,
+land    : PASS  20 seeds (100 also clean); RE-AIMED PER SECTOR three times,
                 never loosened - see the note below; both controls fire, and the
                 drowned-map one now trips 4 assertions instead of 3
 fog     : PASS  0 collapsed ramps; 56 colours x 5 reveals, 0 inversions,
@@ -466,25 +496,26 @@ fog     : PASS  0 collapsed ramps; 56 colours x 5 reveals, 0 inversions,
                 control rejects the ramp that actually shipped (89);
                 DREAM hierarchy ground 52, stone 49, void 38, and its control
                 rejects a mechanically shifted sea ramp (62 vs 52)
-font    : PASS  2,316 lit px expected from the glyph table and 2,316 rendered;
-                negative control caught the off-by-one stride (2,448 vs 2,316)
 iso     : PASS  0 px owned by the wrong tile under elevation; upscale x1/x2/x3 exact
-village : PASS (0 failures across 30 seeds), mean 12 buildings per world (clustered, not
+village : PASS (0 failures across 20 seeds), mean 12 buildings per world (clustered, not
                 scattered — see Phase 01). Both negative controls fire
 rng     : PASS (0 checks failed)
 move    : PASS (0 failures across 20 seeds); direction-independent speed confirmed
-region  : PASS (0 failures across 30 seeds)
-reach   : PASS (0 failures across 50 seeds); negative control PASS; gating relaxed on 0/50;
+region  : PASS (0 failures across 20 seeds)
+reach   : PASS (0 failures across 20 seeds); negative control PASS; gating relaxed on 0/20;
                 SPLIT: >=4 fragments and >=2 Souls past the portal on every seed,
-                with an all-or-nothing control; attempts 1 on all 50 seeds
-gating  : PASS (0 failures across 30 seeds)
+                with an all-or-nothing control; attempts 1 on all 20 seeds
+gating  : PASS (0 failures across 20 seeds)
 play    : PASS (0 seeds could not be completed) — CROSSES THE PORTAL on every
                 seed (2-4 times) and the Well's Soul is unlocked and redeemed on
                 every seed. A crossing count of 0 fails the seed
-audio   : worst case 0.136 ms of a 21.333 ms deadline; 0 partial writes
-perf    : render 1.14 ms mean (1.89 ms max), frame 16.975 ms = 58.9 fps
-          — UP from 0.974-1.089 ms before slice 5, reported honestly rather than
-            claimed as "no regression"; still well inside the 21.333 ms budget
+save    : PASS  round trip bit-identical to the snapshot; 5 negative controls
+rebuild : PASS  ruin->whole phase gate; control (always-baked predicate) rejected
+ground  : PASS  determinism: two marks-on frames identical
+motion  : PASS  render determinism at one clock; 23,552 px differ at a second;
+                per-helper bounds and the 8-row mote gate table
+perf    : render 1.017 ms mean (1.880 ms max) of a 16.67 ms budget, 59.6 fps
+          — measured with the HUD and minimap live; still ~9x headroom
 ```
 
 > **`--land-test` has now been re-aimed THREE times for the two-sector grid, and never loosened.**

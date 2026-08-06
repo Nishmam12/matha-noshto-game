@@ -7,15 +7,16 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 781,824 bytes (on `feat/phase-10-motion`)
-**Current status:** **Phases 00–10 all done.** Phase 10 (motion) is built and verified: tree
-sway, water shimmer + waterfall fall-lines, chimney smoke tied to the restoration-rebuild's 1.0
-threshold, fireflies in restored regions, Found Souls idle-bob — every effect a pure function of
-(tile_hash, clock), so `--motion-test` proves determinism and the full suite proves zero
-simulation impact. Phase 12 (dream realm) remains feature-complete on its own branch.
-**Forward plan:** see [[Phase Roadmap]] — next is **Phase 11 (ship-critical)**, which starts
-2026-08-14 regardless.
-**Headroom:** 658,176 bytes under the 1,440,000 ship target
+**Current `.exe` size:** 786,432 bytes (on `feat/phase-11-ship`)
+**Current status:** **Phases 00–12 all done.** Phase 11 (ship-critical) is built and verified:
+5-layer procedural softsynth (Base/Strings/Pad/Bells/Voice of Souls, deterministic, measured
+0.325 ms worst case vs a 21.333 ms deadline), chime/shard/portal SFX, and the HUD on the Phase 03
+font — counters, minimap, restore toasts, win banner, seed line — which required extending the
+font with lowercase a–z and `/` (the old table was uppercase-only; every HUD string silently
+skipped). Phase 12 (dream realm) remains feature-complete on its own branch.
+**Forward plan:** see [[Phase Roadmap]] — Phase 11 was the last required phase; remaining work is
+the submission checklist (second-machine smoke test, repo visibility, final wrap).
+**Headroom:** 653,568 bytes under the 1,440,000 ship target
 
 > **Note on the entry below:** written by a second, separately-run agent (`qwen`, via a tool called
 > `opencode`) that was pointed at this same working directory while Phase 12 slice 5 was mid-flight.
@@ -27,6 +28,18 @@ simulation impact. Phase 12 (dream realm) remains feature-complete on its own br
 
 ## Sessions
 
+- [[2026-08-06-session-06]] *(Session 12)* — **Phase 11: ship critical, done.** 5-layer softsynth
+  on static pattern tables, pure functions of a sample counter (deterministic: two fresh states,
+  96,000 bit-identical samples). Fragment restores switch on Strings→Pad→Bells at frag counts
+  1/2/3, souls switch on the Voice; chime/shard/portal SFX; R/F9 zero the synth through a
+  callback-latched `reset_req`. `--audio-test --layers --sfx`: worst 0.325 ms of 21.333 ms, peak
+  0.9151, no NaN/clip/partial writes. HUD on the un-gated font: the font was **uppercase-only**,
+  so the first HUD pass rendered nothing but digits — root-caused by pixel probes and fixed by
+  adding lowercase a–z + `/` (0x20–0x7A, 91 glyphs). Counters, minimap (cached, 2 px/tile),
+  toasts (fade over last 30 frames), one-shot win banner, seed line; `--hud-test` probes all of it
+  green, `--font-test` now covers 91 glyphs with its stride negative control. Full suite green
+  end-to-end; release 786,432 bytes (+4,608), 653,568 headroom; `nm`: 1 symbol, no
+  SDL_image/ttf/mixer. Perf with HUD live: render mean 1.017 ms.
 - [[2026-08-06-session-05]] *(Session 11)* — **Phase 10: motion, done.** `g->clock` was already the
   render-only animation clock Phase 10's task 1 asked for — no new state. Tree sway at the prop
   dispatch (one formula, `tree_sway`, covers baked and procedural) plus a per-lobe ripple in
@@ -230,6 +243,7 @@ simulation impact. Phase 12 (dream realm) remains feature-complete on its own br
 | 08-05 | **692,224** | +1,024 | rivers via BFS-to-sea, bridges that clear `solid`, river/plank colours |
 | 08-06 | **779,776** | +5,632 | Phases 08+09 merged onto `main` (PR #1): save/load + restoration rebuild |
 | 08-06 | **781,824** | +2,048 | Phase 10: motion — sway, shimmer, waterfall fall-lines, smoke, fireflies, soul-bob |
+| 08-06 | **786,432** | +4,608 | Phase 11: softsynth (5 layers) + SFX + HUD/minimap/toasts/win banner + font lowercase |
 
 Self-test builds (`wayfarer-selftest.exe`) are not deliverables and are deliberately excluded
 from this table and from the budget gate.
@@ -243,9 +257,12 @@ from this table and from the budget gate.
 - **Pacing may be short.** A shortest-path full clear is 30–82 seconds of walking. Real play with
   fog will be longer by an unknown multiplier. Feeds the region-count question in
   [[Open Decisions]].
-- Audio has never been heard, only measured.
+- Audio exists now (5-layer synth, `--audio-test --layers --sfx` measured) but has never been
+  **heard** by a human, only measured — same standing gap as motion's "does it read as alive".
 - Nothing has been run on a machine other than the development box — [[QA Checklist]]'s
-  "runs clean without dev tools" is still unchecked.
+  "runs clean without dev tools" is discharged in code terms (static, stripped, no assets, no
+  SDL_image/ttf/mixer symbols) but the actual second-machine smoke test is still a human task
+  on the submission checklist.
 - The gating-relaxation fallback in world generation has never fired (0 of 50 seeds), so that
   code path is untested against real failure.
 - Physical keyboard input verified via posted window messages, not a real key press.

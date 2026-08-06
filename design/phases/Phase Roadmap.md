@@ -11,10 +11,10 @@ sits where it does in the sequence, what "done" means, exactly which functions a
 and how it gets verified. Read the phase file before starting its work — don't re-derive the plan
 from memory each session.
 
-> **Picking this up cold? Phases 00–10 are all DONE.** Phase 12 (dream realm) is also done on its
-> own branch. The team's real art is in the build, world motion is in the build, and the headroom
-> fought for in Phases 03–10 banks into Phase 11. Read Phase 11's file before starting it; it is
-> the last non-negotiable push.
+> **Picking this up cold? All twelve phases are DONE.** Phase 12 (dream realm) is feature-complete
+> on its own branch; Phase 11 (ship-critical) landed audio, the HUD, and the QA/submission items.
+> The build is complete: real art, world motion, five-layer synth, HUD, save/load. What remains is
+> the submission checklist — second-machine smoke test, repo visibility, final wrap.
 
 **Deadline: 2026-09-04.** Today: 2026-08-06. **Hard stop on art/backbone work: 2026-08-14** — Phase
 11 (ship-critical) begins on that date regardless of how much of Phases 03–10 is finished, because
@@ -39,7 +39,7 @@ beautiful, unfinished game scores worse than a plain, complete one.
 | 09 | [[Phase 09 - Placeholder Art]] | **DONE** — `feat/phase-09-restoration` (`57b7de9`), merged into `main` via Phases 08+09 PR. Restoration rebuild (ruin→whole), worn paths, ground marks — all three remaining items shipped with tests | 03, 07 | The actual art pass — the team's handoff arrived early, so 07 did the placement work this phase was holding. The three items that survived into this phase (rebuild, paths, marks) were the ones only a focused art pass could do |
 | 10 | [[Phase 10 - Motion]] | **DONE** — `feat/phase-10-motion`, +2,048 bytes (781,824), `--motion-test` green | 09 | Motion on unfinished art just animates the wrong thing; static art should be right first |
 | 12 | [[Phase 12 - Dream Realm]] | **DONE** — all 11 tasks, all 5 slices, `feat/phase-12-dream-realm` | 01, 05, 06, 07 | A portal in the `TERRAIN_DARK` region to a second biome in the team's Lumiara style. Resolves three things at once: the dark region had no reason to visit, Kindle had no reason to exist, and 56 delivered magical FX frames had no caller. Timeboxed into five separately shippable slices — it did not move the 2026-08-14 hard stop |
-| 11 | [[Phase 11 - Ship Critical]] | **Begins 2026-08-14 regardless** | — | Audio, font-dependent HUD, save wiring, QA, submission. Not negotiable against the deadline |
+| 11 | [[Phase 11 - Ship Critical]] | **DONE** — `feat/phase-11-ship` (`8a27404`), 786,432 bytes (+4,608), 653,568 headroom. 5-layer softsynth (deterministic, 0.325 ms worst case), chime/shard/portal SFX, HUD (counters, minimap, toasts, win banner) on the font extended with lowercase, `--hud-test` green, full suite green, `nm` clean of SDL_image/ttf/mixer | — | Audio, font-dependent HUD, save wiring, QA, submission. Not negotiable against the deadline |
 
 ## How to read a phase file
 
