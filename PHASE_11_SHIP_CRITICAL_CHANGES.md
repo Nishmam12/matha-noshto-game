@@ -1,13 +1,19 @@
-# Phase 11: Ship Critical — Changes & Additions Summary
+# Phase 11: Ship Critical & Interaction Fix — Changes & Additions Summary
 
 ## Overview
-Phase 11 implements the ship-critical audio engine (a procedural 5-layer softsynth and multi-SFX system) and on-screen HUD (minimap, region counters, fade-out toasts, win banner) for **Wayfarer**. This completes all non-negotiable ship requirements for the 1.44MB Floppy Disk contest ahead of deadline.
+Phase 11 implements the ship-critical audio engine (a procedural 5-layer softsynth and multi-SFX system), an on-screen HUD (minimap, region counters, fade-out toasts, win banner), and a critical interaction fix for dream shard collection (`try_interact`) in **Wayfarer**. This completes all non-negotiable ship requirements for the 1.44MB Floppy Disk contest ahead of deadline.
 
 ---
 
 ## What Was Added & Changed
 
-### 1. 5-Layer Softsynth & Multi-SFX Audio Engine (`src/main.c`)
+### 1. Unified Interaction System & Shard Fix (`src/main.c`)
+- **Extracted `try_interact()`**:
+  - Resolved an interaction regression where dream shards were uncollectable after the E-key dispatch restructure.
+  - Unified E-key precedence: Portal transition → Dream Shard pickup → Found Soul / Fragment restoration.
+  - Added automated test assertion coverage to ensure dream shard collection remains operational under all game states.
+
+### 2. 5-Layer Softsynth & Multi-SFX Audio Engine (`src/main.c`)
 - **Procedural 5-Voice Softsynth**:
   - Pure sample-counter functions evaluated in real-time callbacks (WASAPI 48 kHz F32).
   - 5 Voices: **Base** (C2 saw drone), **Strings** (saw arpeggio), **Pad** (sine wave), **Bells** (sine plucks with decay/retrigger), **Voice of Souls** (sine + 6 Hz tremolo).
@@ -22,7 +28,7 @@ Phase 11 implements the ship-critical audio engine (a procedural 5-layer softsyn
 - **Real-Time Thread Safety**:
   - Non-blocking atomic messaging between game thread and audio callback (`layer_fire`, `voice_fire`, `reset_req`, `fire`). Zero mutexes or main-thread locks.
 
-### 2. Full HUD & On-Screen UI (`src/main.c`)
+### 3. Full HUD & On-Screen UI (`src/main.c`)
 - **Expanded Font System**:
   - Un-gated 5x7 bitmap font (`draw_text`, `draw_text_shadow`) and added lowercase `a–z` and `/` glyphs (91 total glyphs).
   - Pinned by `--font-test` (3,736 px expected vs rendered).
@@ -33,7 +39,7 @@ Phase 11 implements the ship-critical audio engine (a procedural 5-layer softsyn
   - **Win Banner**: Center victory banner triggered on 100% completion.
   - **Seed Display**: Bottom-right active world seed text.
 
-### 3. Automated Test Suite Additions
+### 4. Automated Test Suite Additions
 - **`--audio-test`**: Validates callback timing, 5-layer synthesis, and SFX trigger load. Measured worst-case 0.325 ms callback time vs 21.333 ms deadline (1.5% CPU load), 0 NaN/clipping/partial writes.
 - **`--hud-test`**: Probes pixel-presence for minimap (44,928 px exact coverage), player marker, counter strings, toast fade/expiry, and win banner.
 
@@ -50,11 +56,11 @@ Phase 11 implements the ship-critical audio engine (a procedural 5-layer softsyn
 ## File Summary
 | File | Status | Description |
 |---|---|---|
-| `src/main.c` | **Modified** | Implemented 5-layer softsynth, SFX routes, 91-glyph font, HUD elements, minimap, toasts, win banner, `--audio-test`, and `--hud-test`. |
-| `Handover.md` | **Modified** | Updated §0–§5 status, agent logs, executable size, and QA checklist state. |
+| `src/main.c` | **Modified** | Implemented 5-layer softsynth, SFX routes, 91-glyph font, HUD elements, minimap, toasts, win banner, `try_interact` shard fix, `--audio-test`, and `--hud-test`. |
+| `Handover.md` | **Modified** | Updated §0–§5 status, agent logs, executable size, shard fix notes, and QA checklist state. |
 | `design/phases/Phase 11 - Ship Critical.md` | **Modified** | Documented completed DoD items, softsynth architecture, and test verification results. |
 | `design/phases/Phase Roadmap.md` | **Modified** | Updated Phase 11 status to DONE. |
 | `design/QA Checklist.md` | **Modified** | Marked audio, HUD, font, and standalone executable QA requirements as verified. |
-| `devlog/2026-08-06-session-06.md` | **New** | Session 06 devlog recording Phase 11 softsynth and HUD implementation. |
+| `devlog/2026-08-06-session-06.md` | **New** | Session 06 devlog recording Phase 11 softsynth, HUD implementation, and shard collection fix. |
 | `devlog/INDEX.md` | **Modified** | Added Session 06 entry to the devlog index. |
-| `PHASE_11_SHIP_CRITICAL_CHANGES.md` | **New** | Complete overview of Phase 11 additions and modifications. |
+| `PHASE_11_SHIP_CRITICAL_CHANGES.md` | **Modified** | Complete overview of Phase 11 additions, modifications, and interaction fix. |
