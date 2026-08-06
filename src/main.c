@@ -563,6 +563,12 @@ typedef struct {
 #define SOUL_COUNT     5
 #define ENTITY_COUNT   (FRAGMENT_COUNT + SOUL_COUNT) /* must stay <= 32 */
 
+/* How much of the game lives past the portal. Phase 12 task 9, and the numbers are the spec's:
+ * enough that the biome matters, not so many that the overworld reads as a prologue. Beside the
+ * counts they partition, so the relationship is visible rather than remembered. */
+#define DREAM_FRAGMENTS 4   /* of FRAGMENT_COUNT, and never the 3 ability grants */
+#define DREAM_SOULS     2   /* of SOUL_COUNT */
+
 typedef struct {
     int   tile;
     Uint8 region;
@@ -1561,12 +1567,20 @@ static int pick_region(Uint32 mask, int region_count, Rng *rng)
     return list[rng_below(rng, (Uint32)n)];
 }
 
-/* Reservoir sampling: one pass, uniform, no temporary tile list. */
-static int pick_tile_in_region(const World *w, int r, Rng *rng)
+/* Reservoir sampling: one pass, uniform, no temporary tile list.
+ *
+ * `sector` is -1 for anywhere, 0 for the overworld, 1 for the dream realm — Phase 12 task 9. The
+ * filter is on the TILE's row, not on the region's, and that is deliberate: regions_build
+ * partitions through tile_neighbours, which includes the portal edge, so a region can straddle
+ * both sectors and "which sector is this region in" has no answer for those. Where an entity
+ * stands always does. */
+static int pick_tile_in_region(const World *w, int r, Rng *rng, int sector)
 {
     int chosen = -1, seen = 0, x, y;
 
     for (y = 0; y < WORLD_H; y++) {
+        if (sector >= 0 && (dream_sector(y) ? 1 : 0) != sector)
+            continue;
         for (x = 0; x < WORLD_W; x++) {
             if (w->region[y][x] != r)
                 continue;
@@ -1576,6 +1590,27 @@ static int pick_tile_in_region(const World *w, int r, Rng *rng)
         }
     }
     return chosen;
+}
+
+/* Which regions own open tiles in each sector. One grid sweep, so the placement loop below can
+ * ask the question 19 times without paying for it 19 times. A region can appear in BOTH masks —
+ * see the note on pick_tile_in_region. */
+static void regions_by_sector(const World *w, Uint32 *over, Uint32 *dream)
+{
+    int x, y;
+
+    *over = 0;
+    *dream = 0;
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            Uint8 r = w->region[y][x];
+            if (r == REGION_NONE)
+                continue;
+            if (dream_sector(y))
+                *dream |= 1u << r;
+            else
+                *over |= 1u << r;
+        }
 }
 
 /* Place the three ability grants on the advancing frontier — each one inside
@@ -1597,27 +1632,79 @@ static void place_entities(World *w, Rng *rng, Entity *ents)
         ents[i].restored = 0;
     }
 
+    /* The three ability grants stay where they were: on the advancing frontier, in the OVERWORLD.
+     * They are the progression, and putting one behind the portal would make the route to the
+     * portal depend on an ability that is itself behind it — not unsolvable (the verifier would
+     * catch that), but a needless knot in the one placement that has to stay legible. */
     for (i = 0; i < 3; i++) {
         Uint32 reach = regions_reachable(w, held);
         int r = pick_region(reach, w->region_count, rng);
         if (r < 0)
             break;
         ents[i].region = (Uint8)r;
-        ents[i].tile = pick_tile_in_region(w, r, rng);
+        ents[i].tile = pick_tile_in_region(w, r, rng, -1);
         ents[i].grants = grant_order[i];
         held |= grant_order[i];
     }
 
     {
         Uint32 reach = regions_reachable(w, held);
+        Uint32 over_mask, dream_mask;
+
+        regions_by_sector(w, &over_mask, &dream_mask);
+
         for (i = 3; i < ENTITY_COUNT; i++) {
-            int r = pick_region(reach, w->region_count, rng);
+            /* Phase 12 task 9's quota. The first DREAM_FRAGMENTS non-grant fragments and the
+             * first DREAM_SOULS Souls are drawn from the dream side; everything else is placed
+             * exactly as before.
+             *
+             * QUOTA WITHIN THE REACHABILITY FILTER, NEVER INSTEAD OF IT — `reach` is still
+             * intersected, so a dream region that cannot be entered is not a candidate. When no
+             * reachable region has dream tiles the quota simply is not met and the entity is
+             * placed anywhere; world_place_and_verify then rejects that layout and tries again,
+             * which is decision 13's loop doing what it already does rather than a new mechanism. */
+            int want_dream = ents[i].is_soul
+                           ? (i < FRAGMENT_COUNT + DREAM_SOULS)
+                           : (i < 3 + DREAM_FRAGMENTS);
+            Uint32 pool = reach & (want_dream ? dream_mask : over_mask);
+            int sector = want_dream ? 1 : 0;
+            int r = pick_region(pool, w->region_count, rng);
+
+            if (r < 0) {
+                r = pick_region(reach, w->region_count, rng);
+                sector = -1;
+            }
             if (r < 0)
                 r = w->spawn_region;
             ents[i].region = (Uint8)r;
-            ents[i].tile = pick_tile_in_region(w, r, rng);
+            ents[i].tile = pick_tile_in_region(w, r, rng, sector);
+            /* A region can straddle the sectors, so the filtered sample can come up empty even
+             * though the region qualified. Fall back to anywhere in it rather than leaving the
+             * entity unplaced, which --reach-test would (rightly) call a failure. */
+            if (ents[i].tile < 0)
+                ents[i].tile = pick_tile_in_region(w, r, rng, -1);
         }
     }
+}
+
+/* Does this layout put enough of the game past the portal? Phase 12 task 9.
+ *
+ * Kept OUT of world_solvable, which means exactly one thing — every entity is reachable in
+ * ability order — and should keep meaning it. This is a separate, weaker question about
+ * distribution, and it is asked only by the primary generate-then-verify loop. The ungating
+ * fallback deliberately does not ask it: that path exists to guarantee a completable world at any
+ * cost, and design/Cut List.md is explicit that the reachability guarantee is the thing that must
+ * never be traded. A world with a thin dream realm still ships; an unwinnable one does not. */
+static int entities_split_ok(const Entity *ents)
+{
+    int i, frags = 0, souls = 0;
+
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        if (ents[i].tile < 0 || !dream_sector(ents[i].tile / WORLD_W))
+            continue;
+        if (ents[i].is_soul) souls++; else frags++;
+    }
+    return frags >= DREAM_FRAGMENTS && souls >= DREAM_SOULS;
 }
 
 /* Generate-then-verify, with a fallback that cannot fail. Returns attempts used
@@ -1632,7 +1719,7 @@ static int world_place_and_verify(World *w, Rngs *rngs, const int *depth, Entity
     for (attempt = 0; attempt < 64; attempt++) {
         regions_assign_terrain(w, &rngs->terrain, depth);
         place_entities(w, &rngs->entities, ents);
-        if (world_solvable(w, ents, NULL))
+        if (world_solvable(w, ents, NULL) && entities_split_ok(ents))
             return attempt + 1;
     }
 
@@ -5142,7 +5229,7 @@ static int playthrough_selftest(Uint64 seed, int verbose)
     Game g;
     Rngs rngs;
     Scratch sc;
-    int steps = 0, restores = 0;
+    int steps = 0, restores = 0, crossings = 0, was_dream;
     const char *reason = "complete";
 
     rngs_init(&rngs, seed);
@@ -5150,32 +5237,48 @@ static int playthrough_selftest(Uint64 seed, int verbose)
     if (g.w.region_count < 2)
         return 0;
 
+    was_dream = dream_sector((int)(g.p.y / TILE));
     while (!game_complete(&g) && steps < 200000) {
-        int r = autopilot_tick(&g, &sc);
+        int r = autopilot_tick(&g, &sc), now;
         if (r < 0) {
             reason = "dead end: nothing reachable";
             break;
+        }
+        /* Count portal crossings. Phase 12 task 9 put entities on both sides, so from here a
+         * completed run is PROOF that travel works — the sectors share no tile edge (asserted by
+         * --sector-test), so a dream-side entity cannot be restored without crossing.
+         *
+         * MEASURED rather than argued, though the argument is sound: a future change that
+         * accidentally joined the landmasses would keep every seed completing and quietly retire
+         * the only end-to-end exercise travel has. A crossing count of 0 says that happened. */
+        now = dream_sector((int)(g.p.y / TILE));
+        if (now != was_dream) {
+            crossings++;
+            was_dream = now;
         }
         if (r == 1)
             restores++;
         else
             steps++;
     }
+    if (game_complete(&g) && crossings == 0)
+        reason = "COMPLETED WITHOUT EVER CROSSING THE PORTAL";
     if (!game_complete(&g) && steps >= 200000)
         reason = "autopilot made no progress (step cap)";
 
 
     if (verbose)
         printf("  seed %-10.0f restored %2d/%2d  frags %2d  souls %d  abilities %d/3  "
-               "steps %6d  %s\n",
+               "steps %6d  crossings %2d  %s\n",
                (double)seed, restores, ENTITY_COUNT, g.frags_restored,
                g.souls_restored,
                ((g.p.abilities & ABIL_WADE) ? 1 : 0) +
                    ((g.p.abilities & ABIL_CLIMB) ? 1 : 0) +
                    ((g.p.abilities & ABIL_KINDLE) ? 1 : 0),
-               steps, game_complete(&g) ? "COMPLETE" : reason);
+               steps, crossings,
+               (game_complete(&g) && crossings > 0) ? "COMPLETE" : reason);
 
-    return game_complete(&g) ? 0 : 1;
+    return (game_complete(&g) && crossings > 0) ? 0 : 1;
 }
 
 /* The same autopilot, but in a real window with real rendering. Exists so the
@@ -5465,6 +5568,47 @@ static int reach_selftest(Uint64 seed, int verbose, int *relaxed)
         printf("  seed %.0f: UNWINNABLE - only %d of %d entities reachable\n",
                (double)seed, restored, ENTITY_COUNT);
         fails++;
+    }
+
+    /* THE SECTOR SPLIT. Phase 12 task 9.
+     *
+     * The dream realm has been furnished since slice 3 and empty ever since: every fragment and
+     * Soul still lived in the overworld, so there was no reason to go and --play-test never once
+     * crossed the portal. The split is what turns the biome from scenery into a place.
+     *
+     * Counted on TILE ROWS rather than on regions, deliberately. A region is not confined to one
+     * sector — regions_build partitions through tile_neighbours, which includes the portal edge,
+     * so the region holding the overworld end can bleed across into the dream side. Asking "which
+     * sector is this region in" has no answer on those; asking where an entity actually STANDS
+     * always does. */
+    {
+        int dream_frags = 0, dream_souls = 0;
+        for (i = 0; i < ENTITY_COUNT; i++) {
+            if (g.ents[i].tile < 0)
+                continue;
+            if (!dream_sector(g.ents[i].tile / WORLD_W))
+                continue;
+            if (g.ents[i].is_soul) dream_souls++; else dream_frags++;
+        }
+        if (dream_frags < DREAM_FRAGMENTS) {
+            printf("  seed %.0f: %d fragments in the dream realm, wanted %d\n",
+                   (double)seed, dream_frags, DREAM_FRAGMENTS);
+            fails++;
+        }
+        if (dream_souls < DREAM_SOULS) {
+            printf("  seed %.0f: %d Found Souls in the dream realm, wanted %d\n",
+                   (double)seed, dream_souls, DREAM_SOULS);
+            fails++;
+        }
+        /* Negative control, inline because it is about THIS seed's placement: a split that is
+         * everything or nothing is not a split. All-overworld is the state before this task, and
+         * all-dream would mean the quota had eaten the reachability filter rather than working
+         * inside it — the exact failure the plan warns against. */
+        if (dream_frags + dream_souls == 0 || dream_frags + dream_souls == ENTITY_COUNT) {
+            printf("  seed %.0f: split control FAILED - %d of %d entities in the dream realm\n",
+                   (double)seed, dream_frags + dream_souls, ENTITY_COUNT);
+            fails++;
+        }
     }
 
     if (g.gen_attempts < 0)
