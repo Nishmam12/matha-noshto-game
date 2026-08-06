@@ -11,12 +11,12 @@ sits where it does in the sequence, what "done" means, exactly which functions a
 and how it gets verified. Read the phase file before starting its work — don't re-derive the plan
 from memory each session.
 
-> **Picking this up cold? Phases 00–08 are all DONE, and 07 absorbed most of 09** (09's three
-> remaining items shipped on `feat/phase-09-restoration`, unmerged). The team's real art is in the
-> build. Next is Phase 10 (motion) — but read Phase 07's "still not verified" first: the player is
-> routinely hidden behind trees, and that needs a decision.
+> **Picking this up cold? Phases 00–10 are all DONE.** Phase 12 (dream realm) is also done on its
+> own branch. The team's real art is in the build, world motion is in the build, and the headroom
+> fought for in Phases 03–10 banks into Phase 11. Read Phase 11's file before starting it; it is
+> the last non-negotiable push.
 
-**Deadline: 2026-09-04.** Today: 2026-08-05. **Hard stop on art/backbone work: 2026-08-14** — Phase
+**Deadline: 2026-09-04.** Today: 2026-08-06. **Hard stop on art/backbone work: 2026-08-14** — Phase
 11 (ship-critical) begins on that date regardless of how much of Phases 03–10 is finished, because
 [[Overview]] and [[Handover]] both name the judging order as **finished → under size → fun**, and a
 beautiful, unfinished game scores worse than a plain, complete one.
@@ -36,9 +36,9 @@ beautiful, unfinished game scores worse than a plain, complete one.
 | 06 | [[Phase 06 - Water And Bridges]] | **DONE** — `e42f2f4` (rivers + bridges) + part 2 (waterfalls, `--bridge-test`), +0 bytes | 01, 05 | Needs the island's water body to exist (01) and needs its own reachability extension tested (05's discipline) before rivers can cut through walkable ground |
 | 07 | [[Phase 07 - Asset Seam]] | **DONE** — bake pipeline + 37 real sprites wired, +62,976 bytes | 03 | The bake pipeline's output needs to be *judged* against something, which means the tuning overlay (03) should exist first |
 | 08 | [[Phase 08 - Save Load]] | **DONE** — `feat/phase-08-save-load`, +1,536 bytes | — | Independent of the art work; scheduled here because it's cheap, high-value for a team, and Week 5 work worth pulling forward |
-| 09 | [[Phase 09 - Placeholder Art]] | **MOSTLY ABSORBED BY 07.** Buildings, player and props are real art already. **Three fixes are now DECIDED but NOT BUILT** — prop fade over the player, the bush's magenta base, stone's value ([[Handover]] decisions 40–42). Also remaining: restoration rebuild (ruin→whole) and worn paths | 03, 07 | The actual art pass — the team's handoff arrived early, so 07 did the placement work this phase was holding. **Do the prop fade before [[Phase 12 - Dream Realm]] slice 3**, which fills the screen with tall canopies and makes occlusion worse |
-| 10 | [[Phase 10 - Motion]] | Planned | 09 | Motion on unfinished art just animates the wrong thing; static art should be right first |
-| 12 | [[Phase 12 - Dream Realm]] | **Planned — new direction, 2026-08-05.** Sequenced between 08 and 10; numbered 12 only because renumbering would break every wikilink | 01, 05, 06, 07 | A portal in the `TERRAIN_DARK` region to a second biome in the team's Lumiara style. Resolves three things at once: the dark region had no reason to visit, Kindle had no reason to exist, and 56 delivered magical FX frames had no caller. **Timeboxed into five separately shippable slices** — it does not move the 2026-08-14 hard stop |
+| 09 | [[Phase 09 - Placeholder Art]] | **DONE** — `feat/phase-09-restoration` (`57b7de9`), merged into `main` via Phases 08+09 PR. Restoration rebuild (ruin→whole), worn paths, ground marks — all three remaining items shipped with tests | 03, 07 | The actual art pass — the team's handoff arrived early, so 07 did the placement work this phase was holding. The three items that survived into this phase (rebuild, paths, marks) were the ones only a focused art pass could do |
+| 10 | [[Phase 10 - Motion]] | **DONE** — `feat/phase-10-motion`, +2,048 bytes (781,824), `--motion-test` green | 09 | Motion on unfinished art just animates the wrong thing; static art should be right first |
+| 12 | [[Phase 12 - Dream Realm]] | **DONE** — all 11 tasks, all 5 slices, `feat/phase-12-dream-realm` | 01, 05, 06, 07 | A portal in the `TERRAIN_DARK` region to a second biome in the team's Lumiara style. Resolves three things at once: the dark region had no reason to visit, Kindle had no reason to exist, and 56 delivered magical FX frames had no caller. Timeboxed into five separately shippable slices — it did not move the 2026-08-14 hard stop |
 | 11 | [[Phase 11 - Ship Critical]] | **Begins 2026-08-14 regardless** | — | Audio, font-dependent HUD, save wiring, QA, submission. Not negotiable against the deadline |
 
 ## How to read a phase file

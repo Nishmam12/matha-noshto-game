@@ -7,13 +7,15 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 779,776 bytes (on `feat/phase-08-and-09`, merged from Phases 08 + 09)
-**Current status:** **Phases 00–09 all done.** Phase 08 (save/load) and Phase 09 (restoration
-rebuild + worn paths + ground marks) are merged into `feat/phase-08-and-09` and green across the
-full test suite. Phase 12 (dream realm) remains feature-complete on its own branch.
-**Forward plan:** see [[Phase Roadmap]] — next is Phase 10 (motion), then Phase 11 (ship-critical)
-from 2026-08-14 regardless.
-**Headroom:** 660,224 bytes under the 1,440,000 ship target
+**Current `.exe` size:** 781,824 bytes (on `feat/phase-10-motion`)
+**Current status:** **Phases 00–10 all done.** Phase 10 (motion) is built and verified: tree
+sway, water shimmer + waterfall fall-lines, chimney smoke tied to the restoration-rebuild's 1.0
+threshold, fireflies in restored regions, Found Souls idle-bob — every effect a pure function of
+(tile_hash, clock), so `--motion-test` proves determinism and the full suite proves zero
+simulation impact. Phase 12 (dream realm) remains feature-complete on its own branch.
+**Forward plan:** see [[Phase Roadmap]] — next is **Phase 11 (ship-critical)**, which starts
+2026-08-14 regardless.
+**Headroom:** 658,176 bytes under the 1,440,000 ship target
 
 > **Note on the entry below:** written by a second, separately-run agent (`qwen`, via a tool called
 > `opencode`) that was pointed at this same working directory while Phase 12 slice 5 was mid-flight.
@@ -25,6 +27,18 @@ from 2026-08-14 regardless.
 
 ## Sessions
 
+- [[2026-08-06-session-05]] *(Session 11)* — **Phase 10: motion, done.** `g->clock` was already the
+  render-only animation clock Phase 10's task 1 asked for — no new state. Tree sway at the prop
+  dispatch (one formula, `tree_sway`, covers baked and procedural) plus a per-lobe ripple in
+  `draw_tree`; water shimmer ±5 px from `water_ripple`; waterfall fall-lines as a scrolling dash
+  on Phase 06's terraced faces (`waterfall_dash`, same column math as `iso_tile`); chimney smoke
+  (`draw_smoke`) at 1 puff on the rebuild's 0.7–1.0 window and 2 puffs over the baked sprite at
+  full restoration; fireflies gated by `mote_gate` (grass, sparse, restoration ≥ 0.7, fading in);
+  Found Souls bob via `soul_bob`, fragments deliberately static. `--motion-test`: render
+  determinism at one clock, 23,552 px differ at another, per-helper bounds and the 8-row gate
+  table — all PASS. Full suite re-run green end-to-end; two static frames with the camera parked
+  differ in hash (motion is live without simulation drift). Release 781,824 bytes, +2,048,
+  658,176 headroom. Perf after all effects: render mean 1.123 ms of a 16.67 ms budget.
 - [[2026-08-06-session-04]] *(Session 10)* — **Phase 08: save/load, done.** `SDL_RWFromFile`
   confirmed to link despite `SDL_FILESYSTEM=OFF` (measured with a probe before writing any save
   code). 28-byte flat versioned save — seed + position + abilities + restored/shard masks; load
@@ -214,6 +228,8 @@ from 2026-08-14 regardless.
 | 08-05 | 691,200 | +512 | houses: roof back on the box, windows back on the wall, taller storeys |
 | 08-05 | 691,200 | +0 | `--land-test` and `--fog-test`, both with negative controls |
 | 08-05 | **692,224** | +1,024 | rivers via BFS-to-sea, bridges that clear `solid`, river/plank colours |
+| 08-06 | **779,776** | +5,632 | Phases 08+09 merged onto `main` (PR #1): save/load + restoration rebuild |
+| 08-06 | **781,824** | +2,048 | Phase 10: motion — sway, shimmer, waterfall fall-lines, smoke, fireflies, soul-bob |
 
 Self-test builds (`wayfarer-selftest.exe`) are not deliverables and are deliberately excluded
 from this table and from the budget gate.
@@ -233,10 +249,12 @@ from this table and from the budget gate.
 - The gating-relaxation fallback in world generation has never fired (0 of 50 seeds), so that
   code path is untested against real failure.
 - Physical keyboard input verified via posted window messages, not a real key press.
-- **Nothing in the world moves.** No sway, shimmer, bob or smoke; the player is still a 24×24
-  orange square with no facing or walk cycle. A static isometric scene reads as a diorama.
-- **Buildings do not respond to restoration yet.** The ruin→whole rebuild is designed but not
-  built, and it is what would make the game's own hook literally visible.
+- **Nothing in the world moves.** RESOLVED by Phase 10 — sway, shimmer, waterfall fall-lines,
+  chimney smoke, fireflies, soul-bob, every one a pure `(tile_hash, clock)` render-time function,
+  `--motion-test` green (and the player is no longer a flat orange square — Phase 07's layered
+  character shipped long since).
+- **Buildings do not respond to restoration yet.** RESOLVED by Phase 09 — the ruin→whole rebuild
+  (`bld_phase`, `--rebuild-test`) is in and green on `main`.
 - **Pacing has not been re-measured** and is now further out of date: the tile size has changed
   twice (16→32→24) and the grid is 1.8× larger in tiles than anything measured. The 30–82 s figure
   predates all of it.

@@ -1,13 +1,13 @@
----
+﻿---
 tags: [design, phase, wayfarer]
 phase: 10
-status: planned
-updated: 2026-08-04
+status: done
+updated: 2026-08-06
 ---
 
 # Phase 10 — Motion
 
-**Status:** Planned.
+**Status:** DONE — `feat/phase-10-motion`, +2,048 bytes (781,824), headroom 658,176.
 **Depends on:** [[Phase 09 - Placeholder Art]] (animating unfinished or soon-to-change art wastes
 effort — the things this phase animates should be settled first).
 **Blocks:** Nothing downstream; this is the last phase before the hard stop. If time runs out, this
@@ -24,21 +24,21 @@ so far), so the byte and performance cost of motion is not the concern. Session 
 
 ## Definition of done
 
-- [ ] Tree canopies sway — a small per-instance phase and amplitude driven by `tile_hash` plus a
+- [x] Tree canopies sway — a small per-instance phase and amplitude driven by `tile_hash` plus a
       global time value, so it's deterministic per-tile (consistent with decision 14 in [[Handover]]
       §6: decoration never touches the RNG streams or perturbs generation) rather than genuinely
       random per frame.
-- [ ] Water shimmers, and waterfalls (from [[Phase 06 - Water And Bridges]], if that phase landed)
+- [x] Water shimmers, and waterfalls (from [[Phase 06 - Water And Bridges]], if that phase landed)
       show a falling motion along their fall line.
-- [ ] Restored buildings show chimney smoke, tying into the Phase 09 restoration-rebuild's `1.0`
+- [x] Restored buildings show chimney smoke, tying into the Phase 09 restoration-rebuild's `1.0`
       threshold state.
-- [ ] Firefly-style motes appear in restored regions — a small, deliberately sparse ambient detail
+- [x] Firefly-style motes appear in restored regions — a small, deliberately sparse ambient detail
       distinguishing a restored region from an unrestored one beyond just its colour.
-- [ ] Found Souls idle-bob rather than sitting perfectly static.
-- [ ] None of the above touches simulation state — every motion effect is a pure function of
+- [x] Found Souls idle-bob rather than sitting perfectly static.
+- [x] None of the above touches simulation state — every motion effect is a pure function of
       `(tile_hash, global_time)` or equivalent, read only at render time, so `--move-test`,
       `--play-test`'s determinism, and every other simulation invariant remain provably unaffected.
-- [ ] Perf re-measured via `--frames 400 --perf` after all motion effects land, confirming the
+- [x] Perf re-measured via `--frames 400 --perf` after all motion effects land, confirming the
       ~150× headroom claim still holds rather than assuming it does.
 
 ## Concrete tasks
@@ -90,4 +90,50 @@ screenshots, since motion is definitionally not verifiable from a still frame.
 
 ## Evidence
 
-Not yet started.
+Committed on `feat/phase-10-motion` (from `main` at `b4f2fde`), +2,048 bytes over the merged
+779,776 → **781,824**; 658,176 bytes of headroom under the 1,440,000 ship target.
+
+**Task 1 (clock) was already done.** `Game.clock` (main.c:785) has been advanced by `sim_step`
+since Phase 05 and is render-only by contract — the portal vortex, shard bob and prompt bob
+already read it. No new state field was needed.
+
+**The effects, each a pure `(tile_hash, g->clock)` function:**
+- **Tree sway** — `tree_sway()` at the prop dispatch, so baked *and* procedural trees sway
+  through one formula (whole-tree offset, per-instance phase from hash bits 27-31 — the bits
+  `tile_hash`'s bit map reserved for this — amplitude 1-2 px), plus a per-lobe ripple in
+  `draw_tree` so the canopy breathes instead of sliding. `--motion-test`: max 1 px, deterministic,
+  105/300 samples nonzero.
+- **Water shimmer** — `water_ripple()` in `tile_colour`'s river and ocean branches: ±5 px
+  brightness ripple, deliberately smaller than a ramp step so depth bands never flip. Dream-side
+  void is excluded (its starfield is its motion). `--motion-test`: deterministic, within 5 px,
+  silent in the overlay view, clamped.
+- **Waterfall fall-lines** — Phase 06's waterfalls are height-terraced river tiles; the drop is
+  `iso_tile`'s side face. `waterfall_dash()` walks the same column math as the rasteriser and
+  scrolls a pale 1-px dash down the face. `--motion-test`: paints 1-4 px inside the face, nothing
+  when no face exists, deterministic.
+- **Chimney smoke** — `draw_smoke()`: 1 puff during the rebuild's 0.7-1.0 window, 2 puffs over
+  the baked sprite at full restoration, so the smoke rides the same 1.0 threshold as the
+  restoration-rebuild. `--motion-test`: paints, bounded, deterministic, none for n=0.
+- **Fireflies** — `mote_gate()`: sparse (1 tile in 8), grass-only, never path/footprint/overlay,
+  and only at `restoration >= 0.7` with presence and brightness ramping to full at 1.0.
+  `--motion-test`: 8/8 truth-table rows.
+- **Found Souls idle-bob** — `soul_bob()`: ±2 px about the entity's tile-hash phase; fragments
+  deliberately stay static (they are markers, and a bobbing pick-up reads like it is running).
+  `--motion-test`: max 2 px, deterministic, 201/300 nonzero.
+
+**Verification.** `--motion-test` all green: two renders at one clock are bit-identical, a
+different clock changes 23,552 px (motion is live, not a no-op), and every helper keeps its
+documented bound. Full suite re-run end-to-end on the final tree: rng, iso, font, fog, sprite,
+fade; land 20, village 30, sector 10, portal 30, shard 30, region 30, reach 50, gating 30, bridge
+200, move 20, play 50/50; save 10/10, path 30/30, ground 10/10, rebuild, motion — all PASS, so
+the "none of this touches simulation" DoD item is proven, not asserted. `--frames 400 --perf`
+after all effects: **render mean 1.123 ms, max 1.926 ms** of the 16.67 ms budget (~15× headroom),
+vs 0.749-0.859 ms before Phase 07-09's art — the phase's own "perf is not the concern" claim
+still holds.
+
+**Not verified (stated plainly):** no human has watched it. This agent cannot render or judge
+images, so the "does it read as alive, not mechanical" question — the phase doc's own visual gate
+— is explicitly left for the team, same as Phase 09's pacing check. Programmatic evidence stands
+in: two frames with the camera parked and no input differ only by the clock, and `--motion-test`
+plus `--autoplay` (8 s, clean run, screenshot at `G:\Temp\opencode\t10_autoplay.bmp` for anyone
+who wants to look) exercised real play with all effects live.

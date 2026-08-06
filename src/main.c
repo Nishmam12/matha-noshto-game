@@ -4096,8 +4096,12 @@ enum { PROP_NONE = 0, PROP_TREE, PROP_BUSH, PROP_ROCK, PROP_REED,
        PROP_FLOWER, PROP_CRYSTAL, PROP_STUMP };
 
 /* cx is the tile centre in screen x; by is the ground under it, already lifted
- * by the tile's height, so the tree stands ON the tile rather than through it. */
-static void draw_tree(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
+ * by the tile's height, so the tree stands ON the tile rather than through it.
+ * `t` is the world animation clock (Game.clock) — Phase 10: the per-lobe ripple
+ * is a pure function of (tile_hash, t), so every tree sways in its own phase
+ * and no RNG stream or simulation state is touched. The whole-tree offset is
+ * applied by draw_prop so baked and procedural trees sway alike. */
+static void draw_tree(SDL_Surface *fb, int cx, int by, Uint32 h, float rev, float t)
 {
     const Uint8 (*cp)[3] = canopy_pal[(h >> 13) & 7];
     const Uint8 (*tp)[3] = trunk_pal[(h >> 16) & 3];
@@ -4108,6 +4112,9 @@ static void draw_tree(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
     int cw   = PX(22) + (int)((h >> 20) & 3) * PX(3);  /* canopy width  22..31 @32 */
     int ch   = PX(22) + (int)((h >> 22) & 3) * PX(3);  /* canopy height 22..31 @32 */
     int lean = (int)((h >> 24) & 3) - 1;
+    /* Sway phase from the hash bits the tile hash reserved for exactly this
+     * (see the bit map at tile_hash): per-instance, never per-frame random. */
+    float ph = (float)((h >> 27) & 31) * 0.2f;
     int step = ch / LOBES;
     int top  = by - th - ch;
     int i;
@@ -4127,7 +4134,11 @@ static void draw_tree(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
         int lw = cw * lobe_w[i] / 100;
         int s  = lobe_s[i];
         int ly = top + i * step + (step + PX(4)) / 2;
-        fill_ellipse(fb, cx, ly, lw / 2, (step + PX(5)) / 2,
+        /* Phase 10 ripple: each lobe drifts a hair at its own offset from the
+         * shared phase, so the crown breathes instead of sliding as a block.
+         * One pixel, deliberately — a wobble, not a change of silhouette. */
+        int lx = cx + (int)(SDL_sinf(t * 2.2f + ph + i * 0.55f) * (float)PX(1));
+        fill_ellipse(fb, lx, ly, lw / 2, (step + PX(5)) / 2,
                      fog_lerp(fb, cp[s][0], cp[s][1], cp[s][2], rev));
     }
     /* The few pixels that sell the volume: a highlight on the up-left shoulder,
@@ -4454,8 +4465,37 @@ static float building_restoration(const World *w, const Building *b)
     return w->regions[b->region].restoration;
 }
 
+/* Phase 10 task 4: chimney smoke. A few small puffs that rise, drift sideways
+ * and thin, all a pure function of (building hash, clock) — never the RNG
+ * stream, decision 14. The count against restoration:
+ *
+ *   phase 2 (0.7 <= rst < 1.0)   one lazy puff, the chimney warming up
+ *   phase 3 (rst >= 1.0)         two puffs, a chimney working full-time
+ *
+ * so the smoke rides the same 1.0 threshold as the rest of the restore-rebuild.
+ * n and rst are separate parameters because the caller knows which band it is
+ * in; counting here lets the smoke stand alone under test. */
+static void draw_smoke(SDL_Surface *fb, int cx, int top, Uint32 h, float t,
+                       float rev, int n)
+{
+    int k;
+    float ph = (float)((h >> 8) & 31) * 0.2f + (float)(h & 3);
+
+    for (k = 0; k < n; k++) {
+        float rise;
+        int px, py, s;
+        rise = t * 0.85f + ph + k * 0.47f;
+        rise = rise - (float)(int)rise;     /* frac part -> wraps: a fresh puff each loop */
+        px = cx + (int)(SDL_sinf(t * 2.5f + ph + (float)k * 1.9f) * (float)PX(4));
+        py = top - PX(2) - k * PX(3) - (int)(rise * (float)PX(9));
+        s  = PX(2) + (int)((h >> (5 + k * 3)) & 1);
+        fill_rect(fb, px - s / 2, py - s / 2, s, s,
+                  fog_lerp(fb, 0x86 + (k * 8), 0x82, 0x78, rev * (1.0f - rise * 0.6f)));
+    }
+}
+
 static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
-                          int cam_x, int cam_y, float rev)
+                          int cam_x, int cam_y, float rev, float t)
 {
     Uint32 v = b->variant;
     const Uint8 (*rp)[3] = roof_pal[BV_RMAT(v)];
@@ -4498,7 +4538,13 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
     {
         int art = building_sprite_id(b);
         if (art != ART_NONE && phase >= 3) {
+            const ArtSprite *sp = &ART_SPRITES[art];
             draw_sprite(fb, art, cx, cy, rev);
+            /* Full restoration: smoke over the sprite's roof ridge. The sprite
+             * is the whole building, so the chimney is wherever the art says —
+             * top centre is the least-wrong anchor, with a per-building nudge. */
+            draw_smoke(fb, cx + (int)(v & 3) - 1, cy - sp->anchor_y,
+                       v, t, rev, 2);
             return;
         }
     }
@@ -4568,6 +4614,10 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
                   PX(6), ch + PX(6), fog_lerp(fb, 0x6e, 0x5a, 0x4e, rev));
         fill_rect(fb, cx + ox - PX(4), cy - wall - steps * pitch - ch - PX(2),
                   PX(8), PX(3), fog_lerp(fb, 0x86, 0x72, 0x64, rev));
+        /* One puff while the roof is finishing (rst in 0.7..1.0); the sprite
+         * path above takes over with two puffs at full restoration. */
+        draw_smoke(fb, cx + ox, cy - wall - steps * pitch - ch - PX(2),
+                   v, t, rev, 1);
     }
 
     /* Facade: door and windows on the two faces the camera can see. The wall
@@ -4732,14 +4782,31 @@ static const PropArt prop_art_dream[] = {
     { NULL,              0 }                                         /* PROP_STUMP   */
 };
 
+/* Phase 10 task 2: the whole-tree sway offset, one formula shared by the draw
+ * path and --motion-test so the bound is tested, not copied. Phase from hash
+ * bits 27-31, which tile_hash's bit map reserved for exactly this; amplitude is
+ * per-instance, one or two pixels, so a silhouette never changes shape. */
+static int tree_sway(Uint32 h, float t)
+{
+    float ph = (float)((h >> 27) & 31) * 0.2f;
+    return (int)(SDL_sinf(t * 2.2f + ph) * (float)(PX(1) + ((h >> 26) & 1)));
+}
+
 /* `pbox` is the player's screen box as {x0,y0,x1,y1}, or NULL for callers that have no player to
  * protect. Decision 40: a baked prop standing in front of her is drawn ghosted rather than
  * thinned out of the world or shrunk. The decision is made HERE, where the sprite id is already
  * chosen, so the box measured is the box drawn — computing it at the call site would mean
  * re-deriving the variant pick and risking the two disagreeing. */
 static void draw_prop(SDL_Surface *fb, int kind, int cx, int by, Uint32 h, float rev,
-                      int band, int pband, const int *pbox, int dream)
+                      float t, int band, int pband, const int *pbox, int dream)
 {
+    /* Phase 10 tree sway, at the one place both art paths pass through. The
+     * whole tree (shadow, trunk, crown) shifts a pixel or two about its own
+     * hash-derived phase; draw_tree's ripple then moves the lobes within that.
+     * Applied only to trees — a bush rocking like a tree reads wrong, and the
+     * DoD asks for canopies. */
+    if (kind == PROP_TREE)
+        cx += tree_sway(h, t);
     if (kind > PROP_NONE && kind < (int)(sizeof prop_art / sizeof *prop_art)) {
         /* One line, and the only place in the renderer that knows a prop has two palettes. The
          * caller passes the sector rather than the tile, because render's prop loop already has
@@ -4783,7 +4850,7 @@ static void draw_prop(SDL_Surface *fb, int kind, int cx, int by, Uint32 h, float
     (void)band; (void)pband;
 
     switch (kind) {
-    case PROP_TREE:    draw_tree(fb, cx, by, h, rev);    break;
+    case PROP_TREE:    draw_tree(fb, cx, by, h, rev, t); break;
     case PROP_BUSH:    draw_bush(fb, cx, by, h, rev);    break;
     case PROP_ROCK:    draw_rock(fb, cx, by, h, rev);    break;
     case PROP_REED:    draw_reed(fb, cx, by, h, rev);    break;
@@ -4809,6 +4876,60 @@ static float tile_reveal(const Game *g, int tx, int ty, int overlay)
     restored = (rg == REGION_NONE) ? 0.0f : g->w.regions[rg].restoration;
     rev = g->w.reveal[ty][tx];
     return restored > rev ? restored : rev;
+}
+
+/* Phase 10 task 3a: water shimmer. A tiny per-tile brightness ripple over the
+ * flat ramp colours — pure (tile_hash, clock), never the RNG. The amplitude is
+ * deliberately smaller than one ramp step, so the water glints without ever
+ * flipping a tile between depth bands (that would read as the sea breathing,
+ * not as light on it). Off in the region overlay view, which is a debug tool
+ * rather than a scene. */
+static void water_ripple(const Game *g, int tx, int ty, int overlay,
+                         int *cr, int *cg, int *cb)
+{
+    Uint32 hs;
+    int sh, v;
+
+    if (overlay)
+        return;
+    hs = tile_hash(g->seed, tx, ty);
+    sh = (int)(SDL_sinf(g->clock * 3.0f + (float)((hs >> 4) & 15) * 0.4f)
+               * (float)PX(6));
+    if (sh < 0) {
+        if (*cr > -sh) *cr += sh; else *cr = 0;
+        if (*cg > -sh) *cg += sh; else *cg = 0;
+        if (*cb > -sh) *cb += sh; else *cb = 0;
+    } else {
+        v = *cr + sh; *cr = v > 255 ? 255 : v;
+        v = *cg + sh; *cg = v > 255 ? 255 : v;
+        v = *cb + sh; *cb = v > 255 ? 255 : v;
+    }
+}
+
+/* Phase 10 task 3b: the waterfall fall-line. Phase 06's waterfalls are not a
+ * named subsystem — they are height-terraced river tiles, and the drop is the
+ * side face iso_tile paints on this tile's down-left (hl) and down-right (hr)
+ * edges. This walks that same face, using the same column math so the streak
+ * lands on the painted strip rather than beside it, and scrolls a short pale
+ * dash down it. The wrap is instant, which is exactly how a 3 px fall of
+ * water reads. Pure (tile_hash, clock); no simulation state. */
+static void waterfall_dash(SDL_Surface *fb, int ax, int ay, int h, Uint32 hash,
+                           float t, float rev, int hl, int hr)
+{
+    if (hl > 0) {
+        int c = 4 + (int)((hash >> 7) & 15);
+        int top = ay - h + ((ISO_HW - c) >> 1) + c;
+        int off = (int)(t * 30.0f + (float)((hash >> 9) & 31) * 7.0f) % hl;
+        fill_rect(fb, ax - ISO_HW + c, top + off, 1, hl - off,
+                  fog_lerp(fb, 0xd8, 0xee, 0xe8, rev));
+    }
+    if (hr > 0) {
+        int c = 4 + (int)((hash >> 11) & 15);
+        int top = ay - h + (c >> 1) + (ISO_HW - c);
+        int off = (int)(t * 30.0f + (float)((hash >> 13) & 31) * 7.0f) % hr;
+        fill_rect(fb, ax + c, top + off, 1, hr - off,
+                  fog_lerp(fb, 0xd8, 0xee, 0xe8, rev));
+    }
 }
 
 /* Ground colour before fog, as flat r/g/b. */
@@ -4846,6 +4967,7 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
         /* Brighter and greener than the sea ramp, so a channel running through
          * the interior does not read as an inlet of the ocean. */
         *cr = 0x3e; *cg = 0x84; *cb = 0x8c;
+        water_ripple(g, tx, ty, overlay, cr, cg, cb);
     } else if (g->w.surf[ty][tx] == SURF_OCEAN) {
         /* Water ramp, design/Art Bible.md §4, picked by depth. A single flat
          * blue reads as painted paper; stepping the ramp with the sea floor
@@ -4859,6 +4981,10 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
         if (d < 0) d = 0;
         if (d > 3) d = 3;
         *cr = ramp[d][0]; *cg = ramp[d][1]; *cb = ramp[d][2];
+        /* Shimmer only on real water: the dream side's void has its own
+         * starfield, and glinting stars would fight the point-light rule. */
+        if (!dream_palette(ty))
+            water_ripple(g, tx, ty, overlay, cr, cg, cb);
     } else if (g->w.solid[ty][tx]) {
         /* stone_ramp is at file scope so --fog-test can assert where it sits in the value
          * hierarchy — see decision 42 and the note on the table itself. */
@@ -4883,6 +5009,23 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
             *cr = *cr * 3 / 4; *cg = *cg * 3 / 4; *cb = *cb * 3 / 4;
         }
     }
+}
+
+/* Phase 10 task 5: the firefly presence gate, one expression shared by the
+ * render path and --motion-test. Sparse by hash roll (one tile in eight),
+ * grass-only, never on a path or footprint, never in the overlay view, and
+ * only once the region is at least 70% restored. */
+static int mote_gate(Uint32 hash, float rst, int overlay, int terr, int path, int bld)
+{
+    return !overlay && rst >= 0.7f && terr == TERRAIN_NORMAL && !path && !bld
+           && ((hash >> 22) & 7) == 0;
+}
+
+/* Phase 10 task 6: the Found Soul idle bob, a signed vertical offset. Shared
+ * with --motion-test so its bound is tested, not assumed. */
+static int soul_bob(Uint32 h, float t)
+{
+    return -(int)(SDL_sinf(t * 3.0f + (float)((h >> 8) & 31) * 0.2f) * (float)PX(2));
 }
 
 static void render(SDL_Surface *fb, Game *g, int overlay)
@@ -5060,7 +5203,42 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                     tile_pebbles(fb, ax, ay, h, hash,
                                  fog_lerp(fb, 0x8e, 0x7c, 0x58, rev));
                 }
+                /* Phase 10 task 5: fireflies. Deliberately sparse (one tile in
+                 * eight), grass-only, and only in regions at least 70% restored
+                 * — presence and brightness both fade in with the last stretch
+                 * of restoration, so a region's "alive" state is a ramp, not a
+                 * switch. Altitude bobs from (hash, clock); the warm mote
+                 * colour is dream-shifted in the dream realm like every other
+                 * mark. Inside the suppression block so the mark-negative
+                 * tests never see it. */
+                {
+                    Uint8 frg = g->w.region[ty][tx];
+                    float frst = (frg == REGION_NONE) ? 0.0f
+                                                      : g->w.regions[frg].restoration;
+                    if (mote_gate(hash, frst, overlay, terr,
+                                  g->w.path[ty][tx], g->w.bld_at[ty][tx])) {
+                        float in = (frst - 0.7f) / 0.3f;
+                        float mo = g->clock * 2.0f + (float)((hash >> 24) & 15) * 0.4f;
+                        int fw = PX(6 + (int)((hash >> 4) & 15));
+                        int fh = PX(6 + (int)((hash >> 8) & 15));
+                        int fx = ax + fw - fh;
+                        int fy = ay + ((fw + fh) >> 1) - h - PX(3)
+                                  - (int)(SDL_sinf(mo) * (float)PX(4) * in);
+                        int mr2 = 0xe8, mg2 = 0xdc, mb2 = 0x74;
+                        if (dream_palette(ty))
+                            dream_shift(mr2, mg2, mb2, &mr2, &mg2, &mb2);
+                        fill_rect(fb, fx, fy, PX(2), PX(2),
+                                  fog_lerp(fb, mr2, mg2, mb2,
+                                           rev * (0.35f + 0.65f * in)));
+                    }
+                }
             }
+            /* Phase 10 task 3b: the fall-line. A river tile whose down-face is
+             * exposed (hl/hr > 0) IS the waterfall — the dash rides that face.
+             * Runs even where marks are suppressed: it is motion, not a mark,
+             * and no test renders with a clock anyway. */
+            if (!overlay && g->w.surf[ty][tx] == SURF_RIVER && (hl || hr))
+                waterfall_dash(fb, ax, ay, h, hash, g->clock, rev, hl, hr);
         }
 
         /* Second sub-pass over the SAME band: props. It has to be separate from
@@ -5086,7 +5264,8 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                     if (tx == b->x + b->w - 1 && ty == b->y + b->h - 1) {
                         float brev = tile_reveal(g, tx, ty, overlay);
                         if (overlay || brev >= 0.06f)
-                            draw_building(fb, &g->w, b, g->cam_x, g->cam_y, brev);
+                            draw_building(fb, &g->w, b, g->cam_x, g->cam_y, brev,
+                                          g->clock);
                     }
                     continue;
                 }
@@ -5100,7 +5279,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             /* The tile centre projects to (ax, ay + ISO_HH); lifting by the
              * tile's height puts the prop's feet on the surface. */
             by = ay + ISO_HH - g->w.height[ty][tx];
-            draw_prop(fb, kind, ax, by, hash, rev, band, pband, pbox,
+            draw_prop(fb, kind, ax, by, hash, rev, g->clock, band, pband, pbox,
                       dream_palette(ty));
         }
 
@@ -5231,6 +5410,12 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
         world_to_iso((float)(ex * TILE + TILE / 2), (float)(ey * TILE + TILE / 2),
                      &sx, &sy);
         sy -= height_at(&g->w, ex, ey);
+        /* Phase 10 task 6: Found Souls idle-bob. A two-pixel sine about the
+         * entity's own tile hash phase, exactly the shard-bob pattern — spirits
+         * drift, fragments stay marker-still (they are scenery, and a bobbing
+         * pick-up reads like it is trying to run). */
+        if (g->ents[i].is_soul)
+            sy += soul_bob(tile_hash(g->seed, ex, ey), g->clock);
         fill_rect(fb, sx - s / 2 - g->cam_x, sy - s / 2 - g->cam_y, s, s,
                   SDL_MapRGB(fb->format, (Uint8)cr, (Uint8)cg, (Uint8)cb));
 
@@ -9334,6 +9519,275 @@ static int ground_selftest(Uint64 base)
     return fails;
 }
 
+/* Phase 10: motion. Every effect is a pure function of (hash, clock), so the
+ * test is: (1) two renders at ONE clock are bit-identical, (2) a different
+ * clock changes the image — motion is live, not a no-op, (3) each pure helper
+ * keeps its documented bound and gate. The world is ground-test's: sea
+ * everywhere, revealed, no regions — so the ocean shimmer is guaranteed in
+ * every frame, and nothing else (smoke, motes, souls) can intrude on the
+ * render checks; those are gated at the helper level below. */
+static int motion_selftest(Uint64 base)
+{
+    enum { MW = 320, MH = 240 };
+    int fails = 0;
+    Game g;
+    SDL_Surface *sf;
+    Uint32 *a;
+    Uint64 seed = base;
+    int x, y, i, diff;
+
+    sf = SDL_CreateRGBSurfaceWithFormat(0, MW, MH, 32, SDL_PIXELFORMAT_RGB888);
+    if (!sf) {
+        printf("FAIL  could not create the motion test surface\n");
+        return 1;
+    }
+    a = (Uint32 *)SDL_malloc((size_t)MW * MH * sizeof(Uint32));
+    if (!a) {
+        printf("FAIL  out of memory\n");
+        SDL_FreeSurface(sf);
+        return 1;
+    }
+
+    SDL_zero(g);
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            g.w.solid[y][x] = 1;
+            g.w.surf[y][x]  = SURF_OCEAN;
+            g.w.region[y][x] = REGION_NONE;
+            g.w.reveal[y][x] = 1.0f;
+        }
+    g.seed = seed;
+    g.cam_x = ISO_OX - MW / 2;
+    g.cam_y = ISO_OY - MH / 2;
+    g.p.x = (float)(WORLD_W - 2) * TILE;
+    g.p.y = (float)(WORLD_H - 2) * TILE;
+
+    /* (1) determinism: two frames at one clock are bit-identical. */
+    g.clock = 0.5f;
+    render(sf, &g, 0);
+    SDL_memcpy(a, sf->pixels, (size_t)MW * MH * 4);
+    render(sf, &g, 0);
+    diff = 0;
+    for (x = 0; x < MW * MH; x++)
+        if (a[x] != ((Uint32 *)sf->pixels)[x]) diff++;
+    if (diff) {
+        printf("FAIL  render at one clock is not deterministic: %d px differ\n", diff);
+        fails++;
+    } else {
+        printf("render determinism: PASS  two frames at clock 0.5 identical\n");
+    }
+
+    /* (2) liveliness: a different clock changes the image. The all-sea world
+     * guarantees the ocean shimmer is the thing that differs. */
+    g.clock = 2.2f;
+    render(sf, &g, 0);
+    diff = 0;
+    for (x = 0; x < MW * MH; x++)
+        if (a[x] != ((Uint32 *)sf->pixels)[x]) diff++;
+    if (diff == 0) {
+        printf("FAIL  nothing moved between clock 0.5 and 2.2\n");
+        fails++;
+    } else {
+        printf("motion live: PASS  %d px differ when the clock changes\n", diff);
+    }
+
+    /* (3) water_ripple: deterministic, within its amplitude, silent in the
+     * overlay view, and clamped to valid channels. */
+    {
+        int r0 = 100, g0 = 100, b0 = 100;
+        int r1 = r0, g1 = g0, b1 = b0;
+        int r2 = r0, g2 = g0, b2 = b0;
+        g.clock = 1.234f;
+        water_ripple(&g, 3, 3, 0, &r1, &g1, &b1);
+        r2 = r0; g2 = g0; b2 = b0;
+        water_ripple(&g, 3, 3, 0, &r2, &g2, &b2);
+        if (r1 != r2 || g1 != g2 || b1 != b2) {
+            printf("FAIL  water ripple not deterministic\n");
+            fails++;
+        } else if (r1 < r0 - PX(6) || r1 > r0 + PX(6)
+                || g1 < g0 - PX(6) || g1 > g0 + PX(6)
+                || b1 < b0 - PX(6) || b1 > b0 + PX(6)) {
+            printf("FAIL  water ripple exceeded its %d-px amplitude\n", PX(6));
+            fails++;
+        } else {
+            printf("water ripple: PASS  deterministic, within %d px\n", PX(6));
+        }
+        r2 = r0; g2 = g0; b2 = b0;
+        water_ripple(&g, 3, 3, 1, &r2, &g2, &b2);
+        if (r2 != r0 || g2 != g0 || b2 != b0) {
+            printf("FAIL  water ripple leaked into the overlay view\n");
+            fails++;
+        }
+        r2 = 2; g2 = 2; b2 = 2;
+        water_ripple(&g, 3, 3, 0, &r2, &g2, &b2);
+        if (r2 < 0 || r2 > 255 || g2 < 0 || g2 > 255 || b2 < 0 || b2 > 255) {
+            printf("FAIL  water ripple left an out-of-range channel\n");
+            fails++;
+        }
+    }
+
+    /* (4) tree_sway: bounded by its two-pixel ceiling, deterministic, and
+     * actually nonzero somewhere (motion, not a no-op). */
+    {
+        int worst = 0, nz = 0, s1, s2;
+        for (i = 0; i < 300; i++) {
+            int s = tree_sway((Uint32)((Uint64)i * 2654435761u) ^ (Uint32)seed,
+                              (float)i * 0.31f);
+            if (s < 0) s = -s;
+            if (s > worst) worst = s;
+            if (s) nz++;
+        }
+        if (worst > PX(2)) {
+            printf("FAIL  tree sway exceeded %d px\n", PX(2));
+            fails++;
+        }
+        s1 = tree_sway(0x1234u, 1.7f);
+        s2 = tree_sway(0x1234u, 1.7f);
+        if (s1 != s2) {
+            printf("FAIL  tree sway not deterministic\n");
+            fails++;
+        }
+        if (!nz) {
+            printf("FAIL  tree sway is always zero\n");
+            fails++;
+        } else if (worst <= PX(2)) {
+            printf("tree sway: PASS  max %d px, deterministic, %d/%d nonzero\n",
+                   worst, nz, 300);
+        }
+    }
+
+    /* (5) soul_bob: bounded, deterministic, nonzero somewhere. */
+    {
+        int worst = 0, nz = 0, s1, s2;
+        for (i = 0; i < 300; i++) {
+            int s = soul_bob((Uint32)((Uint64)i * 2654435761u) ^ (Uint32)seed,
+                             (float)i * 0.19f);
+            if (s < 0) s = -s;
+            if (s > worst) worst = s;
+            if (s) nz++;
+        }
+        if (worst > PX(2)) {
+            printf("FAIL  soul bob exceeded %d px\n", PX(2));
+            fails++;
+        }
+        s1 = soul_bob(0x1234u, 1.7f);
+        s2 = soul_bob(0x1234u, 1.7f);
+        if (s1 != s2) {
+            printf("FAIL  soul bob not deterministic\n");
+            fails++;
+        }
+        if (!nz) {
+            printf("FAIL  soul bob is always zero\n");
+            fails++;
+        } else if (worst <= PX(2)) {
+            printf("soul bob: PASS  max %d px, deterministic, %d/%d nonzero\n",
+                   worst, nz, 300);
+        }
+    }
+
+    /* (6) mote_gate: the full truth table. Two hashes are picked so one rolls
+     * the sparse 1-in-8 bit ON and the other OFF. */
+    {
+        Uint32 ha = 1, hb = 1;
+        int ok = 1;
+        while (((ha >> 22) & 7) != 0) ha++;
+        while (((hb >> 22) & 7) == 0) hb++;
+        if (mote_gate(ha, 1.0f, 0, TERRAIN_NORMAL, 0, 0) != 1) ok = 0;
+        if (mote_gate(ha, 0.69f, 0, TERRAIN_NORMAL, 0, 0) != 0) ok = 0;
+        if (mote_gate(ha, 0.7f, 0, TERRAIN_NORMAL, 0, 0) != 1) ok = 0;
+        if (mote_gate(ha, 1.0f, 0, TERRAIN_DARK, 0, 0) != 0) ok = 0;
+        if (mote_gate(ha, 1.0f, 0, TERRAIN_NORMAL, 1, 0) != 0) ok = 0;
+        if (mote_gate(ha, 1.0f, 0, TERRAIN_NORMAL, 0, 1) != 0) ok = 0;
+        if (mote_gate(ha, 1.0f, 1, TERRAIN_NORMAL, 0, 0) != 0) ok = 0;
+        if (mote_gate(hb, 1.0f, 0, TERRAIN_NORMAL, 0, 0) != 0) ok = 0;
+        if (!ok) {
+            printf("FAIL  firefly gate truth table\n");
+            fails++;
+        } else {
+            printf("firefly gate: PASS  8/8 rows (threshold, terrain, path, build, overlay, sparse)\n");
+        }
+    }
+
+    /* (7) waterfall_dash: paints inside its face strip and only when a face
+     * exists, and repeats identically at a fixed clock. */
+    {
+        SDL_Surface *fs;
+        Uint32 *px;
+        int cnt1, cnt2;
+        fs = SDL_CreateRGBSurfaceWithFormat(0, 64, 64, 32, SDL_PIXELFORMAT_RGB888);
+        if (!fs) {
+            printf("FAIL  could not create the dash surface\n");
+            fails++;
+        } else {
+            px = (Uint32 *)fs->pixels;
+            SDL_FillRect(fs, NULL, 0);
+            waterfall_dash(fs, 32, 32, 0, 0xABCDEF01u, 1.0f, 1.0f, 4, 0);
+            cnt1 = 0;
+            for (x = 0; x < 64 * 64; x++)
+                if (px[x]) cnt1++;
+            SDL_FillRect(fs, NULL, 0);
+            waterfall_dash(fs, 32, 32, 0, 0xABCDEF01u, 1.0f, 1.0f, 4, 0);
+            cnt2 = 0;
+            for (x = 0; x < 64 * 64; x++)
+                if (px[x]) cnt2++;
+            SDL_FillRect(fs, NULL, 0);
+            waterfall_dash(fs, 32, 32, 0, 0xABCDEF01u, 1.0f, 1.0f, 0, 0);
+            for (x = 0; x < 64 * 64; x++)
+                if (px[x]) cnt1 = -1;
+            if (cnt1 < 1 || cnt1 > 4 || cnt2 != cnt1 || cnt1 == -1) {
+                printf("FAIL  waterfall dash: paints %d then %d px, face-off paints %s\n",
+                       cnt1, cnt2, cnt1 == -1 ? "too" : "nothing");
+                fails++;
+            } else {
+                printf("waterfall dash: PASS  %d px on a 4-px face, deterministic\n", cnt1);
+            }
+            SDL_FreeSurface(fs);
+        }
+    }
+
+    /* (8) draw_smoke: paints at least one pixel per puff, inside a sane
+     * footprint, deterministically, and nothing for n = 0. */
+    {
+        SDL_Surface *fs;
+        Uint32 *px;
+        int cnt1, cnt2;
+        fs = SDL_CreateRGBSurfaceWithFormat(0, 64, 64, 32, SDL_PIXELFORMAT_RGB888);
+        if (!fs) {
+            printf("FAIL  could not create the smoke surface\n");
+            fails++;
+        } else {
+            px = (Uint32 *)fs->pixels;
+            SDL_FillRect(fs, NULL, 0);
+            draw_smoke(fs, 32, 40, 0x12345678u, 1.5f, 1.0f, 2);
+            cnt1 = 0;
+            for (x = 0; x < 64 * 64; x++)
+                if (px[x]) cnt1++;
+            SDL_FillRect(fs, NULL, 0);
+            draw_smoke(fs, 32, 40, 0x12345678u, 1.5f, 1.0f, 2);
+            cnt2 = 0;
+            for (x = 0; x < 64 * 64; x++)
+                if (px[x]) cnt2++;
+            SDL_FillRect(fs, NULL, 0);
+            draw_smoke(fs, 32, 40, 0x12345678u, 1.5f, 1.0f, 0);
+            for (x = 0; x < 64 * 64; x++)
+                if (px[x]) cnt1 = -1;
+            if (cnt1 < 1 || cnt1 > 2 * PX(4) * PX(4) || cnt2 != cnt1 || cnt1 == -1) {
+                printf("FAIL  smoke: %d px for n=2, %d px repeat, %s for n=0\n",
+                       cnt1, cnt2, cnt1 == -1 ? "painted" : "clean");
+                fails++;
+            } else {
+                printf("smoke: PASS  %d px for two puffs, deterministic, none for n=0\n", cnt1);
+            }
+            SDL_FreeSurface(fs);
+        }
+    }
+
+    SDL_FreeSurface(sf);
+    SDL_free(a);
+    printf("motion: %s (%d fails)\n", fails ? "FAIL" : "PASS", fails);
+    return fails;
+}
+
 /* Runs audio with no window for `ms`, then reports whether the callback met
  * its deadline and dumps raw samples for independent offline analysis. */
 static int audio_selftest(int argc, char **argv, int ms)
@@ -9814,6 +10268,8 @@ int main(int argc, char **argv)
         }
         if (arg_flag(argc, argv, "--ground-test"))
             return ground_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
+        if (arg_flag(argc, argv, "--motion-test"))
+            return motion_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
         if (arg_flag(argc, argv, "--sector-test"))
             return sector_selftest((Uint64)arg_int(argc, argv, "--seed", 1),
                                    arg_int(argc, argv, "--seeds", 10));

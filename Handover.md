@@ -26,6 +26,12 @@ Running log: [[INDEX]]
 |---|---|---|---|---|---|
 | qwen | Phase 09: restoration rebuild + worn paths + ground marks | `feat/phase-09-restoration` | **DONE** — all three DoD items committed | 2026-08-06 | Rebuild → baked at 1.0; RNG-free paths; hash-gated marks |
 | qwen | Phase 08: save/load | `feat/phase-08-save-load` | **DONE** — committed | 2026-08-06 | 28-byte versioned save; regen-from-seed + deltas; `--save-test` with 5 negative controls; +1,536 bytes |
+| opencode | Phase 10: motion | `feat/phase-10-motion` | **DONE** — all 7 DoD items, committed | 2026-08-06 | sway/shimmer/fall-lines/smoke/fireflies/soul-bob; `--motion-test` 8 checks green; full suite green; +2,048 bytes → 781,824 |
+
+**Resolved 2026-08-06, later still.** Phases 08 and 09 merged into `feat/phase-08-and-09`, PR #1
+merged into `main` (`b4f2fde`). Phase 10 (motion) is DONE on `feat/phase-10-motion` from that
+`main` — PR pending. Phase 12 remains feature-complete on its own branch. Next real work:
+[[Phase 11 - Ship Critical]], which starts 2026-08-14 regardless.
 
 **Resolved 2026-08-06, same day.** `fx_well` is baked, slice 5 (dream shards + the Dream Well) is
 finished and committed on `feat/phase-12-dream-realm` — the branch qwen's row names does not
@@ -50,12 +56,12 @@ worn paths, ground marks) are DONE there. Phase 08 (save/load) is DONE on `feat/
 
 | | |
 |---|---|
-| **State** | 774,144 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
-| **Branch** | **`feat/phase-12-dream-realm`**, pushed through `367a4f9` (this handover's own commit may be one ahead — check `git log`). `main` is at `ae788b4`. Working tree clean |
+| **State** | 781,824 bytes, builds clean, full suite green, plays to completion on 50/50 seeds. Phases 00–10 done |
+| **Branch** | **`feat/phase-10-motion`** (Phase 10, PR pending) — `main` is at `b4f2fde` (Phases 08+09 merged via PR #1). Working tree clean |
 | **Deadline** | 2026-09-04. **Hard stop on art/backbone work 2026-08-14** — eight days from now |
-| **Do first** | **Phase 12 is DONE — all 11 tasks, all 5 slices.** Next real work is [[Phase 08 - Save Load]], or Phase 09's three leftover items (restoration rebuild, worn paths, ground marks) if another agent hasn't already started them — check the Agent Log above first |
-| **Then** | Phase 08 → 10 (motion) → **11 is non-negotiable** |
-| **Biggest risk** | **Audio does not exist at all.** A softsynth from zero, plus save/load and a HUD, all still ahead |
+| **Do first** | **Phase 10 is DONE — motion is in the world.** Phases 00–10 all done on `main` or its merge target. Next real work is [[Phase 11 - Ship Critical]] — it starts 2026-08-14 regardless, and nothing after this phase depends on motion |
+| **Then** | Phase 11 (ship-critical, non-negotiable), then the remaining ship items the QA checklist demands |
+| **Biggest risk** | **Audio does not exist at all.** A softsynth from zero, plus a HUD, still ahead — Phase 11's scope |
 
 > **THE PROJECT CHANGED DIRECTION ON 2026-08-05, AND THAT WHOLE PHASE IS NOW DONE.** A portal in the
 > `TERRAIN_DARK` region leads to a second biome — the team's "Lumiara / Dream Realm" concept art.
