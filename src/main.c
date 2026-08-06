@@ -5812,6 +5812,44 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                     }
                     continue;
                 }
+                /* Phase 13 Slice 2: castle courtyard walls + rubble. Handcrafted
+                 * reserve at NE, contents hash-gated so decoration survives the
+                 * seed without touching the terrain stream. */
+                if (tx >= CASTLE_RESERVE_X0 && tx < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W &&
+                    ty >= CASTLE_RESERVE_Y0 && ty < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H) {
+                    int is_border = (tx == CASTLE_RESERVE_X0 || tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W - 1 ||
+                                     ty == CASTLE_RESERVE_Y0 || ty == CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H - 1);
+                    int ax2 = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
+                    int ay2 = band * ISO_HH + ISO_OY - g->cam_y;
+                    int by2 = ay2 + ISO_HH - g->w.height[ty][tx];
+                    float rev2 = tile_reveal(g, tx, ty, overlay);
+                    if (overlay || rev2 >= 0.06f) {
+                        if (is_border) {
+                            int id = ART_CASTLE_WALL_STRAIGHT;
+                            if ((tx == CASTLE_RESERVE_X0 && ty == CASTLE_RESERVE_Y0) ||
+                                (tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W - 1 && ty == CASTLE_RESERVE_Y0) ||
+                                (tx == CASTLE_RESERVE_X0 && ty == CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H - 1) ||
+                                (tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W - 1 && ty == CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H - 1))
+                                id = ART_CASTLE_WALL_CORNER;
+                            else if (tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W / 2 && ty == CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H - 1)
+                                id = ART_CASTLE_GATEHOUSE;
+                            else if ((tx == CASTLE_RESERVE_X0 || tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W - 1) && ((ty - CASTLE_RESERVE_Y0) % 6 == 2))
+                                id = ART_CASTLE_TOWER;
+                            draw_sprite(fb, id, ax2, by2, rev2);
+                        } else {
+                            Uint32 h2 = tile_hash(g->seed, tx, ty);
+                            int id = -1;
+                            if ((h2 & 7) == 0) {
+                                if (((h2 >> 4) & 3) == 0) id = ART_CASTLE_STATUE_FALLEN;
+                                else if (((h2 >> 5) & 7) == 0) id = ART_CASTLE_FOUNTAIN;
+                                else id = ((h2 & 8) ? ART_CASTLE_RUBBLE_01 : ART_CASTLE_RUBBLE_02);
+                            }
+                            if (id >= 0)
+                                draw_sprite(fb, id, ax2, by2, rev2);
+                        }
+                    }
+                    continue;
+                }
             }
             kind = prop_at(&g->w, g->seed, tx, ty, &hash);
             if (kind == PROP_NONE)
