@@ -5825,21 +5825,31 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                     float rev2 = tile_reveal(g, tx, ty, overlay);
                     if (overlay || rev2 >= 0.06f) {
                         if (is_border) {
-                            int id = ART_CASTLE_WALL_STRAIGHT;
-                            if ((tx == CASTLE_RESERVE_X0 && ty == CASTLE_RESERVE_Y0) ||
-                                (tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W - 1 && ty == CASTLE_RESERVE_Y0) ||
-                                (tx == CASTLE_RESERVE_X0 && ty == CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H - 1) ||
-                                (tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W - 1 && ty == CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H - 1))
-                                id = ART_CASTLE_WALL_CORNER;
-                            else if (tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W / 2 && ty == CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H - 1)
-                                id = ART_CASTLE_GATEHOUSE;
-                            else if ((tx == CASTLE_RESERVE_X0 || tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W - 1) && ((ty - CASTLE_RESERVE_Y0) % 6 == 2))
-                                id = ART_CASTLE_TOWER;
-                            draw_sprite(fb, id, ax2, by2, rev2);
+                            Uint32 hb = tile_hash(g->seed, tx, ty);
+                            if ((hb & 7) == 7) {
+                                /* ruined gap - leave open or scattered rubble */
+                                if ((hb & 8) && ((hb >> 3) & 3) == 0)
+                                    draw_sprite(fb, ART_CASTLE_RUBBLE_01, ax2, by2, rev2);
+                            } else {
+                                int id = ART_CASTLE_WALL_STRAIGHT;
+                                if ((tx == CASTLE_RESERVE_X0 && ty == CASTLE_RESERVE_Y0) ||
+                                    (tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W - 1 && ty == CASTLE_RESERVE_Y0) ||
+                                    (tx == CASTLE_RESERVE_X0 && ty == CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H - 1) ||
+                                    (tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W - 1 && ty == CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H - 1))
+                                    id = ART_CASTLE_WALL_CORNER;
+                                else if (tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W / 2 && ty == CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H - 1)
+                                    id = ART_CASTLE_GATEHOUSE;
+                                else if ((tx == CASTLE_RESERVE_X0 || tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W - 1) && ((ty - CASTLE_RESERVE_Y0) % 6 == 2))
+                                    id = ART_CASTLE_TOWER;
+                                draw_sprite(fb, id, ax2, by2, rev2);
+                            }
                         } else {
                             Uint32 h2 = tile_hash(g->seed, tx, ty);
                             int id = -1;
-                            if ((h2 & 7) == 0) {
+                            if (tx == CASTLE_RESERVE_X0 + CASTLE_RESERVE_W / 2 &&
+                                ty == CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H / 2) {
+                                id = ART_CASTLE_TOWER; /* keep at centre */
+                            } else if ((h2 & 15) == 0) {
                                 if (((h2 >> 4) & 3) == 0) id = ART_CASTLE_STATUE_FALLEN;
                                 else if (((h2 >> 5) & 7) == 0) id = ART_CASTLE_FOUNTAIN;
                                 else id = ((h2 & 8) ? ART_CASTLE_RUBBLE_01 : ART_CASTLE_RUBBLE_02);
