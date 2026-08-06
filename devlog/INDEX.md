@@ -7,7 +7,7 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 786,432 bytes (on `feat/phase-11-ship`)
+**Current `.exe` size:** 786,432 bytes (on `feat/phase-11-ship-complete`)
 **Current status:** **Phases 00–12 all done.** Phase 11 (ship-critical) is built and verified:
 5-layer procedural softsynth (Base/Strings/Pad/Bells/Voice of Souls, deterministic, measured
 0.325 ms worst case vs a 21.333 ms deadline), chime/shard/portal SFX, and the HUD on the Phase 03

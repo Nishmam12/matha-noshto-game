@@ -10,7 +10,7 @@ Phase 11 implements the ship-critical audio engine (a procedural 5-layer softsyn
 ### 1. Unified Interaction System & Shard Fix (`src/main.c`)
 - **Extracted `try_interact()`**:
   - Resolved an interaction regression where dream shards were uncollectable after the E-key dispatch restructure.
-  - Unified E-key precedence: Portal transition → Dream Shard pickup → Found Soul / Fragment restoration.
+  - Unified E-key precedence: Portal transition → Found Soul / Fragment restoration → Dream Shard pickup (implemented as `try_interact()` at `src/main.c:3650`, returns 1/2/3/0).
   - Added automated test assertion coverage to ensure dream shard collection remains operational under all game states.
 
 ### 2. 5-Layer Softsynth & Multi-SFX Audio Engine (`src/main.c`)
