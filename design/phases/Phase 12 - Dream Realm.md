@@ -351,6 +351,102 @@ spans two landmasses:
   `TERRAIN_DARK` region — regions do not exist when `place_portal` runs — so the Kindle framing
   is still fiction rather than mechanism.
 
+## Evidence — slice 3 (the look)
+
+Tasks 6 and 7. **+9,728 shipping bytes**, 756,736 → 766,464, against 673,536 still free under the
+ship target. Render *improved*, 1.016 → 0.974 ms mean.
+
+- **The recolour is one formula with two implementations, and the test proves they agree.**
+  `dream_shift()` in `src/main.c` is the definition; `ConvertTo-DreamColour` in `tools/bake.ps1` is
+  the copy that has to run at bake time, because a sprite's palette is baked and cannot be shifted
+  at runtime. `--sprite-test` section (e) checks **every** baked `_DREAM` palette entry against the
+  C function and passes **within 1** — the tolerance is PowerShell's `[int]` rounding half to even
+  against C's half away from zero, and nothing else. Same "keep it in sync BY TEST, not by
+  discipline" shape as the key-magenta list.
+- **The 11 dream sprites share their twins' pixel streams — asserted, not assumed.** This is the
+  claim the whole "the biome is nearly free" argument rests on, and it was stated in three design
+  documents and checked nowhere. `--sprite-test` now compares `data_off`/`data_len`. Measured cost
+  of the 11 variants: **~600 bytes of palette plus 176 bytes of records**, against ~19 KB to
+  re-author them.
+- **Negative control for both:** an unshifted palette must be rejected. 30 of 30 entries of the
+  first tree would fail the comparison, so the check is known to have teeth.
+- **Decision 42 now holds per sector, and by construction.** `dream_shift` is monotone in
+  luminance, so it cannot reshuffle a value hierarchy — which is what lets it pass `--fog-test`'s
+  ordering sweep unchanged. Measured: dream ground 52, dream stone **49**, void **38**.
+- **The void is authored, not derived, and `--fog-test`'s new control says why.** A mechanical
+  `dream_shift` of the sea ramp — which is what the plan's recolour would have produced — lands at
+  luminance **62** against dream ground at 52: a gulf brighter than the land floating in it, which
+  is decision 42's pale-floating-cube fault wearing a new costume. The control rejects exactly that
+  ramp, so the rejected value is one that was really on the table rather than an invented bad
+  number.
+- **`--fog-test` sweeps 56 colours now** (was 45), including every dream terrain, the shifted stone
+  ramp and the void ramp: **0 inversions**, 5 collapses (was 3 — two more pairs tie under rounding
+  at some reveal, reported rather than failed, on the same policy as before).
+- **The whole suite was re-RUN, not re-argued**, even though every change in this slice is
+  render-only: sector(30), portal(30), land(30 + both controls), village(30), region(30),
+  move(30), reach(50 + control), gating(30), bridge(**200/200**), **play 50/50**, iso, fog, fade,
+  sprite, rng. Nothing moved.
+
+### What slice 3 changed that the plan did not anticipate
+
+- **The void band is not `dream_sector`.** Task 1's comment assumed rows 60–63 would take the dream
+  palette "by the same path", but `dream_sector(ty)` is `ty >= 64`, so the band between the two
+  landmasses would have rendered in the overworld's sea blue — a strip of ordinary sea along the
+  horizon of a violet void. Resolved with a second, adjacent, **render-only** macro
+  `dream_palette(ty)` = `ty >= OVERWORLD_H`, rather than widening `dream_sector`, which would have
+  quietly handed four rows to the dream side in `--sector-test`'s counts and `--land-test`'s
+  per-sector bounds.
+- **The plan's animation clock would have frozen the portal.** It specified
+  `(int)(p.anim * PORTAL_FPS)`, but `p.anim` is reset to zero the moment the keys are released so a
+  standing player shows frame 0 — correct for a walk cycle, wrong for anything in the world. Added
+  `Game.clock`, advanced by `sim_step` and read only by `render`, render-only in the same sense as
+  `height` and `surf`.
+- **`fx_well` and `fx_crystal` were NOT baked**, against the plan's task 7. Nothing draws the Well
+  until slice 5 and **nothing in this phase draws `fx_crystal` at all**, so baking them now is
+  ~16 KB with no caller — the exact rule that kept the bitmap font at +0 shipping bytes. They go in
+  with the tasks that call them.
+- **`ART_BLD_PORTAL_ARCH` was already in the bake and drawn by nothing.** The team delivered a
+  portal arch with the buildings back in Phase 07; no table referenced it, so it had been dead
+  weight since. It is now the portal's structure, with the FX vortex turning in its opening — so
+  task 7 cost eight new frames rather than a new authored sprite.
+- **The contact shadow under a baked prop is grass-coloured**, and left overworld-green it drew a
+  ring of lawn under every violet tree — at the one place the eye is already looking, because a
+  contact shadow is what says where the trunk meets the ground. Found by screenshot; no test has an
+  opinion on it.
+- **The starfield is free.** `tile_detail` already scatters marks from the tile hash, so the void's
+  stars are the sea's speckle with a pale colour and a 1 px width. It is the one thing in the dream
+  realm deliberately allowed to out-value the ground: a star is a point light, and decision 42 is
+  about surfaces.
+- **Flowers and stumps are replaced by crystals in the dream sector, at identical density.** Same
+  rolls, same thresholds, the same tiles carrying a prop — only which prop changes, and only for
+  the two kinds with no baked art. A sawn stump and a yellow meadow bloom read as the overworld's
+  countryside whatever colour the trees behind them are. Keeping the *rate* identical is
+  deliberate: prop density is what decides how much terrain the reveal mechanic can still show.
+- **`--dream N` was added** (self-test only, beside `--overlay`, `--tune` and `--grid`). `--dream 0`
+  stands at the overworld end, `--dream 1` crosses. Without it there is no way to photograph the
+  biome: the player provably spawns in the overworld on every seed, and the autopilot has no reason
+  to cross while every entity is still overworld-side. It positions her and calls the **real**
+  `try_portal`, so a capture cannot show a place the game itself could not put you.
+
+### NOT verified by slice 3
+
+- **Whether it reads as Lumiara is the user's call and has not been made.** No test has an opinion.
+  Seen on seeds 1, 3, 4 and 5, both ends of the portal, fogged and with the overlay.
+- **Nothing has been seen in MOTION.** The vortex is eight frames at 8 fps driven by `Game.clock`;
+  no scripted run diffs two frames to prove it advances, and nobody has watched it turn.
+- **`--play-test` 50/50 still does not exercise travel** — unchanged from slice 2, and still true
+  until Task 9.
+- **The dream realm's fogged periphery is the overworld's cool grey haze.** `fog_lerp` is one
+  global blend and knows nothing about sectors, so unrevealed dream ground reads grey rather than
+  violet. That is the game's core mechanic working as designed — the overworld looks the same way —
+  but a violet haze on the dream side is a real option nobody has considered on screen.
+- **Rocks stand in the void.** `prop_at` puts boulders on solid tiles, ocean included, so the
+  starfield carries scattered rocks. In the overworld those are rocks in the shallows and read
+  fine; over a void they read as floating debris, which may be on-concept for a floating-island
+  biome or may be a fault. Unjudged.
+- **The player-occlusion question is not improved by this slice** and the dream canopies are the
+  same size as the overworld's, so decision 40's fade carries the same load it did.
+
 ## Open, and deliberately not decided here
 
 - **Whether the void reads better as recoloured `SURF_OCEAN` or needs a real `SURF_VOID`.** Decided

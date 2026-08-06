@@ -81,6 +81,21 @@
  * is a one-line change. */
 #define dream_sector(ty) ((ty) >= DREAM_Y0)
 
+/* The same question asked of the PALETTE, and the answer differs by exactly the four void-band
+ * rows. Phase 12 task 6.
+ *
+ * dream_sector is a statement about gameplay: which landmass a tile belongs to, read by placement
+ * and by the tests. Rows 60..63 belong to neither — they are always-solid ocean and no entity,
+ * river or building can ever occupy them. But they are the gulf the dream islands float in, and
+ * painting them in the overworld's sea blue would draw a strip of ordinary sea along the horizon
+ * of a violet void.
+ *
+ * Two macros rather than one widened one, because widening dream_sector would quietly hand four
+ * rows of the overworld's own coastline to the dream side in --sector-test's counts and in
+ * --land-test's per-sector bounds. RENDER ONLY: nothing outside tile_colour and the prop dispatch
+ * may read this. */
+#define dream_palette(ty) ((ty) >= OVERWORLD_H)
+
 /* --- The art scale knob ---------------------------------------------------
  *
  * Every procedural prop, building part and elevation step in this file was
@@ -725,6 +740,10 @@ typedef struct {
      * slide in from the top-left corner. */
     float  cam_fx, cam_fy;
     int    cam_ready;
+    /* Wall clock in seconds since game_init, advanced by sim_step and read only by render —
+     * the world's animation time, as opposed to Player.anim which is the walk cycle and stops
+     * when she does. Render-only in the same sense as `height` and `surf`. */
+    float  clock;
 } Game;
 
 typedef struct {
@@ -1896,6 +1915,13 @@ static void sim_step(Game *g, const Input *in, float dt)
         g->p.anim = 0.0f; /* stand still on the rest frame rather than freezing mid-stride */
     }
 
+    /* A clock that does NOT stop when the player does. p.anim is the walk cycle and is reset to
+     * zero the moment the keys are released, which is right for a character and wrong for anything
+     * in the world: driving the portal from it would freeze the vortex mid-swirl every time you
+     * stood still. Render-only, like facing and anim — nothing in movement, collision or the
+     * verifier reads it, so no trajectory can observe it. */
+    g->clock += dt;
+
     move_axis(g, mx * PLAYER_SPEED * dt, 0.0f);
     move_axis(g, 0.0f, my * PLAYER_SPEED * dt);
     reveal_around(g, dt);
@@ -2839,6 +2865,56 @@ static const Uint8 stone_ramp[3][3] = {
     {0x36,0x34,0x42}, {0x40,0x3e,0x4a}, {0x4a,0x48,0x55}
 };
 
+/* ---- the dream realm's colour, in one function ---------------------------- Phase 12 task 6.
+ *
+ * THE definition of what the dream biome looks like. tools/bake.ps1 carries the identical formula
+ * in PowerShell, because a sprite's palette has to be recoloured at BAKE time (that is the whole
+ * saving: a dream tree is the same pixel stream with a different palette, ~70 bytes rather than
+ * ~1,700). Two implementations of one formula is exactly the drift the key-magenta list already
+ * got caught by, so --sprite-test checks every baked _DREAM palette against THIS function rather
+ * than trusting the two to stay in step.
+ *
+ * A function of LUMINANCE ALONE, and that is load-bearing rather than lazy. Each output channel is
+ * monotonically increasing in the input luminance, so a recolour cannot reshuffle which of two
+ * colours is lighter — and fog_lerp's proven contract (--fog-test) is precisely that the value
+ * hierarchy survives the blend. An RGB hue rotation offers no such guarantee and could silently
+ * invert a canopy ramp that --fog-test would then be right to fail on.
+ *
+ * The overall effect is 0.67x luminance: the dream realm is darker as well as violet, which is
+ * what lets the void read as a gulf rather than as more ground. */
+static void dream_shift(int r, int g, int b, int *dr, int *dg, int *db)
+{
+    float lum = 0.299f * (float)r + 0.587f * (float)g + 0.114f * (float)b;
+    float t   = lum / 200.0f;
+    float cr, cg, cb;
+
+    if (t > 1.0f) t = 1.0f;
+    cr = 0.42f * lum + 78.0f * t;   /* violet body */
+    cg = 0.30f * lum + 40.0f * t;   /* green pulled well down — this is what kills the forest read */
+    cb = 0.72f * lum + 96.0f * t;   /* blue lifted hardest, so highlights climb toward lavender */
+    *dr = cr > 255.0f ? 255 : (int)(cr + 0.5f);
+    *dg = cg > 255.0f ? 255 : (int)(cg + 0.5f);
+    *db = cb > 255.0f ? 255 : (int)(cb + 0.5f);
+}
+
+/* The gulf the dream islands float in, stepped by the same sea-floor depth the ocean ramp uses.
+ *
+ * AUTHORED, not run through dream_shift, and that is the one deliberate exception. Shifting the
+ * sea ramp would put the void at luminance 62 against dream ground at 52 — a void brighter than
+ * the land floating in it, which is decision 42's pale-floating-rock fault in a new costume. Sea
+ * is meant to be brighter than grass; a void is not. --fog-test asserts the ordering that matters
+ * (the void's lightest step stays under the dream ground) rather than leaving it to the eye, which
+ * is what let the stone ramp stay wrong through two retunes. */
+static const Uint8 void_ramp[4][3] = {
+    {0x2a,0x1e,0x4a}, {0x22,0x18,0x3e}, {0x1a,0x12,0x30}, {0x13,0x0c,0x24}
+};
+
+/* The overworld's sea, moved to file scope for the same reason stone_ramp was: --fog-test can now
+ * see both ramps it has to compare. It used to be a static local inside tile_colour. */
+static const Uint8 water_ramp[4][3] = {
+    {0x2f,0x6d,0x7d}, {0x25,0x5b,0x6c}, {0x1e,0x4a,0x5c}, {0x18,0x3d,0x4d}
+};
+
 static const Uint8 wall_pal[5][3] = {
     { 0xd8, 0xc8, 0xa8 }, { 0xc4, 0xb0, 0x90 }, { 0x9a, 0x96, 0x8c },
     { 0xa8, 0x70, 0x5c }, { 0x9c, 0x7c, 0x54 }
@@ -3136,6 +3212,27 @@ static void draw_sprite(SDL_Surface *fb, int id, int cx, int by, float rev)
 #define WALK_FRAMES 4
 #define WALK_FPS    8.0f   /* walk-cycle frames per second */
 
+/* The portal, Phase 12 task 7.
+ *
+ * Two sprites, both already in the bake and neither authored for this: BLD_PORTAL_ARCH is the
+ * standing stone frame the team delivered with the buildings (baked since Phase 07 and drawn by
+ * nothing until now), and the eight FX frames are the vortex inside it.
+ *
+ * EVERY SECOND authored frame, `_0 _2 _4 … _14` of sixteen. A halved set taken from the front
+ * would be the first half of a loop and would jump on wrap; taken every other frame it is a
+ * complete cycle at half the rate, which is the whole point of choosing them this way.
+ *
+ * fx_well and fx_crystal are deliberately NOT baked. Nothing draws the Well until slice 5, and
+ * nothing in this phase draws fx_crystal at all — baking a sprite with no caller is pure byte
+ * cost, the rule that kept the bitmap font at +0 shipping bytes. */
+#define PORTAL_FRAMES 8
+#define PORTAL_FPS    8.0f   /* one full turn of the vortex per second */
+
+static const short portal_frames[PORTAL_FRAMES] = {
+    ART_FX_PORTAL_0,  ART_FX_PORTAL_2,  ART_FX_PORTAL_4,  ART_FX_PORTAL_6,
+    ART_FX_PORTAL_8,  ART_FX_PORTAL_10, ART_FX_PORTAL_12, ART_FX_PORTAL_14
+};
+
 static const short player_frames[FACE_COUNT][WALK_FRAMES] = {
     { ART_CHAR_PLAYER_N_0, ART_CHAR_PLAYER_N_1, ART_CHAR_PLAYER_N_2, ART_CHAR_PLAYER_N_3 },
     { ART_CHAR_PLAYER_E_0, ART_CHAR_PLAYER_E_1, ART_CHAR_PLAYER_E_2, ART_CHAR_PLAYER_E_3 },
@@ -3408,6 +3505,22 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
          *
          * Density is not a collision input, so this cannot alter solvability; but it does
          * change what the reveal mechanic has to show, which is the actual reason to care. */
+        if (dream_palette(ty))
+            /* The dream realm's ground cover, at IDENTICAL density — same rolls, same
+             * thresholds, same tiles carrying a prop. Only which prop changes, and only for the
+             * two kinds with no baked art: a sawn stump is a woodcutter's leavings and a meadow
+             * flower is a warm yellow bloom, and both read as the overworld's countryside no
+             * matter what colour the trees behind them are. Crystals are the one procedural prop
+             * already drawn as EMITTING rather than reflecting, which is the Lumiara concept
+             * art's whole signature.
+             *
+             * Keeping the density identical is deliberate: prop rate is what decides how much
+             * terrain the reveal mechanic can still show (see the Phase 07 retune above), and
+             * changing the look should not quietly change that too. */
+            return (roll <  4) ? PROP_TREE
+                 : (roll <  7) ? PROP_BUSH
+                 : (roll < 15) ? PROP_CRYSTAL : PROP_NONE;
+
         return (roll <  4) ? PROP_TREE     /* 12.5% */
              : (roll <  7) ? PROP_BUSH     /*  9.4% */
              : (roll <  9) ? PROP_STUMP    /*  6.3% */
@@ -3656,16 +3769,47 @@ static const PropArt prop_art[] = {
     { NULL,        0 }                                   /* PROP_STUMP   */
 };
 
+/* The dream realm's flora: the SAME rows, index for index, pointing at the `_DREAM` sprite ids the
+ * bake emits alongside each nature sprite. Phase 12 task 6.
+ *
+ * A dream sprite shares its overworld twin's pixel stream and differs only in palette, so the two
+ * tables are guaranteed to pick silhouettes that match — which is what makes the dream realm read
+ * as the same world dreaming rather than as a different game. It is also why the tables must stay
+ * the same length in the same order: draw_prop indexes both with one hash, and a table that
+ * disagreed on `n` would make a tile's tree change shape when it changed sector. */
+static const short art_trees_dream[] = {
+    ART_TREE_DECIDUOUS_01_DREAM, ART_TREE_DECIDUOUS_02_DREAM, ART_TREE_DECIDUOUS_03_DREAM,
+    ART_TREE_DECIDUOUS_04_DREAM, ART_TREE_DECIDUOUS_05_DREAM, ART_TREE_DECIDUOUS_06_DREAM,
+    ART_TREE_CONIFER_01_DREAM,   ART_TREE_CONIFER_02_DREAM
+};
+static const short art_bushes_dream[] = { ART_BUSH_SMALL_01_DREAM };
+static const short art_rocks_dream[]  = { ART_ROCK_SMALL_01_DREAM };
+static const short art_reeds_dream[]  = { ART_GRASS_TUFT_01_DREAM };
+
+static const PropArt prop_art_dream[] = {
+    { NULL,              0 },                                        /* PROP_NONE    */
+    { art_trees_dream,   (int)(sizeof art_trees_dream  / sizeof *art_trees_dream)  },
+    { art_bushes_dream,  (int)(sizeof art_bushes_dream / sizeof *art_bushes_dream) },
+    { art_rocks_dream,   (int)(sizeof art_rocks_dream  / sizeof *art_rocks_dream)  },
+    { art_reeds_dream,   (int)(sizeof art_reeds_dream  / sizeof *art_reeds_dream)  },
+    { NULL,              0 },                                        /* PROP_FLOWER  */
+    { NULL,              0 },                                        /* PROP_CRYSTAL */
+    { NULL,              0 }                                         /* PROP_STUMP   */
+};
+
 /* `pbox` is the player's screen box as {x0,y0,x1,y1}, or NULL for callers that have no player to
  * protect. Decision 40: a baked prop standing in front of her is drawn ghosted rather than
  * thinned out of the world or shrunk. The decision is made HERE, where the sprite id is already
  * chosen, so the box measured is the box drawn — computing it at the call site would mean
  * re-deriving the variant pick and risking the two disagreeing. */
 static void draw_prop(SDL_Surface *fb, int kind, int cx, int by, Uint32 h, float rev,
-                      int band, int pband, const int *pbox)
+                      int band, int pband, const int *pbox, int dream)
 {
     if (kind > PROP_NONE && kind < (int)(sizeof prop_art / sizeof *prop_art)) {
-        const PropArt *a = &prop_art[kind];
+        /* One line, and the only place in the renderer that knows a prop has two palettes. The
+         * caller passes the sector rather than the tile, because render's prop loop already has
+         * `ty` in hand and re-deriving it here would be a second expression of one fact. */
+        const PropArt *a = dream ? &prop_art_dream[kind] : &prop_art[kind];
         if (a->n > 0) {
             /* Bits 24+ of the hash: the low bits are already spoken for by the procedural
              * routines' own jitter, and reusing them would correlate variant with size. */
@@ -3682,7 +3826,16 @@ static void draw_prop(SDL_Surface *fb, int kind, int cx, int by, Uint32 h, float
                  * carried its own magenta disc instead, which is the halo now stripped at bake.
                  * Same call, same colour, same reason: without it a prop floats, because an
                  * isometric projection gives no other cue for where its base meets the tile. */
-                iso_diamond(fb, cx, by - 1, sp->w / 3, fog_lerp(fb, 0x24, 0x33, 0x22, rev));
+                {
+                    int sr = 0x24, sg = 0x33, sb = 0x22;
+                    /* The shadow is grass-coloured, so it has to follow the grass. Left
+                     * overworld-green it drew a ring of lawn under every violet tree — three
+                     * pixels of the wrong biome at the one place the eye is already looking,
+                     * because a contact shadow is what tells you where the trunk meets the
+                     * ground. Found by screenshot; no test has an opinion on it. */
+                    if (dream) dream_shift(sr, sg, sb, &sr, &sg, &sb);
+                    iso_diamond(fb, cx, by - 1, sp->w / 3, fog_lerp(fb, sr, sg, sb, rev));
+                }
             }
             draw_sprite_fade(fb, id, cx, by, rev, fade);
             return;
@@ -3756,23 +3909,34 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
     } else if (g->w.surf[ty][tx] == SURF_OCEAN) {
         /* Water ramp, design/Art Bible.md §4, picked by depth. A single flat
          * blue reads as painted paper; stepping the ramp with the sea floor
-         * makes the shelf near the shore read as shallows. */
-        static const Uint8 water_ramp[4][3] = {
-            {0x2f,0x6d,0x7d}, {0x25,0x5b,0x6c}, {0x1e,0x4a,0x5c}, {0x18,0x3d,0x4d}
-        };
+         * makes the shelf near the shore read as shallows.
+         *
+         * The dream side swaps in void_ramp and inherits that same stepping, which is exactly the
+         * cliff-underside the concept art shows — a spec decision (reuse SURF_OCEAN, do not add a
+         * SURF_VOID) that this branch is the whole of. */
+        const Uint8 (*ramp)[3] = dream_palette(ty) ? void_ramp : water_ramp;
         int d = (ELEV_WATER - g->w.height[ty][tx]) / 4;
         if (d < 0) d = 0;
         if (d > 3) d = 3;
-        *cr = water_ramp[d][0]; *cg = water_ramp[d][1]; *cb = water_ramp[d][2];
+        *cr = ramp[d][0]; *cg = ramp[d][1]; *cb = ramp[d][2];
     } else if (g->w.solid[ty][tx]) {
         /* stone_ramp is at file scope so --fog-test can assert where it sits in the value
          * hierarchy — see decision 42 and the note on the table itself. */
         const Uint8 *p = stone_ramp[tile_hash(g->seed, tx, ty) % 3u];
-        *cr = p[0]; *cg = p[1]; *cb = p[2];
+        if (dream_palette(ty))
+            dream_shift(p[0], p[1], p[2], cr, cg, cb);
+        else {
+            *cr = p[0]; *cg = p[1]; *cb = p[2];
+        }
     } else {
         Uint8 reg = g->w.region[ty][tx];
         terrain_colour(reg == REGION_NONE ? TERRAIN_NORMAL
                                           : g->w.regions[reg].terrain, cr, cg, cb);
+        /* Ground, ability terrain and all. One shift over terrain_colour's output rather than a
+         * second four-entry table, so a change to the overworld's palette reaches the dream realm
+         * automatically instead of leaving one of the two behind. */
+        if (dream_palette(ty))
+            dream_shift(*cr, *cg, *cb, cr, cg, cb);
         /* Alternate brightness by region id so boundaries are visible without
          * needing a font or an outline pass. */
         if (overlay && reg != REGION_NONE && (reg & 1)) {
@@ -3835,7 +3999,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
         for (tx = lo; tx <= hi; tx++) {
             int ty = band - tx;
             int ax = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
-            int cr, cg, cb, h, hl, hr, terr, nmark, mw;
+            int cr, cg, cb, h, hl, hr, terr, nmark, mw, mr, mg, mb;
             float rev;
             Uint32 top, top2, c_l = 0, c_r = 0, hash, mark;
             if (ax + ISO_HW <= 0 || ax - ISO_HW >= fb->w)
@@ -3878,24 +4042,41 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             if (terr < 0) {
                 /* Rock. Long marks, because stone reads through aligned
                  * repetition — strata, not speckle (design/Art Bible.md §6). */
-                mark = fog_lerp(fb, 0x6e, 0x6c, 0x7a, rev); nmark = 4; mw = PX(6);
+                mr = 0x6e; mg = 0x6c; mb = 0x7a; nmark = 4; mw = PX(6);
             } else if (terr == TERRAIN_LEDGE) {
-                mark = fog_lerp(fb, 0xa8, 0x90, 0x60, rev); nmark = 3; mw = PX(7);
+                mr = 0xa8; mg = 0x90; mb = 0x60; nmark = 3; mw = PX(7);
             } else if (terr == TERRAIN_WATER) {
-                mark = fog_lerp(fb, 0x5a, 0xa0, 0xa8, rev); nmark = 3; mw = PX(5);
+                mr = 0x5a; mg = 0xa0; mb = 0xa8; nmark = 3; mw = PX(5);
             } else if (terr == TERRAIN_DARK) {
-                mark = fog_lerp(fb, 0x58, 0x4c, 0x74, rev); nmark = 2; mw = PX(2);
+                mr = 0x58; mg = 0x4c; mb = 0x74; nmark = 2; mw = PX(2);
             } else {
-                mark = fog_lerp(fb, 0x55, 0x7a, 0x45, rev); nmark = 6; mw = PX(2);
+                mr = 0x55; mg = 0x7a; mb = 0x45; nmark = 6; mw = PX(2);
             }
+            if (dream_palette(ty)) {
+                if (g->w.surf[ty][tx] == SURF_OCEAN) {
+                    /* THE STARFIELD, and it costs nothing to draw: tile_detail already scatters
+                     * marks from the tile hash, so the void's stars are the sea's speckle with a
+                     * pale colour and a one-pixel width. Bright on purpose — it is the only thing
+                     * in the dream realm allowed to out-value the ground, because a star is a
+                     * point light rather than a surface (decision 42 is about surfaces). */
+                    mr = 0xd0; mg = 0xc8; mb = 0xf4; nmark = 3; mw = PX(1);
+                } else {
+                    dream_shift(mr, mg, mb, &mr, &mg, &mb);
+                }
+            }
+            mark = fog_lerp(fb, mr, mg, mb, rev);
             tile_detail(fb, ax, ay, h, hash, mark, nmark, mw);
             /* Grass gets a second, darker scatter. One shade of speckle reads
              * as dirt on a flat field; two read as depth in the grass. Both
              * shades now come from the grass ramp rather than being invented,
              * so the tufts sit in the same family as the ground. */
-            if (terr == TERRAIN_NORMAL)
+            if (terr == TERRAIN_NORMAL) {
+                mr = 0x2c; mg = 0x44; mb = 0x29;
+                if (dream_palette(ty))
+                    dream_shift(mr, mg, mb, &mr, &mg, &mb);
                 tile_detail(fb, ax, ay, h, hash * 2654435761u,
-                            fog_lerp(fb, 0x2c, 0x44, 0x29, rev), 5, 2);
+                            fog_lerp(fb, mr, mg, mb, rev), 5, 2);
+            }
         }
 
         /* Second sub-pass over the SAME band: props. It has to be separate from
@@ -3935,7 +4116,45 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
             /* The tile centre projects to (ax, ay + ISO_HH); lifting by the
              * tile's height puts the prop's feet on the surface. */
             by = ay + ISO_HH - g->w.height[ty][tx];
-            draw_prop(fb, kind, ax, by, hash, rev, band, pband, pbox);
+            draw_prop(fb, kind, ax, by, hash, rev, band, pband, pbox,
+                      dream_palette(ty));
+        }
+
+        /* The portal's two ends, drawn in the band they stand in so they sort against the
+         * scenery exactly the way an entity or a building does. Phase 12 task 7.
+         *
+         * Anchored at the tile centre lifted by the tile's height — the same three lines the
+         * entity loop below uses — because a portal on a ledge otherwise draws buried in the
+         * cliff it stands on.
+         *
+         * The vortex is positioned from the ARCH's own height rather than from a constant, so it
+         * stays in the opening if the arch is ever re-authored at another size. A hand-tuned
+         * offset here is the shape of bug that put the roof half a tile off its walls. */
+        for (i = 0; i < 2; i++) {
+            int t = g->w.portal[i], ex, ey, sx, sy, f;
+            const ArtSprite *arch;
+            float prev;
+            if (t < 0)
+                continue;
+            ex = t % WORLD_W;
+            ey = t / WORLD_W;
+            if (ex + ey != band)
+                continue;
+            prev = tile_reveal(g, ex, ey, overlay);
+            if (!overlay && prev < 0.06f)
+                continue;
+            world_to_iso((float)(ex * TILE + TILE / 2), (float)(ey * TILE + TILE / 2), &sx, &sy);
+            sy -= height_at(&g->w, ex, ey);
+            sx -= g->cam_x;
+            sy -= g->cam_y;
+            arch = &ART_SPRITES[ART_BLD_PORTAL_ARCH];
+            draw_sprite(fb, ART_BLD_PORTAL_ARCH, sx, sy, prev);
+            /* Driven by g->clock, NOT by p.anim: the walk cycle stops when she does and a portal
+             * that only turns while you are walking would be worse than one that never turned. */
+            f = (int)(g->clock * PORTAL_FPS);
+            f %= PORTAL_FRAMES;
+            if (f < 0) f = 0;
+            draw_sprite(fb, portal_frames[f], sx, sy - arch->h * 45 / 100, prev);
         }
 
         /* Entities standing in this band. Scanned per band rather than per tile
@@ -6365,6 +6584,102 @@ static int sprite_selftest(void)
         if (!(halo && !outline && !stone)) fails++;
     }
 
+    /* ---- (e) Phase 12 task 6: the dream variants ------------------------------
+     *
+     * Two claims, and both are things this slice would otherwise be taking on trust.
+     *
+     * THE SHARED STREAM. The entire reason the biome is nearly free is that a dream sprite reuses
+     * its twin's pixel data and differs only in palette (~70 bytes rather than ~1,700). That is a
+     * property of the bake, stated in three design documents and asserted nowhere — so if the
+     * emitter ever duplicated the stream instead, the art would look identical and the header
+     * would quietly double. Comparing data_off proves it.
+     *
+     * THE SHARED FORMULA. tools/bake.ps1 and dream_shift are two implementations of one
+     * transform, in two languages, and nothing forces them to stay in step. This is the same
+     * shape as the key-magenta list above: keep it in sync BY TEST, not by discipline. If someone
+     * retunes the C and forgets the PowerShell, the ground turns violet and the trees do not.
+     *
+     * Pairing comes from prop_art / prop_art_dream rather than a third list of ids, because those
+     * two tables are what the renderer actually indexes, and a private list here could agree with
+     * the bake while disagreeing with what is drawn. */
+    {
+        int bad_stream = 0, bad_pal = 0, pairs = 0, worst = 0, kind;
+
+        if (sizeof prop_art != sizeof prop_art_dream) {
+            printf("FAIL  prop_art and prop_art_dream are different lengths\n");
+            fails++;
+        }
+        for (kind = 0; kind < (int)(sizeof prop_art / sizeof *prop_art); kind++) {
+            const PropArt *a = &prop_art[kind], *d = &prop_art_dream[kind];
+            int j;
+            if (a->n != d->n) {
+                printf("FAIL  prop kind %d: %d overworld sprites against %d dream ones\n",
+                       kind, a->n, d->n);
+                fails++;
+                continue;
+            }
+            for (j = 0; j < a->n; j++) {
+                const ArtSprite *sb = &ART_SPRITES[a->ids[j]];
+                const ArtSprite *sd = &ART_SPRITES[d->ids[j]];
+                pairs++;
+                if (sb->data_off != sd->data_off || sb->data_len != sd->data_len ||
+                    sb->w != sd->w || sb->h != sd->h || sb->pal_n != sd->pal_n) {
+                    printf("FAIL  prop kind %d variant %d: dream sprite does not share the "
+                           "overworld stream (%u/%u vs %u/%u)\n", kind, j,
+                           sb->data_off, sb->data_len, sd->data_off, sd->data_len);
+                    bad_stream++;
+                    continue;
+                }
+                for (i = 0; i < (int)sb->pal_n; i++) {
+                    const unsigned char *cb = &ART_PAL[(sb->pal_off + i) * 3];
+                    const unsigned char *cd = &ART_PAL[(sd->pal_off + i) * 3];
+                    int er, eg, eb, k, diff;
+                    dream_shift(cb[0], cb[1], cb[2], &er, &eg, &eb);
+                    for (k = 0; k < 3; k++) {
+                        int want = k == 0 ? er : k == 1 ? eg : eb;
+                        diff = (int)cd[k] - want;
+                        if (diff < 0) diff = -diff;
+                        if (diff > worst) worst = diff;
+                        /* Tolerance 1, and only 1: PowerShell's [int] cast rounds half to even
+                         * while C rounds half away from zero, so the two can differ by one on an
+                         * exact .5 and by nothing else. Anything larger is a real divergence. */
+                        if (diff > 1) {
+                            if (bad_pal < 4)
+                                printf("FAIL  sprite %d palette %d channel %d: baked %d, "
+                                       "dream_shift says %d\n", d->ids[j], i, k, cd[k], want);
+                            bad_pal++;
+                        }
+                    }
+                }
+            }
+        }
+        fails += bad_stream + bad_pal;
+        printf("dream variants: %s  %d pairs share their pixel stream; palettes match "
+               "dream_shift within %d\n", (bad_stream || bad_pal) ? "FAIL" : "PASS", pairs, worst);
+
+        /* Negative control: the check must REJECT a palette that was never shifted. Without this
+         * a bake that emitted the overworld palette twice would pass section (e) silently and the
+         * dream realm would render in overworld green — which is precisely the state this slice
+         * exists to leave behind. */
+        {
+            const ArtSprite *sb = &ART_SPRITES[art_trees[0]];
+            int caught = 0;
+            for (i = 0; i < (int)sb->pal_n; i++) {
+                const unsigned char *cb = &ART_PAL[(sb->pal_off + i) * 3];
+                int er, eg, eb;
+                dream_shift(cb[0], cb[1], cb[2], &er, &eg, &eb);
+                if (cb[0] - er > 1 || er - cb[0] > 1 ||
+                    cb[1] - eg > 1 || eg - cb[1] > 1 ||
+                    cb[2] - eb > 1 || eb - cb[2] > 1)
+                    caught++;
+            }
+            printf("dream variants control (unshifted palette rejected): %s  "
+                   "[%d of %d entries would fail]\n", caught ? "PASS" : "FAIL",
+                   caught, (int)sb->pal_n);
+            if (!caught) fails++;
+        }
+    }
+
     printf("\n%s (%d checks failed)\n", fails ? "FAIL" : "PASS", fails);
     return fails ? 1 : 0;
 }
@@ -6442,6 +6757,24 @@ static int fog_selftest(void)
         int r, g, b;
         terrain_colour(p, &r, &g, &b);
         cols[n][0] = (Uint8)r; cols[n][1] = (Uint8)g; cols[n][2] = (Uint8)b;
+        n++;
+        /* Phase 12 task 6: the same terrain seen from the dream side. Swept through the SAME
+         * ordering check, because the biome recolour must not be allowed to buy its look by
+         * breaking the property fog_lerp is proven to have. */
+        dream_shift(r, g, b, &r, &g, &b);
+        cols[n][0] = (Uint8)r; cols[n][1] = (Uint8)g; cols[n][2] = (Uint8)b;
+        n++;
+    }
+    for (p = 0; p < 3 && n < 250; p++) {
+        int r, g, b;
+        dream_shift(stone_ramp[p][0], stone_ramp[p][1], stone_ramp[p][2], &r, &g, &b);
+        cols[n][0] = (Uint8)r; cols[n][1] = (Uint8)g; cols[n][2] = (Uint8)b;
+        n++;
+    }
+    for (p = 0; p < 4 && n < 250; p++) {
+        cols[n][0] = void_ramp[p][0];
+        cols[n][1] = void_ramp[p][1];
+        cols[n][2] = void_ramp[p][2];
         n++;
     }
 
@@ -6534,6 +6867,67 @@ static int fog_selftest(void)
             printf("value hierarchy control: %s  [shipped ramp %d vs grass %d]\n",
                    (ol > gl) ? "PASS" : "FAIL", ol, gl);
             if (!(ol > gl)) fails++;
+        }
+
+        /* ---- the same rule, per sector ------------------------------------ Phase 12 task 6.
+         *
+         * Decision 42 is not a fact about the overworld's palette, it is a fact about how a raised
+         * surface reads against the ground it stands in — so it has to hold on both sides of the
+         * portal or the dream realm inherits the pale-floating-cube fault the overworld was just
+         * cured of. Two surfaces to check: dream stone, and the void itself.
+         *
+         * Dream stone passes BY CONSTRUCTION, since dream_shift is monotone in luminance and
+         * overworld stone already sits under overworld grass. It is asserted anyway: "by
+         * construction" is exactly the kind of claim that stops being true when someone retunes
+         * one of the two ramps, and this costs nothing to check. */
+        {
+            int dgr, dgg, dgb, dr, dg2, db, dgl, dsl = 0, vl = 0, bad = 0;
+
+            dream_shift(grass_r, grass_g, grass_b, &dgr, &dgg, &dgb);
+            dgl = (299 * dgr + 587 * dgg + 114 * dgb) / 1000;
+            for (i = 0; i < 3; i++) {
+                int l;
+                dream_shift(stone_ramp[i][0], stone_ramp[i][1], stone_ramp[i][2], &dr, &dg2, &db);
+                l = (299 * dr + 587 * dg2 + 114 * db) / 1000;
+                if (l > dsl) dsl = l;
+            }
+            for (i = 0; i < 4; i++) {
+                int l = (299 * void_ramp[i][0] + 587 * void_ramp[i][1]
+                         + 114 * void_ramp[i][2]) / 1000;
+                if (l > vl) vl = l;
+            }
+            if (dsl > dgl) {
+                printf("FAIL  dream value hierarchy: stone tops out at %d against dream ground "
+                       "at %d\n", dsl, dgl);
+                bad++;
+            }
+            if (vl > dgl) {
+                printf("FAIL  dream value hierarchy: the void tops out at %d against dream ground "
+                       "at %d — the islands do not float, the gulf glows\n", vl, dgl);
+                bad++;
+            }
+            if (!bad)
+                printf("dream value hierarchy: PASS  ground %d, stone %d, void %d\n",
+                       dgl, dsl, vl);
+            fails += bad;
+
+            /* Negative control, and again the rejected value is one that was really on the table
+             * rather than an invented bad number: the void as a MECHANICAL dream_shift of the sea
+             * ramp, which is what the plan's recolour would have produced and what the comment on
+             * void_ramp says was rejected. It must be caught for out-valuing dream ground. */
+            {
+                int sl = 0;
+                for (i = 0; i < 4; i++) {
+                    int l;
+                    dream_shift(water_ramp[i][0], water_ramp[i][1], water_ramp[i][2],
+                                &dr, &dg2, &db);
+                    l = (299 * dr + 587 * dg2 + 114 * db) / 1000;
+                    if (l > sl) sl = l;
+                }
+                printf("dream value hierarchy control: %s  [shifted sea ramp %d vs ground %d]\n",
+                       (sl > dgl) ? "PASS" : "FAIL", sl, dgl);
+                if (!(sl > dgl)) fails++;
+            }
         }
     }
 
@@ -7368,6 +7762,31 @@ int main(int argc, char **argv)
     }
 
     (void)game_init(&game, &rngs);
+
+#if WAYFARER_SELFTEST
+    /* --dream: step through the portal on frame 0, so a scripted capture can stand IN the dream
+     * realm. Added for the same reason --grid was: the player spawns in the overworld on every
+     * seed (asserted, --sector-test) and the autopilot has no reason to cross while every entity
+     * is still overworld-side, so without this there is no way to photograph the biome close up.
+     *
+     * It walks to the overworld end and then calls try_portal — the real one — rather than
+     * assigning a dream position directly, so a capture cannot show a place the game itself could
+     * not put you. Same two steps --portal-test's travel section takes.
+     *
+     * Takes a count rather than being a bare flag: `--dream 0` stands at the OVERWORLD end and
+     * `--dream 1` crosses, so both ends of one pair can be photographed from a script. Slice 4's
+     * prompt indicator has to be seen at both. */
+    {
+        int cross = arg_int(argc, argv, "--dream", -1);
+        if (cross >= 0 && game.w.portal[0] >= 0) {
+            game.p.x = (float)(game.w.portal[0] % WORLD_W) * TILE + TILE * 0.5f;
+            game.p.y = (float)(game.w.portal[0] / WORLD_W) * TILE + TILE * 0.5f;
+            game.cam_ready = 0;
+            if (cross > 0)
+                (void)try_portal(&game);
+        }
+    }
+#endif
 
     prev = SDL_GetPerformanceCounter();
     perf = (double)SDL_GetPerformanceFrequency();
