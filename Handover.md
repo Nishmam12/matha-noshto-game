@@ -1,7 +1,7 @@
 ---
 tags: [process, handover, wayfarer]
 updated: 2026-08-06
-exe_size_bytes: 756736
+exe_size_bytes: 766976
 ---
 
 # Handover — Wayfarer
@@ -21,24 +21,32 @@ Running log: [[INDEX]]
 
 | | |
 |---|---|
-| **State** | 756,736 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
-| **Branch** | **`feat/phase-12-dream-realm`**, pushed. `main` is at `ae788b4`. Working tree clean |
+| **State** | 766,976 bytes, builds clean, full suite green, plays to completion on 50/50 seeds |
+| **Branch** | **`feat/phase-12-dream-realm`**. `main` is at `ae788b4`. Working tree clean |
 | **Deadline** | 2026-09-04. **Hard stop on art/backbone work 2026-08-14** — eight days from now |
-| **Do first** | **[[Phase 12 - Dream Realm]] slice 3** — the biome's look. Slices 1–2 are done; the plan is [[Phase 12 - Dream Realm Plan]], tasks 6–7 |
-| **Then** | Phase 12 slices 4–5 → [[Phase 08 - Save Load]] → 10 (motion) → **11 is non-negotiable** |
+| **Do first** | **[[Phase 12 - Dream Realm]] slice 4** — the plan is [[Phase 12 - Dream Realm Plan]], tasks 8–9. Slices 1–3 are done and the look-gate is discharged |
+| **Then** | Phase 12 slice 5 → [[Phase 08 - Save Load]] → 10 (motion) → **11 is non-negotiable** |
 | **Biggest risk** | **Audio does not exist at all.** A softsynth from zero, plus save/load and a HUD, all still ahead |
 
 > **THE PROJECT CHANGED DIRECTION ON 2026-08-05.** A portal in the `TERRAIN_DARK` region now leads
 > to a **second biome** — the team's "Lumiara / Dream Realm" concept art. It is specced as
 > [[Phase 12 - Dream Realm]], planned as [[Phase 12 - Dream Realm Plan]] (11 tasks, 5 slices), and
-> **slices 1 and 2 are built and committed**. A session reading only §11's old ordering would pick
-> the wrong task. The user considered the schedule risk explicitly and accepted it — **do not
+> **slices 1, 2 and 3 are built and committed**. A session reading only §11's old ordering would
+> pick the wrong task. The user considered the schedule risk explicitly and accepted it — **do not
 > re-raise it.**
 
-**Where slices 1–2 got to:** the grid is **108×104**, holding two landmasses — overworld rows
+**Where slices 1–3 got to:** the grid is **108×104**, holding two landmasses — overworld rows
 0–59, an always-solid void band 60–63, dream archipelago 64–103. A portal pair links them, travel
-is an `E` interact, and `--gating-test` passes 30/30 with that edge live. **Slice 3 is the next
-thing to build: the dream biome has no colours and the portal has no art, so nobody has seen it.**
+is an `E` interact, and `--gating-test` passes 30/30 with that edge live. **The dream realm now has
+a look and the portal has art**, both seen on screen and signed off by the user on 2026-08-06.
+Slice 4 (tasks 8–9) is next.
+
+> **PLAY IT, NOT JUST THE TESTS — 2026-08-06 made the case again.** Slice 3 was reported done with
+> the whole suite green. The user opened seed 1, walked through the portal, and **could not move**:
+> the arrival tile was in a Wade-gated region, so `tile_blocked` refused it. **11 of 100 seeds.**
+> No checker could have caught it — `--gating-test` and the arrival tile *agree* that a gated tile
+> is unenterable, and `--portal-test` measured 100/100 either way because **a component you cannot
+> stand in is still one you can reach**. See decision 48 and §7.
 
 **The team's art is in the build as of 2026-08-05.** [[Phase 07 - Asset Seam]] built the
 PNG→header bake and pushed **37 real sprites** through it: a 4-direction 4-frame walking
@@ -130,10 +138,10 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 | | |
 |---|---|
-| **`build\wayfarer.exe`** | **756,736 bytes** — 683,264 under the ship target |
-| `build\wayfarer-selftest.exe` | 801,792 bytes — **not a deliverable**, never shipped |
-| `src\main.c` | ~6,972 lines, single translation unit |
-| `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. 37 sprites, 63,600 bytes of const data. Never edit by hand |
+| **`build\wayfarer.exe`** | **766,976 bytes** — 673,024 under the ship target |
+| `build\wayfarer-selftest.exe` | 815,616 bytes — **not a deliverable**, never shipped |
+| `src\main.c` | ~7,850 lines, single translation unit |
+| `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. **56 records over 45 pixel streams** (11 are dream palette variants sharing a twin's stream), 71,977 bytes of const data. Never edit by hand |
 | Warnings | zero, under `-Wall -Wextra` |
 | Plan progress | Weeks 1–3 (original plan) complete. Isometric pivot complete. **Phases 00–07 all done**; 07 absorbed most of 09. See [[Phase Roadmap]]. Audio, save and UI are all still untouched |
 
@@ -147,7 +155,16 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
   archipelago 64–103. `world_gen` runs `gen_sector` twice, normalising `fy` *inside* each row
   range so the radial term makes two islands rather than one lobed one, and giving each its own
   water rim so they share no tile edge. `dream_sector(ty)` is the only thing that knows where the
-  sector is. **The dream biome has no colours yet and the portal has no art** — that is slice 3
+  sector is
+- **THE DREAM REALM LOOKS LIKE A DIFFERENT PLACE, and it cost almost nothing.** `dream_shift()` is
+  the one definition of the biome's colour; `tools/bake.ps1` carries the same formula because a
+  sprite palette is recoloured at *bake* time, and `--sprite-test` checks every baked `_DREAM`
+  entry against the C function so the two cannot drift. **11 dream props are the SAME pixel
+  streams with a new palette** — ~600 bytes against ~19 KB to re-author — and `--sprite-test`
+  asserts that sharing rather than assuming it. The void's starfield is `tile_detail`'s existing
+  speckle with a pale colour. See decisions 46–47
+- **The portal is drawn**, at both ends: `ART_BLD_PORTAL_ARCH` (baked since Phase 07 and drawn by
+  nothing until now) with 8 `fx_portal` frames turning in its opening, driven by `Game.clock`
 - **A portal that is a graph edge, not a collision case.** `portal_link()` is read by
   `tile_neighbours()`, which **six** traversals route through, so walk-reachable ==
   graph-reachable is true by construction and `--gating-test` needs no weakening. Travel is an
@@ -213,12 +230,12 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
   Phase 09/11. Un-gating is a one-line change once a real caller exists, and the gate is what keeps
   the +0-byte property true by construction rather than by remembering
 - **Save/load**
-- **Any ambient animation.** Nothing sways, shimmers, bobs or smokes. The *character* now walks
-  (4 frames per direction), but the world around her is static. Phase 12 task 8's prompt indicator
-  will be the first, and it is not built yet
-- **The dream biome's LOOK.** Slices 1–2 built the landmass and the portal; the sector renders in
-  the overworld's palette and nothing draws the portal at all. `assets/magical/`'s 56 FX frames
-  are still unbaked. That is slice 3, tasks 6–7
+- **Almost any ambient animation.** The *character* walks and **the portal vortex now turns** (8
+  frames off `Game.clock`, the first world-side animation in the game) — but nothing else sways,
+  shimmers, bobs or smokes. Phase 12 task 8's prompt indicator is next
+- **A HUD, a prompt, or any on-screen affordance except the interact ring.** Task 8
+- **Anything in the dream sector to DO.** The biome is furnished but empty: every fragment and Soul
+  still lives in the overworld, so `--play-test` never crosses the portal. That is task 9
 - **Buildings do not respond to restoration.** The ruin→whole rebuild is designed but not built
 - **No worn paths between buildings.** The village reads as buildings-in-a-field, not as inhabited
 - Idle sway/breathe for Found Souls
@@ -231,6 +248,9 @@ Remote: **`https://github.com/Nishmam12/matha-noshto-game`** — private, branch
 **Current branch: `feat/phase-12-dream-realm`**, pushed. `main` is at `ae788b4`, also pushed.
 
 ```
+c3e4d30  The portal put the player somewhere she could not stand
+b35f25a  Phase 12 slice 3: the dream realm has a look, and a portal you can see
+0f4c982  Handover for a fresh chat: the direction changed and slices 1-2 are in
 4f4cf64  Phase 12 slice 2: a portal, and the proof it is load-bearing
 bf66217  Phase 12 slice 2a: one adjacency function, six readers
 cd8e9d3  Phase 12 slice 1: a second landmass in the same grid
@@ -347,9 +367,11 @@ $e = ".\build\wayfarer-selftest.exe"
 & $e --input-test 4000 --seed 5             # real keyboard path, reports position delta
 & $e --frames 400 --perf --seed 4           # render/present/sleep ms, px and calls per frame
 & $e --frames 60 --seed 4 --overlay --shot out.bmp   # scripted screenshot — see the recipe in §10
+& $e --frames 90 --seed 5 --dream 1 --shot d.bmp     # stand IN the dream realm; --dream 0 = the
+                                                     #   overworld end. Self-test only
 ```
 
-**All currently pass.** Last full run, **2026-08-06**, after Phase 12 slice 2:
+**All currently pass.** Last full run, **2026-08-06**, after Phase 12 slice 3 and the arrival fix:
 
 ```
 sector  : PASS  100 seeds; both sectors walkable, void band empty, an overworld
@@ -357,24 +379,31 @@ sector  : PASS  100 seeds; both sectors walkable, void band empty, an overworld
                 all 100; control (sector-blind predicate) rejected on 40/104 rows
 portal  : PASS  100/100 seeds shrank when the portal was suppressed; travel works
                 both ways and lands on open ground; control (E away from a portal)
-                does nothing
+                does nothing. LANDING: 100/100 seeds standable with no abilities,
+                mean 818 tiles walkable, worst 6, 4 under 40; control (arrival
+                region gated by hand) caught
 fade    : PASS  selection 8/8 cases; blend 1,808 px exact half-blend vs an
                 SDL_GetRGB-derived reference; both controls fire (band-blind
                 predicate rejected on the 2 cases that matter, fade-ignoring
                 blitter caught)
-sprite  : PASS  round-trip 700 px -> 283 bytes -> 700 px pixel-exact; 37 sprites,
-                90,875 px from 59,914 RLE bytes (1.52x), 989 palette entries;
+sprite  : PASS  round-trip 700 px -> 283 bytes -> 700 px pixel-exact; 56 records,
+                127,757 px from 83,762 RLE bytes (1.53x), 1,391 palette entries;
                 anchors all bottom-centre; no key magenta in any baked palette;
-                three-sided control (halo caught, outline kept, stone kept)
+                three-sided control (halo caught, outline kept, stone kept);
+                11 dream pairs share their pixel stream and their palettes match
+                dream_shift within 1; control (unshifted palette) rejected on
+                30 of 30 entries
 bridge  : PASS  200/200 bridge-bearing seeds shrank the player's reachable
                 component when bridge decking was suppressed
 land    : PASS  30 seeds (100 also clean); RE-AIMED PER SECTOR three times,
                 never loosened - see the note below; both controls fire, and the
                 drowned-map one now trips 4 assertions instead of 3
-fog     : PASS  0 collapsed ramps; 45 colours x 5 reveals, 0 inversions,
-                3 collapses; control (contrast-crushing blend) caught;
+fog     : PASS  0 collapsed ramps; 56 colours x 5 reveals, 0 inversions,
+                5 collapses; control (contrast-crushing blend) caught;
                 value hierarchy: stone tops out at 74 vs grass 78, and the
-                control rejects the ramp that actually shipped (89)
+                control rejects the ramp that actually shipped (89);
+                DREAM hierarchy ground 52, stone 49, void 38, and its control
+                rejects a mechanically shifted sea ramp (62 vs 52)
 font    : PASS  2,316 lit px expected from the glyph table and 2,316 rendered;
                 negative control caught the off-by-one stride (2,448 vs 2,316)
 iso     : PASS  0 px owned by the wrong tile under elevation; upscale x1/x2/x3 exact
@@ -387,9 +416,10 @@ reach   : PASS (0 failures across 50 seeds); negative control PASS; gating relax
 gating  : PASS (0 failures across 30 seeds)
 play    : PASS (0 seeds could not be completed) — still 50/50 on a 1.7x bigger grid
 audio   : worst case 0.136 ms of a 21.333 ms deadline; 0 partial writes
-perf    : render 1.016 ms mean (1.611 ms max), frame 16.812 ms = 59.5 fps
-          — the band sweep now covers 210 bands instead of 166 and still costs
-            5.6% of the 21.333 ms budget
+perf    : render 0.974 ms mean (1.778 ms max), frame 16.704 ms = 59.9 fps
+          — FASTER than before slice 3 despite 19 more sprite records and a
+            recoloured biome, because the band sweep still only draws what is
+            on screen
 ```
 
 > **`--land-test` has now been re-aimed THREE times for the two-sector grid, and never loosened.**
@@ -460,6 +490,19 @@ grep, not the number.**
 | `stone_ramp` | Now at **file scope** beside `wall_pal`, so `--fog-test` can assert on it |
 | `ART_KEY_MAGENTA` / `art_is_key_magenta` | Decision 41's explicit four-colour list |
 | `sector_selftest` / `portal_selftest` / `fade_selftest` | The three new checkers |
+
+**Slice 3's new symbols** (2026-08-06, grep for these):
+
+| Symbol | What it is |
+|---|---|
+| `dream_palette(ty)` | **Render-only** sector predicate. Differs from `dream_sector` by the four void-band rows — see decision 49 |
+| `dream_shift(r,g,b,...)` | THE definition of the biome's colour. `tools/bake.ps1`'s `ConvertTo-DreamColour` is the same formula, checked against it by `--sprite-test` |
+| `void_ramp` / `water_ramp` | Both at file scope now, so `--fog-test` can compare them. `void_ramp` is authored, not shifted — decision 47 |
+| `prop_art_dream[]` / `art_*_dream[]` | The dream flora tables, index-for-index with `prop_art[]` |
+| `portal_frames[8]` / `PORTAL_FPS` | The vortex, beside `player_frames` |
+| `Game.clock` | World animation time. Advanced by `sim_step`, read only by `render`. NOT `Player.anim`, which stops when she does |
+| `walk_from` | Portal-BLIND gated flood, in the self-test. The second documented exception beside `land_flood` |
+| `--dream N` | Self-test flag: 0 stands at the overworld end, 1 crosses. In `main`, beside `--grid` |
 
 | Line | Section | What lives there |
 |---|---|---|
@@ -737,6 +780,46 @@ New decisions from the Phase 12 slices 1–2 session (2026-08-05/06):
     refuses without it, and checking again at the portal would be a second collision input wearing
     a disguise.
 
+New decisions from the Phase 12 slice 3 session (2026-08-06):
+
+46. **A dream sprite is the SAME pixel stream with a different palette, and a checker enforces
+    that rather than a comment claiming it.** `ArtSprite` keeps `pal_off` separate from
+    `data_off`, so a recolour costs one 16-byte record plus its palette — about 70 bytes against
+    ~1,700 to re-author. The whole "the biome is nearly free" argument rests on this and it was
+    asserted nowhere; `--sprite-test` now compares `data_off`/`data_len` across each pair, because
+    an emitter that duplicated the stream instead would look identical on screen and quietly
+    double the header.
+47. **The recolour is a function of LUMINANCE ALONE, exists in two languages, and is kept in step
+    BY TEST.** `dream_shift()` in `src/main.c` is the definition; `ConvertTo-DreamColour` in
+    `tools/bake.ps1` is the copy that must exist because a sprite palette is recoloured at *bake*
+    time. Luminance alone is load-bearing rather than lazy: every output channel is monotone in the
+    input, so a recolour **cannot** reshuffle which of two colours is lighter — exactly the
+    property `--fog-test` proves `fog_lerp` has. An RGB hue rotation offers no such guarantee and
+    could silently invert a canopy ramp. `--sprite-test` checks every baked `_DREAM` entry against
+    the C function; they agree within 1, which is PowerShell rounding half to even against C
+    rounding half away from zero and nothing else. Same "in sync by test, not by discipline" shape
+    as the key-magenta list. **The void ramp is the deliberate exception and is authored:** a
+    mechanical shift of the sea ramp lands at luminance 62 against dream ground at 52 — a gulf
+    brighter than the land floating in it, which is decision 42's fault in a new costume.
+    `--fog-test`'s control rejects exactly that ramp.
+48. **The portal's ARRIVAL REGION is a spawn, and `regions_assign_terrain` exempts it from
+    gating.** `place_portal` must run before `regions_build` or the partition never sees the dream
+    sector, so it picks both ends out of `solid` alone and cannot know what terrain they will be
+    given — and the dream end sits deep in the region graph by construction, which is where the
+    depth bias gates hardest. **Measured: 11 of 100 seeds teleported the player onto a tile
+    `tile_blocked` refuses**, leaving her unable to move at all. A gate you arrive *inside* is not
+    a gate, it is a wall behind you. Fixed in the one function that decides terrain; refusing to
+    travel, or nudging her to a nearby open tile on arrival, were both rejected as collision logic
+    papering over a generation fault. The new assertion is zero-versus-nonzero, so it has no
+    threshold anyone can loosen later.
+49. **A second, render-only sector predicate `dream_palette(ty)` sits beside `dream_sector(ty)`,
+    and they differ by exactly the four void-band rows.** `dream_sector` is a statement about
+    *gameplay* — which landmass a tile belongs to, read by placement and by the tests. Rows 60–63
+    belong to neither, but they are the gulf the dream islands float in, and painting them in the
+    overworld's sea blue drew a strip of ordinary sea along the horizon of a violet void. Widening
+    `dream_sector` instead would have quietly handed four rows to the dream side in
+    `--sector-test`'s counts and `--land-test`'s per-sector bounds.
+
 ---
 
 ## 7. Traps — each of these already cost time once
@@ -913,6 +996,34 @@ true and are not repeated in full here — see git history at `545598f` for verb
   Added `--grid` (self-test only, beside `--overlay` and `--tune`) to screenshot the 12-seed view
   without a human holding F2. Reach for it whenever the question is about world *shape*.
 
+**New in the Phase 12 slice 3 session (2026-08-06):**
+
+- **A COMPONENT YOU CANNOT STAND IN IS STILL A COMPONENT YOU CAN REACH**, and that gap swallowed a
+  bug the whole suite was blind to. The portal dropped the player into a gated region on 11 of 100
+  seeds, leaving her unable to move at all. `--gating-test` could not catch it: it asserts
+  walk-reachable == graph-reachable, and both agree perfectly that a gated tile is unenterable —
+  they are *supposed* to. `--portal-test`'s shrink measure read 100/100 before and after, because
+  it floods on `solid` and never asks about terrain. `world_solvable` only asks about entities, and
+  there are none in the dream sector yet. **A property about an arrival POINT needs its own
+  assertion; reachability tests are about sets and will not notice.** Found by a human on the first
+  seed they played, minutes after the slice was reported done.
+- **A predicate that is right for gameplay can be wrong for rendering, and quietly.** `dream_sector`
+  starts at row 64; the void band is rows 60–63, so the gulf between the landmasses rendered in the
+  overworld's sea blue. The fix was a *second* render-only predicate, not a widened one — see
+  decision 49. **Before reusing a domain predicate for a render decision, check its boundary rows.**
+- **A clock chosen for a character is the wrong clock for the world.** The plan drove the portal
+  vortex from `Player.anim`, which is reset to 0 on key release so a standing player shows frame 0.
+  Correct for a walk cycle; it would have frozen the portal whenever the player stood still. Any
+  future ambient motion wants `Game.clock`, which is what that field now exists for.
+- **A contact shadow belongs to the ground, not to the prop.** The baked props' shadow was
+  grass-green, so every violet dream tree drew a ring of lawn at its base — at the one place the eye
+  is already looking, because a contact shadow is what says where the trunk meets the tile. Found by
+  screenshot; no test has an opinion on it.
+- **Check the bake for sprites nothing calls before adding more.** `ART_BLD_PORTAL_ARCH` had been
+  baked and drawn by nothing since Phase 07 — it turned out to be exactly the art this slice needed.
+  Conversely the plan asked for `fx_well` and `fx_crystal` to be baked here, and nothing draws
+  either until slice 5 or at all; that would have been ~16 KB of dead weight.
+
 ---
 
 ## 8. Verified vs NOT verified
@@ -1016,6 +1127,18 @@ controls; audio callback timing; render cost). New this session:
 - **Phase 12 slices 1–2 cost +1,536 bytes total** (755,200 → 756,736), and render went 1.065 →
   1.016 ms — no regression from a 1.7× larger grid, because the band sweep still only draws what
   is on screen.
+- **Slice 3 cost +10,240 bytes total** (756,736 → 766,976, the last 512 of it the arrival fix) and
+  render *improved* again, 1.016 → 0.974 ms. **The biome itself is ~800 of those bytes**: 11 dream
+  props are the same pixel streams with new palettes, asserted by `--sprite-test` rather than
+  assumed. Almost all the rest is the 8 portal frames.
+- **The bake's recolour and `dream_shift()` agree on every entry of every dream palette**, within
+  the 1 that separates PowerShell's round-half-to-even from C's round-half-away. Two
+  implementations of one formula, kept in step by a checker rather than by discipline.
+- **The dream value hierarchy holds, and its control has teeth.** Ground 52, stone 49, void 38; the
+  control rejects a mechanically shifted sea ramp at 62, which is the version the plan specified.
+- **The portal now lands the player somewhere she can stand, on 100 of 100 seeds** — 11 of 100
+  failed that before, with no test able to see it. Mean walkable area from the arrival point 739 →
+  818 tiles. Control: gate the arrival region by hand, require rejection.
 - **The art bake costs 62,976 shipping bytes and did not weaken anything.** Re-**run**, not
   re-argued, after the seam landed: sprite, iso, font, fog, rng, move, land (30 + both controls),
   village (30 + both controls), region (30), reach (50 + control), gating (30), bridge (200/200),
@@ -1023,9 +1146,21 @@ controls; audio callback timing; render cost). New this session:
 
 ### NOT verified — be honest about these
 
-- **NOBODY HAS SEEN THE PORTAL, OR THE DREAM REALM.** Nothing draws the portal and the dream
-  sector renders in the overworld's palette, so travel is proven by assertion and by a reachability
-  measurement — never by eye. **This is slice 3's job and it is the next thing to build.**
+- **NOTHING IN THE DREAM REALM HAS BEEN SEEN IN MOTION.** The vortex is 8 frames at 8 fps driven by
+  `Game.clock`; no run diffs two frames to prove it advances, and nobody has watched it turn.
+- **The dream realm's fogged periphery is the overworld's cool grey haze.** `fog_lerp` is one global
+  blend and knows nothing about sectors, so unrevealed dream ground reads grey rather than violet.
+  That is the core mechanic working as designed — the overworld looks the same — but a violet haze
+  on the dream side is a real option nobody has looked at on screen.
+- **Rocks stand in the void.** `prop_at` puts boulders on any solid tile, ocean included, so the
+  starfield carries scattered rocks. Over water they read as rocks in the shallows; over a void they
+  read as floating debris. May be on-concept for a floating-island biome, may be a fault. Unjudged.
+- **4 of 100 seeds land the player in a 6-to-30 tile pocket** on arrival. Standable — that is
+  asserted — but small. Legitimate gated design (the overworld spawn works the same way), and left
+  to task 9, where the entity quota makes the existing verifier reject a landing that opens onto
+  nothing, with **no invented number anywhere**. `--portal-test` reports the count meanwhile.
+- **The user's verdict on the dream realm's look was "all good for now"**, which discharges the
+  slice 3 gate. That is not the same as "this is the final art direction".
 - **`--play-test`'s 50/50 does not exercise travel.** Every entity still lives in the overworld, so
   the autopilot never needs to cross. The portal's effect on *reachability* is measured; its effect
   on *completability* is untested until task 9 puts fragments in the dream sector.
@@ -1236,9 +1371,15 @@ the roof).
 **Phase 07** (the bake pipeline **and** 37 of the team's real sprites, +62,976 bytes) landed the
 same day the art arrived, which absorbed most of what Phase 09 was holding.
 
-**START HERE: [[Phase 12 - Dream Realm]] slice 3**, which is tasks 6–7 of
+**START HERE: [[Phase 12 - Dream Realm]] slice 4**, which is tasks 8–9 of
 [[Phase 12 - Dream Realm Plan]]. The direction changed on 2026-08-05 and this supersedes the old
 "start at Phase 08" instruction that four handovers carried.
+
+**Task 9 is the run to watch.** It puts 4 fragments and 2 Souls in the dream sector, which is the
+first time `--play-test` has any reason to cross the portal — so it turns travel from a thing
+proven by assertion into a thing exercised 50 times. It is also what makes the arrival-pocket
+question enforce itself: a landing that opens onto nothing gets rejected by the verifier that
+already exists, with no new threshold to invent.
 
 **Phase 12 progress, slice by slice:**
 
@@ -1246,8 +1387,8 @@ same day the art arrived, which absorbed most of what Phase 09 was holding.
 |---|---|---|
 | 1 | Grid growth, dream sector, `--sector-test`, `--land-test` re-aimed | **DONE** — `cd8e9d3` |
 | 2 | `tile_neighbours`, portal, `--portal-test`, travel | **DONE** — `bf66217`, `4f4cf64` |
-| **3** | **Dream palettes (tier-1 recolour) + baked FX. It looks like Lumiara** | **NEXT** |
-| 4 | Prompt indicator + fragments into the dream sector | Planned |
+| 3 | Dream palettes (tier-1 recolour) + baked FX. It looks like Lumiara | **DONE** — `b35f25a`, `c3e4d30`. Look-gate discharged by the user 2026-08-06 |
+| **4** | **Prompt indicator + fragments into the dream sector** | **NEXT** — tasks 8–9 |
 | 5 | Shards + the Dream Well + `--shard-test` | Planned |
 
 **Slice 3 in one paragraph:** the biome recolour is nearly free because `ArtSprite` stores
