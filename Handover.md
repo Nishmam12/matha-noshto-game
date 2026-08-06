@@ -30,7 +30,7 @@ Running log: [[INDEX]]
 | opencode | Phase 11: ship critical | `feat/phase-11-ship-complete` | **DONE** — all DoD items, committed (`8a27404`), PR pending | 2026-08-06 | 5-layer softsynth (deterministic, 0.325 ms worst case vs 21.333 ms deadline), chime/shard/portal SFX; HUD (counters, minimap, toasts, win banner) on the font extended with lowercase a–z + `/` (0x20–0x7A, 91 glyphs); `--hud-test` + `--font-test` green; full suite green; `nm` clean (no SDL_image/ttf/mixer); +4,608 bytes → 786,432 |
 | opencode | Phase 11 bugfix: shard pickup | `feat/phase-11-ship-complete` | **DONE** — committed (`7cd408a`), pushed | 2026-08-06 | E-key restructure left the shard branch unreachable (nothing caught it: autopilot and `--shard-test` both bypassed the key path). Extracted the whole interaction into `try_interact()`, handler now calls it, `--shard-test` drives it (`shard pickup: PASS`); full suite re-run green; release size unchanged 786,432 |
 | opencode | Rescale TILE 18 + HUD | `feat/phase-11-ship-complete` | **DONE** — committed (`068fea8` + `a8b178f`), pushed | 2026-08-06 | `TILE 24→18` denser tiles Option B (`144×138` world, 19,872 tiles, `REVEAL_TILES 7→9`, villages `4→6`/`12→16`/`29→39`/`22→32`), stack guard `400→700KB`, `soul_bob` floor 2px, minimap `2→1px/tile` (19,872px vs 79,488px); full 23/23 PASS, render 1.393ms, `+512` → 786,944 |
-| opencode | Phase 13 Aetherhold Slice 1–2 | `feat/phase-11-ship-complete` | **IN PROGRESS** — `5630985`, `42a4081`, `86fad03`, supplied pack integration in progress | 2026-08-06 | Replaced bad rectangle/old Dream-gap gate with southeast fixed island rows 35–76, mainland key `(88,59)`, overworld causeway `x94..107,y56`; actual `assets/dark_fantasy` wall/building/prop pack baked as `AETHER_*` (93 records / 82 streams / 11 dream variants); full suite + `--aether-test` green; dungeon/keep follow-up deferred |
+| opencode | Phase 13 Aetherhold Slice 1–2 | `feat/phase-11-ship-complete` | **IN PROGRESS** — `5630985`, `42a4081`, `86fad03`, `6580258` | 2026-08-06 | Replaced bad rectangle/old Dream-gap gate with southeast fixed island rows 35–76, mainland key `(88,59)`, overworld causeway `x94..107,y56`; supplied `assets/dark_fantasy` wall/building/prop pack baked as `AETHER_*` (93 records / 82 streams / 11 dream variants); full suite + `--aether-test` green; dungeon/keep follow-up deferred |
 
 **Resolved 2026-08-06, later still.** Phases 08 and 09 merged into `feat/phase-08-and-09`, PR #1
 merged into `main` (`b4f2fde` — that branch also carried all of Phase 12, so `main` already has the
@@ -194,12 +194,13 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 | Warnings | zero, under `-Wall -Wextra` |
 | Plan progress | **Phases 00–12 all done** — including 08 (save/load), 09 (restoration rebuild), 10 (motion), 11 (audio + HUD, ship critical) and 12 (dream realm, 5/5 slices). See [[Phase Roadmap]]. Only the submission checklist remains |
 
-> **If you are starting here: all twelve phases are done, and the two visual/gameplay tweaks
-> since are the denser `TILE 18` world and the smaller minimap.** Phase 11 landed audio and the HUD;
+> **If you are starting here: all twelve phases are done, and Phase 13 Slice 1–2 is implemented.**
+> The changes since ship-critical are the denser `TILE 18` world, smaller minimap, southeast
+> Aetherhold island/causeway, and supplied dark-fantasy castle assets. Phase 11 landed audio and the HUD;
 > the E-key restructure had silently made shard pickups unreachable, now extracted into `try_interact`
 > and covered by a `--shard-test` regression; the grid went `108×104→144×138` at `TILE 18` keeping
 > the same screen extent with 77% more tiles. Everything ships from `feat/phase-11-ship-complete`
-> (pushed `a8b178f`). What remains is the human submission checklist — merge to `main`,
+> (pushed `6580258`). What remains is the human submission checklist — merge to `main`,
 > second-machine smoke test, repo visibility, final wrap. Check the Agent Log at the top of this
 > file for anything another agent may have picked up.
 
@@ -468,8 +469,9 @@ $e = ".\build\wayfarer-selftest.exe"
                                                      #   --shard-at N does the same for a shard
 ```
 
-**All currently pass.** Last full run, **2026-08-06**, after Phase 11 (audio + HUD) **and the
-shard-pickup fix** — the whole suite was re-run after the E-key restructure change and stayed green:
+**All currently pass.** Last full run, **2026-08-06**, after Phase 13 Aetherhold Slice 1–2 and the
+supplied dark-fantasy asset bake — the whole suite was re-run after the southeast layout change and
+stayed green:
 
 ```
 audio   : PASS  tone 439.9 Hz; --layers peak 0.6417; --layers --sfx peak 0.9151,
@@ -503,8 +505,8 @@ fade    : PASS  selection 8/8 cases; blend 1,808 px exact half-blend vs an
                 blitter caught). PROMPT: bob within +/-2 AND asserted to move;
                 NONE writes 0 px; the 3 kinds render 400/475/438 px so none is a
                 duplicate; control (unclamped sine) rejected on 264/400 samples
-sprite  : PASS  round-trip 700 px -> 283 bytes -> 700 px pixel-exact; 64 records,
-                135,645 px from 87,399 RLE bytes (1.55x), 1,493 palette entries;
+sprite  : PASS  round-trip 700 px -> 283 bytes -> 700 px pixel-exact; 93 records,
+                298,130 px from 194,068 RLE bytes (1.54x), 2,578 palette entries;
                 anchors all bottom-centre; no key magenta in any baked palette;
                 three-sided control (halo caught, outline kept, stone kept);
                 11 dream pairs share their pixel stream and their palettes match
