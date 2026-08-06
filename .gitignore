@@ -27,3 +27,9 @@ sdl2-build/
 *.o
 *.obj
 *.exe
+
+# A coding-agent tool's own config, with live API keys in plaintext. Found on 2026-08-06 sitting
+# untracked at the vault root — a separate agent ("opencode"/qwen) was run against this same
+# working tree. Never committed and must never be: this entry exists so a future `git add -A`
+# cannot catch it by accident.
+opencode.json

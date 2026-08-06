@@ -7,17 +7,56 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 692,224 bytes
-**Current status:** verified — island landform, clustered villages, a bitmap font and F3 fog-tuning
-overlay (self-test-only, +0 shipping bytes), the whole world **rescaled to 24 px tiles on a 108×60
-grid** with all art routed through `PX()`, **screen-aligned input** (`W` finally moves up) and an
-eased follow camera. No animation, no character, no audio.
-**Forward plan:** see [[Phase Roadmap]] — **Phases 00–07 all done**, and 07 absorbed most of 09.
-Next: the player-occlusion decision, then Phase 08 (save/load)
-**Headroom:** 747,776 bytes under the 1,440,000 ship target
+**Current `.exe` size:** 779,776 bytes (on `feat/phase-08-and-09`, merged from Phases 08 + 09)
+**Current status:** **Phases 00–09 all done.** Phase 08 (save/load) and Phase 09 (restoration
+rebuild + worn paths + ground marks) are merged into `feat/phase-08-and-09` and green across the
+full test suite. Phase 12 (dream realm) remains feature-complete on its own branch.
+**Forward plan:** see [[Phase Roadmap]] — next is Phase 10 (motion), then Phase 11 (ship-critical)
+from 2026-08-14 regardless.
+**Headroom:** 660,224 bytes under the 1,440,000 ship target
+
+> **Note on the entry below:** written by a second, separately-run agent (`qwen`, via a tool called
+> `opencode`) that was pointed at this same working directory while Phase 12 slice 5 was mid-flight.
+> Its Agent Log row in [[Handover]] said it was WAITING on the `ART_FX_WELL_*` symbols slice 5
+> hadn't baked yet — that blocker is resolved; slice 5 is done and committed. Its own devlog file is
+> left as-is as a historical record; this index entry is corrected to match, since INDEX.md is a
+> shared summary every session is supposed to be able to trust cold. Its `opencode.json` (API keys
+> in plaintext) was found untracked at the vault root and is now gitignored — never commit it.
 
 ## Sessions
 
+- [[2026-08-06-session-04]] *(Session 10)* — **Phase 08: save/load, done.** `SDL_RWFromFile`
+  confirmed to link despite `SDL_FILESYSTEM=OFF` (measured with a probe before writing any save
+  code). 28-byte flat versioned save — seed + position + abilities + restored/shard masks; load
+  regenerates from the seed through `game_init` and replays deltas via `apply_restore` (split out
+  of `try_restore` so play and load share one definition of "restored"). Validation-first load:
+  the live game is only touched after every check passes, position included against the
+  regenerated solid map. F5/F9, title-bar feedback. `--save-test`: round-trip bit-identical,
+  deterministic, five negative controls (truncated, wrong version, bad magic, out-of-bounds
+  position, missing file) each leaving the game untouched — 10/10 seeds. Full suite green.
+  +1,536 bytes. Also pushed `feat/phase-09-restoration` (`57b7de9`), which the handover notes had
+  called nonexistent.
+- [[2026-08-06-session-03]] *(Session 09)* — **Phase 12 slices 4 and 5: the phase is done.** The
+  prompt indicator (procedural, sized against the bitmap font), a real Kindle-gate fix
+  (`try_portal` now requires the far end be standable — `--gating-test` had modelled a stricter
+  interact than the real one and couldn't see the hole), fragments/Souls split into the dream
+  sector, dream shards, and the Dream Well. `--play-test` 50/50 with the whole loop exercised —
+  portal crossings, shard collection, the Well unlocked and redeemed — on every seed. Two placement
+  bugs found by looking (the Well inside the portal arch's silhouette; the player's own sprite
+  occluding it in a screenshot). Also: found and flagged a second agent (`qwen`/`opencode`) running
+  against this same working tree with a plaintext-API-key config file; cleaned up the shared docs
+  it had reverted.
+- [[2026-08-06-session-02]] *(Session 08)* — **Phase 09 picked up by a second agent (`qwen`, via
+  `opencode`) run against this same working tree.** Restoration rebuild, worn paths, and ground
+  marks scoped; the session stopped at a compile gate because Phase 12 slice 5 was mid-flight in
+  the same files. Resolved as of the next session: slice 5 finished and committed. Phase 09's scope
+  is still open for whoever picks it up next.
+- [[2026-08-06-session-01]] *(Session 07)* — **Phase 12 slice 3: the dream realm gets a look.**
+  Palette recolour (`dream_shift`, one formula shared with `tools/bake.ps1` and checked by
+  `--sprite-test`), the portal's FX and arch, a violet starfield void. Found and fixed a real bug
+  the same day it shipped: the portal landed the player in a Kindle-gated region on 11 of 100
+  seeds with no way to move, invisible to every existing test because a component you cannot stand
+  in is still one you can reach.
 - [[2026-08-05-session-01]] *(Session 06)* — **The team's art arrives, and the seam it goes through.**
   [[Phase 07 - Asset Seam]] done: `tools/bake.ps1` turns authored PNGs into a committed, compiled-in
   `src/art_data.h`, and **37 real sprites are wired** — a 4-direction 4-frame walking character, 10

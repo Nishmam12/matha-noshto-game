@@ -38,15 +38,66 @@ param(
     [string] $AssetRoot = "",
     [string] $OutFile   = "",
 
-    # Only these subdirectories are baked. `generated/` is duplicates and sprite sheets;
-    # `magical/` is portal and crystal effect frames with no caller in the renderer yet, and
-    # baking a sprite nothing draws is pure byte cost - the same rule that kept the bitmap font
+    # Only these subdirectories are baked. `generated/` is duplicates and sprite sheets.
+    #
+    # `magical/` holds 40 effect frames; only the 8 the renderer actually calls are baked, and
+    # they are named one by one in $FxFrames below rather than by taking the whole folder.
+    # Baking a sprite nothing draws is pure byte cost - the same rule that kept the bitmap font
     # at +0 shipping bytes until something called it.
     [string[]] $Categories = @("player", "nature", "buildings")
 )
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
+
+# Decision 41. The four colours the bush's magenta base disc is drawn from, measured off the
+# delivered PNG: 125 of its 163 magenta pixels sit in the bottom quarter, and no other delivered
+# sprite has a base disc at all. Kept in sync BY TEST, not by discipline - src/main.c holds the
+# same four and --sprite-test fails if one reaches a baked palette.
+#
+# If a future art delivery draws the disc in a different colour this list will silently strip
+# nothing. That is why the strip count is PRINTED per sprite: a quiet zero is the signal.
+$script:KeyMagenta = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]@("116,48,94", "148,65,113", "94,39,81", "105,42,90"))
+$script:TotalStripped = 0
+
+# Phase 12 task 6. Which categories get a second, dream-realm palette emitted alongside the
+# original. `nature` only: the dream sector has no buildings (place_buildings never samples those
+# rows) and the player is the same person on both sides of the portal, so a recoloured character
+# would read as a costume change rather than as a change of place.
+$script:DreamCategories = @("nature")
+
+# Phase 12 tasks 7 and 11. The effect frames with a caller in the renderer, named individually.
+#
+# Both fx_portal and fx_well are 16 authored frames, and this takes every SECOND one of each, so
+# the baked set is a complete loop at half the rate rather than the first half of one. fx_crystal
+# stays OUT: nothing in this phase draws it as a baked sprite - the dream realm's crystal
+# decoration and the shard pickup are both procedural (draw_crystal, draw_shard) - and baking a
+# sprite with no caller is pure byte cost, the rule that kept the bitmap font at +0 shipping bytes.
+$script:FxFrames = @("fx_portal_0",  "fx_portal_2",  "fx_portal_4",  "fx_portal_6",
+                     "fx_portal_8",  "fx_portal_10", "fx_portal_12", "fx_portal_14",
+                     "fx_well_0",    "fx_well_2",    "fx_well_4",    "fx_well_6",
+                     "fx_well_8",    "fx_well_10",   "fx_well_12",   "fx_well_14")
+
+# ------------------------------------------------------------ dream recolour --
+# A dream sprite is the SAME pixel stream with a different palette: ArtSprite keeps pal_off
+# separate from data_off, so a variant costs one 16-byte record plus its palette - about 70 bytes
+# against ~1,700 to re-author the sprite. That is what makes the whole biome nearly free.
+#
+# The transform is a function of LUMINANCE ALONE, and that is load-bearing rather than lazy. Every
+# output channel is monotonically increasing in the input luminance, so the recolour cannot
+# reshuffle which of two colours is lighter - and fog_lerp's entire proven contract (--fog-test) is
+# that the value hierarchy survives the blend. A hue rotation in RGB space would have no such
+# guarantee and could silently invert a canopy ramp.
+function ConvertTo-DreamColour {
+    param([int] $r, [int] $g, [int] $b)
+    $lum = (0.299 * $r + 0.587 * $g + 0.114 * $b)
+    $t   = [Math]::Min(1.0, $lum / 200.0)
+    $dr  = 0.42 * $lum + 78 * $t     # violet body
+    $dg  = 0.30 * $lum + 40 * $t     # green pulled well down; this is what kills the "forest" read
+    $db  = 0.72 * $lum + 96 * $t     # blue lifted hardest, so highlights climb toward lavender/cyan
+    return @([int][Math]::Min(255, $dr), [int][Math]::Min(255, $dg), [int][Math]::Min(255, $db))
+}
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrEmpty($AssetRoot)) { $AssetRoot = Join-Path $root "..\assets" }
@@ -82,6 +133,33 @@ function ConvertTo-Sprite {
 
     $img = Get-PixelData -Path $Path
     $w = $img.Width; $h = $img.Height; $stride = $img.Stride; $b = $img.Bytes
+
+    # Decision 41: knock out the authored magenta base disc, BEFORE the bounding box is measured.
+    # Order matters. The disc sits under the bush's real base, so removing it afterwards would
+    # leave the trimmed box - and therefore the bottom-centre anchor - sitting on a halo that is
+    # no longer drawn, and the bush would float. Stripping first lets the anchor land on the art.
+    #
+    # An explicit colour list, not a "magenta-ish" test. The heuristic version of this flagged the
+    # bridge's mauve stone (9C839C), a roof red (A51A35) and three purple-greys on the buildings;
+    # those overlap the disc in RGB space and no threshold separates them. src/main.c's
+    # art_is_key_magenta carries the same four colours as an independent second copy, and
+    # --sprite-test fails if any of them ever reaches a baked palette.
+    $stripped = 0
+    for ($y = 0; $y -lt $h; $y++) {
+        $row = $y * $stride
+        for ($x = 0; $x -lt $w; $x++) {
+            $o = $row + $x * 4
+            if ($b[$o + 3] -lt 128) { continue }
+            if ($script:KeyMagenta.Contains("$($b[$o+2]),$($b[$o+1]),$($b[$o])")) {
+                $b[$o + 3] = 0
+                $stripped++
+            }
+        }
+    }
+    if ($stripped -gt 0) {
+        Write-Host ("  key colour: stripped {0} px from {1}" -f $stripped, $Name)
+        $script:TotalStripped += $stripped
+    }
 
     # Opaque bounding box.
     $minX = $w; $minY = $h; $maxX = -1; $maxY = -1
@@ -176,9 +254,23 @@ foreach ($cat in $Categories) {
     if (-not (Test-Path $dir)) { Write-Warning "missing category: $dir"; continue }
     foreach ($f in (Get-ChildItem $dir -Filter *.png | Sort-Object Name)) {
         $name = ($f.BaseName -replace '[^A-Za-z0-9]', '_').ToUpperInvariant()
-        $sprites += (ConvertTo-Sprite -Path $f.FullName -Name $name)
+        $sp = ConvertTo-Sprite -Path $f.FullName -Name $name
+        $sp | Add-Member -NotePropertyName Category -NotePropertyValue $cat
+        $sprites += $sp
     }
 }
+
+# The effect frames, by name rather than by folder - see $FxFrames. Order is the animation order,
+# so ART_FX_PORTAL_0 .. _14 are contiguous ids and the renderer can index the run.
+foreach ($fx in $script:FxFrames) {
+    $path = Join-Path (Join-Path $AssetRoot "magical") "$fx.png"
+    if (-not (Test-Path $path)) { throw "missing effect frame: $path" }
+    $name = ($fx -replace '[^A-Za-z0-9]', '_').ToUpperInvariant()
+    $sp = ConvertTo-Sprite -Path $path -Name $name
+    $sp | Add-Member -NotePropertyName Category -NotePropertyValue "magical"
+    $sprites += $sp
+}
+
 if ($sprites.Count -eq 0) { throw "no sprites found under $AssetRoot" }
 
 # ------------------------------------------------------------------- emit --
@@ -186,14 +278,32 @@ $palBytes  = New-Object System.Collections.Generic.List[byte]
 $dataBytes = New-Object System.Collections.Generic.List[byte]
 $records   = @()
 
+$dreamCount = 0
 foreach ($s in $sprites) {
-    $palOff  = $palBytes.Count / 3
     $dataOff = $dataBytes.Count
-    foreach ($c in $s.Pal) { $palBytes.Add([byte]$c[0]); $palBytes.Add([byte]$c[1]); $palBytes.Add([byte]$c[2]) }
     foreach ($d in $s.Data) { $dataBytes.Add($d) }
+
+    # Base record.
+    $palOff = $palBytes.Count / 3
+    foreach ($c in $s.Pal) { $palBytes.Add([byte]$c[0]); $palBytes.Add([byte]$c[1]); $palBytes.Add([byte]$c[2]) }
     $records += [pscustomobject]@{
         Name = $s.Name; W = $s.W; H = $s.H; AX = $s.AnchorX; AY = $s.AnchorY
         PalOff = [int]$palOff; PalN = $s.Pal.Count; DataOff = $dataOff; DataLen = $s.Data.Count
+    }
+
+    # Dream variant: a second record over the SAME $dataOff/$dataLen, with a recoloured palette.
+    # Nothing about the pixels is duplicated, which is the whole point - see ConvertTo-DreamColour.
+    if ($script:DreamCategories -contains $s.Category) {
+        $palOff = $palBytes.Count / 3
+        foreach ($c in $s.Pal) {
+            $d = ConvertTo-DreamColour -r $c[0] -g $c[1] -b $c[2]
+            $palBytes.Add([byte]$d[0]); $palBytes.Add([byte]$d[1]); $palBytes.Add([byte]$d[2])
+        }
+        $records += [pscustomobject]@{
+            Name = "$($s.Name)_DREAM"; W = $s.W; H = $s.H; AX = $s.AnchorX; AY = $s.AnchorY
+            PalOff = [int]$palOff; PalN = $s.Pal.Count; DataOff = $dataOff; DataLen = $s.Data.Count
+        }
+        $dreamCount++
     }
 }
 
@@ -264,10 +374,12 @@ if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null
 # ASCII, no BOM - see the encoding note at the top of this file.
 [System.IO.File]::WriteAllText($OutFile, $sb.ToString(), (New-Object System.Text.ASCIIEncoding))
 
+# Over the SPRITES, not the records: a dream variant shares its predecessor's stream, so counting
+# its pixels again would inflate the compression ratio with pixels that were never stored twice.
 $rawPx = 0
-foreach ($r in $records) { $rawPx += $r.W * $r.H }
+foreach ($s in $sprites) { $rawPx += $s.W * $s.H }
 "BAKE OK    $OutFile"
-"sprites    $($records.Count)"
+"sprites    $($records.Count)  ($($sprites.Count) streams + $dreamCount dream palette variants)"
 "palette    $($palBytes.Count) bytes  ($($palBytes.Count / 3) entries)"
 "rle data   $($dataBytes.Count) bytes  (from $rawPx trimmed px = {0:N1}x)" -f ($rawPx / [double]$dataBytes.Count)
 "records    $($records.Count * 16) bytes"
