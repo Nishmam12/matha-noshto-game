@@ -57,8 +57,8 @@
  * so collision is unchanged in tile terms — player_blocked divides by TILE, so
  * doubling both the player box and the tile cancels exactly. Only absolute
  * pixel numbers move (speed_selftest's 110.00 becomes 220.00). */
-#define TILE     24
-#define WORLD_W  108
+#define TILE     18
+#define WORLD_W  144
 
 /* TWO LANDMASSES IN ONE GRID — see design/phases/Phase 12 - Dream Realm.md, approach A.
  *
@@ -70,11 +70,11 @@
  * The void band is not decoration. It guarantees the two sectors share no tile edge, so the ONLY
  * connection between them is the portal — which is exactly what --portal-test measures, and what
  * --sector-test asserts is true before the portal exists. */
-#define OVERWORLD_H  60                        /* rows 0 .. 59   */
-#define DREAM_GAP    4                         /* rows 60 .. 63, always solid */
-#define DREAM_Y0     (OVERWORLD_H + DREAM_GAP) /* 64 */
-#define DREAM_H      40                        /* rows 64 .. 103 */
-#define WORLD_H      (DREAM_Y0 + DREAM_H)      /* 104 */
+#define OVERWORLD_H  80                        /* rows 0 .. 79   */
+#define DREAM_GAP    5                         /* rows 80 .. 84, always solid */
+#define DREAM_Y0     (OVERWORLD_H + DREAM_GAP) /* 85 */
+#define DREAM_H      53                        /* rows 85 .. 137 */
+#define WORLD_H      (DREAM_Y0 + DREAM_H)      /* 138 */
 
 /* The ONLY thing in the codebase that knows where the dream realm is. Read by tile_colour,
  * world_heights, prop_at, place_rivers, place_buildings and place_entities, so moving the sector
@@ -120,8 +120,9 @@
 
 /* In tiles, so it scales with tile COUNT rather than tile size. Raised from 5
  * alongside TILE 32 -> 24 to keep the sight circle roughly the same size in
- * world pixels — 5 tiles at 32 px and 7 at 24 px are both about 160 px. */
-#define REVEAL_TILES 7     /* sight radius, in tiles */
+ * world pixels — 5 tiles at 32 px, 7 at 24 px and 9 at 18 px are all about
+ * 160 px. */
+#define REVEAL_TILES 9     /* sight radius, in tiles */
 #define REVEAL_RATE  2.5f  /* sight units/sec */
 
 /* Walking somewhere reveals its SHAPE but not its colour — sight tops out well
@@ -825,20 +826,21 @@ typedef struct {
 /* Houses cluster into villages rather than covering the island. BUILDING_TARGET
  * is what placement actually aims for; BUILDING_MAX stays the array bound. */
 /* These are in TILES, so they do not scale with tile size — they had to be
- * re-derived by hand for TILE 32 -> 24. Radius and spacing grew by 32/24 so a
- * village stays the same size in world pixels rather than shrinking with the
- * tiles; sites and target grew because the world now holds 1.8x as many tiles
- * and 3 villages in it read as an empty island. */
-#define VILLAGE_SITES   4
-#define VILLAGE_RADIUS  12  /* tiles from a site centre to its outermost plot */
-#define VILLAGE_SPACING 29  /* minimum tiles between two site centres */
-#define BUILDING_TARGET 22
+ * re-derived by hand for TILE 32 -> 24 and again for 24 -> 18. Radius and
+ * spacing grew by 24/18 so a village stays the same size in world pixels rather
+ * than shrinking with the tiles; sites and target grew because the world now
+ * holds ~1.8x as many tiles and 4 villages in it would read as an empty
+ * island. */
+#define VILLAGE_SITES   6
+#define VILLAGE_RADIUS  16  /* tiles from a site centre to its outermost plot */
+#define VILLAGE_SPACING 39  /* minimum tiles between two site centres */
+#define BUILDING_TARGET 32
 /* Furthest apart two house centres can be and still get a connecting path.
  * Larger than any plausible intra-cluster pair (centres within a cluster sit
  * at most ~2x VILLAGE_RADIUS apart) so lanes reliably join a village's houses,
  * yet well under the gap between clusters — a path between two villages only
  * happens when the seeds place them nearly touching, and reads as a lane. */
-#define PATH_CLUSTER    24
+#define PATH_CLUSTER    32
 /* Wall height per storey, and the plinth under the first one.
  *
  * Both were roughly doubled after the roof-alignment fix made the real
@@ -950,12 +952,13 @@ typedef struct {
 /* FAILS THE BUILD if the two big generation locals stop fitting a comfortable stack budget.
  *
  * These are deliberately locals rather than statics (the .data COMDAT trap above), and eight
- * self-test functions declare BOTH on one frame — about 281 KB at WORLD_H 104, against MinGW's
- * 2 MB default. That is fine, and it is fine by measurement rather than by hope. The grid grew
- * once for the dream realm and will be tempting to grow again, so the number is checked at
- * compile time instead of being rediscovered as a stack overflow in a self-test. */
+ * self-test functions declare BOTH on one frame — about 281 KB at WORLD_H 104, about 497 KB at
+ * 144x138 (TILE 18), against MinGW's 2 MB default. That is fine, and it is fine by measurement
+ * rather than by hope. The grid grew once for the dream realm and again for TILE 18 density,
+ * so the number is checked at compile time instead of being rediscovered as a stack overflow
+ * in a self-test. */
 typedef char wayfarer_stack_guard[
-    (sizeof(World) + sizeof(Scratch) < 400 * 1024) ? 1 : -1];
+    (sizeof(World) + sizeof(Scratch) < 700 * 1024) ? 1 : -1];
 
 /* Which way the character sprite faces, in SCREEN terms — the same space the input is expressed
  * in (decision 28), so "held D" and "faces right" cannot drift apart. The baked art names its
@@ -5462,7 +5465,9 @@ static int mote_gate(Uint32 hash, float rst, int overlay, int terr, int path, in
  * with --motion-test so its bound is tested, not assumed. */
 static int soul_bob(Uint32 h, float t)
 {
-    return -(int)(SDL_sinf(t * 3.0f + (float)((h >> 8) & 31) * 0.2f) * (float)PX(2));
+    int amp = PX(2);
+    if (amp < 2) amp = 2;
+    return -(int)(SDL_sinf(t * 3.0f + (float)((h >> 8) & 31) * 0.2f) * (float)amp);
 }
 
 static void render(SDL_Surface *fb, Game *g, int overlay)
@@ -10255,6 +10260,7 @@ static int motion_selftest(Uint64 base)
     /* (5) soul_bob: bounded, deterministic, nonzero somewhere. */
     {
         int worst = 0, nz = 0, s1, s2;
+        int bound = PX(2); if (bound < 2) bound = 2;
         for (i = 0; i < 300; i++) {
             int s = soul_bob((Uint32)((Uint64)i * 2654435761u) ^ (Uint32)seed,
                              (float)i * 0.19f);
@@ -10262,8 +10268,8 @@ static int motion_selftest(Uint64 base)
             if (s > worst) worst = s;
             if (s) nz++;
         }
-        if (worst > PX(2)) {
-            printf("FAIL  soul bob exceeded %d px\n", PX(2));
+        if (worst > bound) {
+            printf("FAIL  soul bob exceeded %d px\n", bound);
             fails++;
         }
         s1 = soul_bob(0x1234u, 1.7f);
@@ -10275,7 +10281,7 @@ static int motion_selftest(Uint64 base)
         if (!nz) {
             printf("FAIL  soul bob is always zero\n");
             fails++;
-        } else if (worst <= PX(2)) {
+        } else if (worst <= bound) {
             printf("soul bob: PASS  max %d px, deterministic, %d/%d nonzero\n",
                    worst, nz, 300);
         }
