@@ -1,7 +1,7 @@
 ---
 tags: [process, handover, wayfarer]
 updated: 2026-08-06
-exe_size_bytes: 899584
+exe_size_bytes: 846848
 ---
 
 # Handover — Wayfarer
@@ -187,10 +187,10 @@ not, lives outside the vault at `C:\Users\nabil\.claude\projects\g--1-44mb-game\
 
 | | |
 |---|---|
-| **`build\wayfarer.exe`** | **899,584 bytes** — 540,416 under the ship target |
-| `build\wayfarer-selftest.exe` | 968,192 bytes — **not a deliverable**, never shipped |
+| **`build\wayfarer.exe`** | **846,848 bytes** — 593,152 under the ship target |
+| `build\wayfarer-selftest.exe` | 914,944 bytes — **not a deliverable**, never shipped |
 | `src\main.c` | ~11,840 lines, single translation unit |
-| `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. **93 records over 82 pixel streams** (11 are dream palette variants sharing a twin's stream), 186,436 bytes of const data. Includes the supplied `assets/dark_fantasy` Aetherhold walls/buildings/props; never edit by hand |
+| `src\art_data.h` | **GENERATED** by `tools/bake.ps1`, committed. **78 records over 67 pixel streams** (11 are dream palette variants sharing a twin's stream), 133,425 bytes of const data. Curated dark-fantasy subset actually used; no unused castle pack baked. Never edit by hand |
 | Warnings | zero, under `-Wall -Wextra` |
 | Plan progress | **Phases 00–12 all done** — including 08 (save/load), 09 (restoration rebuild), 10 (motion), 11 (audio + HUD, ship critical) and 12 (dream realm, 5/5 slices). See [[Phase Roadmap]]. Only the submission checklist remains |
 
