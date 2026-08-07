@@ -79,8 +79,9 @@ $script:FxFrames = @("fx_portal_0",  "fx_portal_2",  "fx_portal_4",  "fx_portal_
                      "fx_well_0",    "fx_well_2",    "fx_well_4",    "fx_well_6",
                       "fx_well_8",    "fx_well_10",   "fx_well_12",   "fx_well_14")
 
-# Phase 13: the actual dark-fantasy castle pack supplied under assets/dark_fantasy.
-# Keep this explicit: dungeon/interior/environment sets stay source-only until a caller exists.
+# Phase 13: the actual dark-fantasy castle pack supplied under assets/dark_fantasy
+# and the new handcrafted island pack under assets/castle. Keep this explicit:
+# only bake what has a caller; dungeon/interior sets stay source-only until needed.
 $script:DarkFantasyFiles = @(
     "walls/wall_piece_05.png", "walls/wall_piece_06.png", "walls/wall_piece_07.png",
     "walls/wall_piece_08.png", "walls/wall_piece_09.png", "walls/wall_piece_10.png",
@@ -93,6 +94,18 @@ $script:DarkFantasyFiles = @(
     "props/prop_01.png", "props/prop_02.png", "props/prop_03.png", "props/prop_04.png",
     "props/prop_05.png", "props/prop_06.png", "props/prop_07.png",
     "props/prop_dock_01.png", "props/prop_stall_01.png")
+# New Aetherhold island pack — bake the curated subset that has callers now.
+# Full pack is 126 PNGs; for Slice 2–3 we bake walls/keep/bridges that the
+# island actually draws, keeping dungeon/interior for later slices.
+$script:CastleFiles = @(
+    "walls_modules/wall_straight.png", "walls_modules/wall_corner.png",
+    "walls_modules/wall_gatehouse.png", "walls_modules/wall_square_tower.png",
+    "walls_modules/wall_tall_corner.png", "walls_modules/wall_arched_gate.png",
+    "keep_structures/keep_complete_4story.png", "keep_structures/keep_01.png",
+    "keep_structures/castle_full_multitier.png",
+    "bridges_causeway/bridge_01.png", "bridges_causeway/bridges_causeway_1.png",
+    "water_shore/water_flat.png", "water_shore/shore_transition.png",
+    "rocks_cliffs/rock_01.png", "terrain_tiles/terrain_01.png")
 
 # ------------------------------------------------------------ dream recolour --
 # A dream sprite is the SAME pixel stream with a different palette: ArtSprite keeps pal_off
@@ -295,6 +308,19 @@ foreach ($rel in $script:DarkFantasyFiles) {
     $name = ("AETHER_" + ($leaf -replace '[^A-Za-z0-9]', '_')).ToUpperInvariant()
     $sp = ConvertTo-Sprite -Path $path -Name $name
     $sp | Add-Member -NotePropertyName Category -NotePropertyValue "dark_fantasy"
+    $sprites += $sp
+}
+# New Aetherhold island pack — curated subset for the top-right island.
+# Full pack is 126 PNGs (1.8MB source); baking all would exceed the
+# 1.44MB floppy limit. For Slice 2 we bake only the walls/keep/bridges
+# that the island actually draws; water/shore/rocks stay procedural.
+foreach ($rel in $script:CastleFiles) {
+    $path = Join-Path (Join-Path $AssetRoot "castle") $rel
+    if (-not (Test-Path $path)) { throw "missing castle asset: $path" }
+    $leaf = [System.IO.Path]::GetFileNameWithoutExtension($rel)
+    $name = ("CASTLE_" + ($leaf -replace '[^A-Za-z0-9]', '_')).ToUpperInvariant()
+    $sp = ConvertTo-Sprite -Path $path -Name $name
+    $sp | Add-Member -NotePropertyName Category -NotePropertyValue "castle"
     $sprites += $sp
 }
 
