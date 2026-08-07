@@ -3813,6 +3813,12 @@ static void mm_draw(SDL_Surface *fb, const Game *g)
                              g->ents[i].is_soul ? 0xb8 : 0x6a),
                   MM_TILE * 2);
     }
+    for (i = 0; i < SHARD_COUNT; i++) {
+        if (g->shards[i] < 0)
+            continue;
+        mm_marker(fb, g->shards[i] % WORLD_W, g->shards[i] / WORLD_W,
+                  SDL_MapRGB(fb->format, 0x6f, 0xd8, 0xe8), MM_TILE * 2);
+    }
     mm_marker(fb, (int)(g->p.x / TILE), (int)(g->p.y / TILE),
               SDL_MapRGB(fb->format, 0xff, 0xff, 0xff), MM_TILE * 2 + 1);
 }
