@@ -128,10 +128,13 @@ static int castle_approach_tile(int tx, int ty)
     int local_y = ty - CASTLE_Y_SHIFT;
 
     /* A broad, winding mainland shelf keeps the watchtower on land and gives
-     * the player a believable approach before the bridge. */
-    if (tx >= 76 && tx <= 101 && local_y >= 24 && local_y <= 36)
+     * the player a believable approach before the bridge. Capped at x<=97 so
+     * at least one ocean column (98) remains between the shelf and the island
+     * bulge (castle_left min 99) — otherwise the island merges into the
+     * mainland region and ceases to be water-locked. */
+    if (tx >= 76 && tx <= 97 && local_y >= 24 && local_y <= 36)
         return 1;
-    if (tx < 58 || tx > 101)
+    if (tx < 58 || tx > 97)
         return 0;
     path_y = 43 - (tx - 58) / 3 + CASTLE_Y_SHIFT;
     return ty >= path_y - 2 && ty <= path_y + 2;
@@ -1302,9 +1305,11 @@ static void castle_apply_layout(World *w, int unlocked)
 
     /* Clear the island's ocean buffer first. The generated overworld is not
      * allowed to leak through the coastline and make a second accidental land
-     * bridge. */
+     * bridge. The silhouette bulges to x=99 (castle_left min), 11 left of
+     * CASTLE_RESERVE_X0=110, so the buffer must start at X0-13 (=97) to give
+     * a 2-tile ocean margin around the true coast, not the reserve box. */
     for (y = CASTLE_RESERVE_Y0 - 2; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H + 2; y++)
-        for (x = CASTLE_RESERVE_X0 - 2; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2; x++) {
+        for (x = CASTLE_RESERVE_X0 - 13; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2; x++) {
             if (x < 0 || y < 0 || x >= WORLD_W || y >= OVERWORLD_H)
                 continue;
             w->surf[y][x] = SURF_OCEAN;
@@ -1326,9 +1331,11 @@ static void castle_apply_layout(World *w, int unlocked)
             }
 
     /* Landmass is a fixed, irregular silhouette. Its outer ring is cliff/rock;
-     * the interior is walkable meadow until the courtyard walls are added. */
+     * the interior is walkable meadow until the courtyard walls are added.
+     * X range must include the bulge to 99 (X0-13) — the reserve box alone
+     * misses 99..109 and leaves generated terrain intact. */
     for (y = CASTLE_RESERVE_Y0; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H; y++)
-        for (x = CASTLE_RESERVE_X0; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W; x++)
+        for (x = CASTLE_RESERVE_X0 - 13; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2; x++)
             if (castle_island_tile(x, y)) {
                 int edge = !castle_island_tile(x - 1, y) || !castle_island_tile(x + 1, y)
                          || !castle_island_tile(x, y - 1) || !castle_island_tile(x, y + 1);
@@ -1366,8 +1373,10 @@ static void castle_apply_heights(World *w)
 {
     int x, y;
 
+    /* Mirror the widened X range from castle_apply_layout — heights must
+     * cover the same bulge or the western cliffs render flat. */
     for (y = CASTLE_RESERVE_Y0; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H; y++)
-        for (x = CASTLE_RESERVE_X0; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W; x++)
+        for (x = CASTLE_RESERVE_X0 - 13; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2; x++)
             if (castle_island_tile(x, y)) {
                 int h = (x >= CASTLE_KEEP_X - 4 && x <= CASTLE_KEEP_X + 4 &&
                          y >= CASTLE_KEEP_Y - 2 && y <= CASTLE_KEEP_Y + 5) ? PX(18) : 0;
@@ -2158,6 +2167,13 @@ static int pick_tile_in_region(const World *w, int r, Rng *rng, int sector)
             continue;
         for (x = 0; x < WORLD_W; x++) {
             if (w->region[y][x] != r)
+                continue;
+            /* The Aetherhold island is water-locked: its only entrance is the
+             * causeway, which opens when the Well Soul is restored. That gate is
+             * not modelled by world_solvable's region graph, so a required entity
+             * placed on the island reads as "reachable" to the verifier while the
+             * player cannot actually get to it. Never place required content there. */
+            if (castle_island_tile(x, y))
                 continue;
             seen++;
             if (rng_below(rng, (Uint32)seen) == 0)
@@ -11309,6 +11325,62 @@ int main(int argc, char **argv)
                                    arg_int(argc, argv, "--seeds", 20));
         if (arg_flag(argc, argv, "--save-test"))
             return save_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
+        if (arg_flag(argc, argv, "--dump-ents")) {
+            Game g;
+            Rngs rngs;
+            int i;
+            rngs_init(&rngs, (Uint64)arg_int(argc, argv, "--seed", 1));
+            (void)game_init(&g, &rngs);
+            printf("seed %d  regions %d  spawn_region %d  spawn_tile (%d,%d)\n",
+                   (int)rngs.seed, g.w.region_count, g.w.spawn_region,
+                   (int)(g.p.x / TILE), (int)(g.p.y / TILE));
+            for (i = 0; i < ENTITY_COUNT; i++) {
+                int t = g.ents[i].tile;
+                int tx = t >= 0 ? t % WORLD_W : -1;
+                int ty = t >= 0 ? t / WORLD_W : -1;
+                int reg = g.ents[i].region;
+                int sol = (tx >= 0 && ty >= 0) ? g.w.solid[ty][tx] : -1;
+                int cas = (tx >= 0 && ty >= 0) ? castle_island_tile(tx, ty) : 0;
+                int blk = (tx >= 0 && ty >= 0) ? tile_blocked(&g.w, 0xFF, tx, ty) : -1;
+                printf("  ent %2d  tile (%3d,%3d)  region %2d  solid %d  castle %d  blocked %d  %s%s%s\n",
+                       i, tx, ty, reg, sol, cas, blk,
+                       g.ents[i].is_soul ? "SOUL" : "FRAG",
+                       g.ents[i].grants ? " GRANT" : "",
+                       (i == WELL_SOUL_IDX) ? " WELL" : "");
+            }
+            printf("shards:\n");
+            for (i = 0; i < SHARD_COUNT; i++) {
+                int t = g.shards[i];
+                int tx = t >= 0 ? t % WORLD_W : -1;
+                int ty = t >= 0 ? t / WORLD_W : -1;
+                int sol = (tx >= 0 && ty >= 0) ? g.w.solid[ty][tx] : -1;
+                int cas = (tx >= 0 && ty >= 0) ? castle_island_tile(tx, ty) : 0;
+                printf("  shard %d  tile (%3d,%3d)  solid %d  castle %d\n",
+                       i, tx, ty, sol, cas);
+            }
+            {
+                int *dist  = (int *)SDL_malloc((size_t)WORLD_W * WORLD_H * sizeof(int));
+                int *queue = (int *)SDL_malloc((size_t)WORLD_W * WORLD_H * sizeof(int));
+                int spawn = (int)(g.p.y / TILE) * WORLD_W + (int)(g.p.x / TILE);
+                if (dist && queue) {
+                    static const Uint8 tiers[2] = { 0, 0xFF };
+                    int t;
+                    for (t = 0; t < 2; t++) {
+                        bfs_gated(&g.w, tiers[t], spawn, dist, queue);
+                        printf("walk BFS abilities=0x%02X:\n", tiers[t]);
+                        for (i = 0; i < ENTITY_COUNT; i++) {
+                            int tt = g.ents[i].tile;
+                            int d = tt >= 0 ? dist[tt] : -1;
+                            printf("  ent %2d  walk_dist %5d  %s\n", i, d,
+                                   d >= 0 ? "WALK-REACH" : "WALK-UNREACH");
+                        }
+                    }
+                }
+                SDL_free(dist);
+                SDL_free(queue);
+            }
+            return 0;
+        }
         if (arg_flag(argc, argv, "--land-test")) {
             int n = arg_int(argc, argv, "--seeds", 20);
             int base = arg_int(argc, argv, "--seed", 1);
