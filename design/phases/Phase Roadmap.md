@@ -1,6 +1,6 @@
 ---
 tags: [design, phase, wayfarer, moc]
-updated: 2026-08-06
+updated: 2026-08-07
 ---
 
 # Phase Roadmap — Wayfarer
@@ -13,15 +13,19 @@ from memory each session.
 
 > **Picking this up cold? Phases 00–12 are DONE.** Phase 12 (dream realm) is feature-complete;
 > Phase 11 (ship-critical) landed audio, the HUD, and the QA/submission items. Phase 13
-> (Aetherhold Castle) is **IN PROGRESS** — Slice 1–2 implemented (new key @ mainland watchtower,
-> southeast overworld island rows `35–76`, causeway + courtyard first, dungeon deferred). Spec + two
-> reference maps (Castle Island + Connecting Land) are in `Phase 13 - Aetherhold Castle.md`; the
-> sliced plan is `Phase 13 - Aetherhold Castle Plan.md`. The build is complete through ship-
-> critical: real art, world motion, five-layer synth, HUD, save/load. What remains is the
-> Aetherhold Slice 1 build + the submission checklist — second-machine smoke test, repo visibility,
-> final wrap.
+> (Aetherhold Castle) is **IN PROGRESS** — Slice 1–2 implemented, then **relocated 2026-08-07**:
+> the island is now a fixed **top-right water-locked footprint** (`110,2`, `42×42`), reached by a
+> causeway that opens as a side effect of restoring the Dream Well's Soul — the earlier southeast
+> placement and the mainland-watchtower key item are both gone. The world is also denser now:
+> `164×157` (was `144×138`), same `TILE 18`. Spec + two reference maps (Castle Island + Connecting
+> Land) are in `Phase 13 - Aetherhold Castle.md` (updated); the sliced plan is
+> `Phase 13 - Aetherhold Castle Plan.md` (updated). **If either file still describes a southeast
+> island or a watchtower key pickup, it is a stale copy — do not act on it; re-read from disk.**
+> The build is complete through ship-critical: real art, world motion, five-layer synth, HUD,
+> save/load. What remains is the same as before the relocation — the submission checklist:
+> second-machine smoke test, repo visibility, final wrap.
 
-**Deadline: 2026-09-04.** Today: 2026-08-06. **Hard stop on art/backbone work: 2026-08-14** — Phase
+**Deadline: 2026-09-04.** Today: 2026-08-07. **Hard stop on art/backbone work: 2026-08-14** — Phase
 11 (ship-critical) begins on that date regardless of how much of Phases 03–10 is finished, because
 [[Overview]] and [[Handover]] both name the judging order as **finished → under size → fun**, and a
 beautiful, unfinished game scores worse than a plain, complete one.
@@ -45,7 +49,7 @@ beautiful, unfinished game scores worse than a plain, complete one.
 | 10 | [[Phase 10 - Motion]] | **DONE** — `feat/phase-10-motion`, +2,048 bytes (781,824), `--motion-test` green | 09 | Motion on unfinished art just animates the wrong thing; static art should be right first |
 | 12 | [[Phase 12 - Dream Realm]] | **DONE** — all 11 tasks, all 5 slices, `feat/phase-12-dream-realm` | 01, 05, 06, 07 | A portal in the `TERRAIN_DARK` region to a second biome in the team's Lumiara style. Resolves three things at once: the dark region had no reason to visit, Kindle had no reason to exist, and 56 delivered magical FX frames had no caller. Timeboxed into five separately shippable slices — it did not move the 2026-08-14 hard stop |
 | 11 | [[Phase 11 - Ship Critical]] | **DONE** — `feat/phase-11-ship-complete` (`8a27404` + shard fix `7cd408a` + rescale `068fea8` + minimap `a8b178f`), ship baseline 786,944 bytes. | — | Audio, font-dependent HUD, save wiring, QA, submission. Not negotiable against the deadline |
-| 13 | [[Phase 13 - Aetherhold Castle]] | **IN PROGRESS** — Slice 1–2 implemented (`5630985`, `42a4081`, `86fad03`, actual dark-fantasy pack `93` records), release `899,584` bytes, southeast rows `35–76`, key `88,59`, causeway `94..107,y56` | 12, 07 | First handcrafted chapter outside the village: supplied dark-fantasy walls/buildings/props, fixed southeast island + mainland approach, gate/courtyard first; keep/dungeon deferred |
+| 13 | [[Phase 13 - Aetherhold Castle]] | **IN PROGRESS** — Slice 1–2 implemented and relocated (`5630985`…`86fad03` original SE landing, then `95f108d`/`47736d6`/`25b50de` moved it top-right, removed the key, +30% world density), release `846,848` bytes, top-right island `110,2 42×42`, causeway `94..107,y56` opens via Well Soul restore | 12, 07 | First handcrafted chapter outside the village: supplied dark-fantasy walls/buildings/props, fixed top-right island + mainland approach, gate/courtyard first; keep/dungeon deferred |
 
 ## How to read a phase file
 

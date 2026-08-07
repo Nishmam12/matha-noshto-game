@@ -2,15 +2,30 @@
 tags: [design, phase, wayfarer]
 phase: 13
 status: in_progress
-updated: 2026-08-06
+updated: 2026-08-07
 ---
 
 # Phase 13 — Aetherhold Castle
 
-**Status:** PLANNED — spec approved 2026-08-06. First major handcrafted region outside the starting village. Builds on Phase 12's portal/dream-realm pattern but is **not** a second biome — it is a handcrafted island connected by a causeway, with a modular dungeon beneath it.
-**Depends on:** [[Phase 12 - Dream Realm]] (island generation pattern, portal gating, `tile_blocked` invariant), [[Phase 07 - Asset Seam]] (bake pipeline for castle arch art), [[Isometric Rendering]] (band-sweep depth, elevation), [[Save and UI]] (ability gating, HUD). World must already be `TILE 18` / `144×138` — this phase does not re-derive those.
+**Status:** Slice 1–2 IMPLEMENTED, then **relocated 2026-08-07** — see the corrected placement note
+below. First major handcrafted region outside the starting village. Builds on Phase 12's portal/
+dream-realm pattern but is **not** a second biome — it is a handcrafted island connected by a
+causeway, with a modular dungeon beneath it.
+**Depends on:** [[Phase 12 - Dream Realm]] (island generation pattern, portal gating, `tile_blocked` invariant), [[Phase 07 - Asset Seam]] (bake pipeline for castle arch art), [[Isometric Rendering]] (band-sweep depth, elevation), [[Save and UI]] (ability gating, HUD). World is now `TILE 18` / `164×157` (bumped from `144×138` on 2026-08-07) — this phase does not re-derive those.
 **Blocks:** Nothing — first chapter after the village; later regions reuse its hybrid-generation and dungeon-module patterns.
-**Approach reference images:** `AETHERHOLD CASTLE (CASTLE ISLAND)` + `AETHERHOLD PATH (CONNECTING LAND)` — the pair supplied with this spec. Left = Castle Island (keep / courtyards / walls / causeway / dock), right = Connecting Land (forest, S-path, watchtower, campsite, coastline). Both sections connect seamlessly at the causeway at runtime. The shipped placement is the **southeast overworld coast**, not the northeast: reserve rows `35–76`, above the Dream gap `80–84`.
+**Approach reference images:** `AETHERHOLD CASTLE (CASTLE ISLAND)` + `AETHERHOLD PATH (CONNECTING LAND)` — the pair supplied with this spec. Left = Castle Island (keep / courtyards / walls / causeway / dock), right = Connecting Land (forest, S-path, watchtower, campsite, coastline). Both sections connect seamlessly at the causeway at runtime.
+>
+> **Placement correction, 2026-08-07:** the island first shipped on the southeast overworld coast
+> (reserve rows `35–76`, above the Dream gap). It has since **moved to a fixed water-locked
+> top-right footprint** — `CASTLE_RESERVE_X0 110`, `Y0 2`, `42×42` in `src/main.c` — with the same
+> causeway span (`x94..107, y56`) now reaching north instead of into the old SE reserve. The
+> mainland-watchtower `castle_key` item described later in this file (Slice 1) was **removed**: the
+> causeway opens as a side effect of restoring the Dream Well's Soul (`has_castle_key` is set when
+> `WELL_SOUL_IDX` restores — grep `src/main.c` for both symbols, do not trust a line number here).
+> Everything below this note that describes the SE placement or the key pickup is the **original
+> Slice 1–2 design as built that day** — kept as history, not current fact. The area-by-area design
+> (§"The seven areas + dungeon"), the dungeon plan, and the traps are still the forward plan and are
+> unaffected by the relocation.
 
 ## Why this phase
 
@@ -97,7 +112,7 @@ Ancient stone fortress, **not caves**. Hallways, storage, prison, armory, archiv
 ## Technical requirements
 
 ### Rendering
-- Keep the current isometric camera (`TILE 18`, `144×138`). Do not re-derive `TILE`.
+- Keep the current isometric camera (`TILE 18`, `164×157` as of 2026-08-07, was `144×138`). Do not re-derive `TILE`.
 - Reduce tile size was already applied to increase environmental density while keeping sprites readable — do not change again in this phase.
 - Layered rendering with correct band-sweep depth for walls/cliffs/trees/character. Draw order depends on tile position (band `tx+ty`), not fixed layers — already the rule in [[Isometric Rendering]] § depth order. No `SDL_Texture` path, no `SDL_image` — hand-rolled `draw_sprite` only.
 - Cold daylight + soft fog outside, warm torch inside. Never bright magical lighting.
@@ -201,4 +216,6 @@ This is not a single "build a castle" task. It is sequenced so each slice is shi
 
 ## Evidence
 
-Slice 1–2 is implemented on `feat/phase-11-ship-complete`: `5630985` (key/causeway/save/`--aether-test`), `42a4081` + `86fad03` (first castle wiring), followed by the supplied `assets/dark_fantasy` integration and southeast relocation. Current bake: 93 records / 82 streams / 11 dream variants; release `899,584` bytes with `540,416` headroom. Full suite plus `--aether-test` is green. The current implementation is intentionally not the final castle: keep interior, dungeon, enemies, lighting/audio polish, and Aetherhold story rewards remain deferred.
+Slice 1–2 was implemented on `feat/phase-11-ship-complete`: `5630985` (key/causeway/save/`--aether-test`), `42a4081` + `86fad03` (first castle wiring), followed by the supplied `assets/dark_fantasy` integration and an original southeast placement (`00155a2`, `6580258`).
+
+**Relocated 2026-08-07** (`eac01fd`, `95f108d`, `47736d6`, `f9ebc16`, `25b50de`, `0dae0ab`): world density `+30%` to `164×157`; island moved to the fixed top-right footprint (`110,2`, `42×42`); mainland `castle_key` item removed in favour of the Well-Soul-restore gate; a supplied 108-PNG `assets/castle/` pack was baked once for the new island and then reverted (committed, currently unbaked); the dark-fantasy `AETHER_*` bake was trimmed to the 14 files actually referenced (**78 records / 67 streams**, was 93/82). Current release: **`846,848` bytes with `593,152` headroom**. Full suite plus `--aether-test` re-verified green live on 2026-08-07 (including a 50-seed `--play-test`). The current implementation is intentionally not the final castle: keep interior, dungeon, enemies, lighting/audio polish, and Aetherhold story rewards remain deferred.

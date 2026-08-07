@@ -2,14 +2,29 @@
 tags: [design, phase, wayfarer, plan]
 phase: 13
 status: in_progress
-updated: 2026-08-06
+updated: 2026-08-07
 ---
 
 # Phase 13 — Aetherhold Castle Plan (Slice 1–2 Landing)
 
-**Status:** Slice 1–2 IMPLEMENTED. Spec is `[[Phase 13 - Aetherhold Castle]]` (IN PROGRESS overall, two reference maps: Castle Island + Connecting Land). The first landing is causeway gating + mainland watchtower key + outer courtyard composition using the supplied dark-fantasy pack. Dungeon (Slice 4) is deferred.
+**Status:** Slice 1–2 IMPLEMENTED, then **relocated 2026-08-07** (see note). Spec is `[[Phase 13 - Aetherhold Castle]]` (IN PROGRESS overall, two reference maps: Castle Island + Connecting Land). The landing is causeway gating + outer courtyard composition using the supplied dark-fantasy pack. Dungeon (Slice 4) is deferred.
 
-## Decisions locked for this landing
+> **Everything under "Decisions locked" below is the 2026-08-06 design as originally built.**
+> Same-day, 2026-08-07, it was superseded: the mainland-watchtower `castle_key` **item was removed**
+> and the island **moved from the SE coast to a fixed top-right footprint**. Current facts, verified
+> directly in `src/main.c`:
+> - **Unlock** = restoring the Dream Well's Soul (`WELL_SOUL_IDX`) sets `has_castle_key` as a side
+>   effect — there is no separate pickup, no watchtower, no `(88,59)` key tile any more.
+> - **Placement** = top-right water-locked island, `CASTLE_RESERVE_X0 110`, `Y0 2`, `42×42`. The
+>   causeway span is unchanged — `x 94..107, y 56` — it now reaches the top-right footprint instead
+>   of the old SE one.
+> - **World** is `164×157` (was `144×138`), same `TILE 18`.
+>
+> The rest of this file (task ordering, traps, verification approach) is still accurate in shape —
+> only the coordinates and the unlock mechanism it references are stale. Read it for *how the
+> landing was built*, not for the current key/position facts.
+
+## Decisions locked for the 2026-08-06 landing (superseded — see note above)
 
 - **Unlock = new `castle_key`** at **mainland watchtower `Area 1`** (`88,59`), `E` via `try_interact` (not `souls`/`frags` reuse). Total tracked IDs `14+5+1=20 ≤32`, `Uint32` mask safe. Major Memory stays future.
 - **Placement = SE overworld coast** — fixed jagged island rows `35..76` (same `144×138` grid), above the Dream gap `80..84`. Mainland approach/watchtower sits west of it at `castle_key (88,59)`; the horizontal causeway is `x 94..107, y 56`. The Dream sector remains untouched.
@@ -17,7 +32,7 @@ updated: 2026-08-06
 
 ## Global constraints (do not re-derive)
 
-- `TILE 18`, `WORLD 144×138` already at `068fea8`. Do not change again in this phase.
+- `TILE 18`, `WORLD 164×157` as of `eac01fd`/`95f108d` (2026-08-07; was `144×138` at `068fea8`). Do not change again in this phase.
 - `tile_blocked` reads only `solid` + `regions[].terrain` (+ gate via `solid` reuse, not a third input) — `Handover.md:734` rule.
 - `tools/bake.ps1 → src/art_data.h → wayfarer.exe`, no `SDL_image`/`SDL_ttf`/`SDL_mixer` at runtime, `nm` 1 symbol.
 - Stack guard `700KB` at `src/main.c:959` holds `144×138` (~497KB World+Scratch). The fixed mask is computed from row spans; no large per-tile castle array is added.
@@ -79,4 +94,10 @@ updated: 2026-08-06
 
 ## Evidence
 
-Slice 1–2 implemented 2026-08-06. Current evidence: release `899,584` bytes, 93 baked records / 82 streams / 11 dream variants, full suite + `--aether-test` green. Remaining slices are explicitly deferred: inner keep/verticality polish, dungeon modules, lighting/audio, guardians, and Aetherhold rewards.
+Slice 1–2 implemented 2026-08-06 as described above (SE island, mainland key). **Relocated
+2026-08-07**: top-right island (`110,2`, `42×42`), key item removed for a Well-Soul-restore gate,
+world `164×157`, bake trimmed to 78 records / 67 streams (a 108-PNG `assets/castle/` pack was
+baked once for the relocation and then reverted — committed, currently unbaked). Current release:
+`846,848` bytes, `593,152` headroom. Full suite + `--aether-test` + 50-seed `--play-test`
+re-verified green live on 2026-08-07. Remaining slices are still explicitly deferred: inner
+keep/verticality polish, dungeon modules, lighting/audio, guardians, and Aetherhold rewards.
