@@ -76,30 +76,28 @@
 #define DREAM_H      60                        /* rows 97 .. 156 */
 #define WORLD_H      (DREAM_Y0 + DREAM_H)      /* 157 */
 
-/* Phase 13 Slice 1-2 - Aetherhold's fixed overworld island.
- * The previous implementation only painted a rectangle over procedural land
- * and pointed the gate at the Dream gap. This is the actual layout contract:
- * a shaped island in the SE overworld, a mainland approach to its west, and a
- * short horizontal causeway. The Dream sector remains completely unrelated. */
-#define CASTLE_RESERVE_X0 99
-#define CASTLE_RESERVE_Y0 35
-#define CASTLE_RESERVE_W  45
+/* Phase 13 — Aetherhold's fixed top-right island.
+ * The previous SE mainland-connected layout has been replaced by a
+ * water-locked island at the top-right (rows 2–39) with a single broken
+ * bridge at the south gate. The Dream sector (97–156) stays unrelated. */
+#define CASTLE_RESERVE_X0 110
+#define CASTLE_RESERVE_Y0 2
+#define CASTLE_RESERVE_W  42
 #define CASTLE_RESERVE_H  42
 #define CASTLE_Y_SHIFT    (CASTLE_RESERVE_Y0 - 7)
-#define CASTLE_KEY_X      88   /* mainland watchtower / approach */
-#define CASTLE_KEY_Y      (31 + CASTLE_Y_SHIFT)
-#define CASTLE_KEY_TILE   (CASTLE_KEY_Y * WORLD_W + CASTLE_KEY_X)
-#define CASTLE_CAUSEWAY_Y (28 + CASTLE_Y_SHIFT)
+#define CASTLE_CAUSEWAY_Y 56
 #define CASTLE_CAUSEWAY_X0 94
 #define CASTLE_CAUSEWAY_X1 108
-#define CASTLE_KEEP_X      122
-#define CASTLE_KEEP_Y      (21 + CASTLE_Y_SHIFT)
-#define CASTLE_FORT_X0     111
-#define CASTLE_FORT_X1     134
-#define CASTLE_FORT_Y0     (18 + CASTLE_Y_SHIFT)
-#define CASTLE_FORT_Y1     (34 + CASTLE_Y_SHIFT)
-#define CASTLE_TOWER_Y0    (23 + CASTLE_Y_SHIFT)
-#define CASTLE_TOWER_Y1    (29 + CASTLE_Y_SHIFT)
+#define CASTLE_BRIDGE_X   129
+#define CASTLE_BRIDGE_Y   40
+#define CASTLE_KEEP_X     129
+#define CASTLE_KEEP_Y     14
+#define CASTLE_FORT_X0    118
+#define CASTLE_FORT_X1    136
+#define CASTLE_FORT_Y0    10
+#define CASTLE_FORT_Y1    30
+#define CASTLE_TOWER_Y0   15
+#define CASTLE_TOWER_Y1   25
 
 /* Hand-authored coast silhouette, one inclusive span per local row y=0..41;
  * applied at world rows 35..76. */
@@ -1362,12 +1360,6 @@ static void castle_apply_layout(World *w, int unlocked)
         w->path[y][x] = (Uint8)unlocked;
         w->sea_dist[y][x] = 0;
     }
-
-    /* The watchtower key is on the mainland side, never inside the castle. */
-    w->solid[CASTLE_KEY_Y][CASTLE_KEY_X] = 0;
-    w->surf[CASTLE_KEY_Y][CASTLE_KEY_X] = SURF_LAND;
-    w->bridge[CASTLE_KEY_Y][CASTLE_KEY_X] = 0;
-    w->path[CASTLE_KEY_Y][CASTLE_KEY_X] = 1;
 }
 
 static void castle_apply_heights(World *w)
@@ -2637,27 +2629,9 @@ static int try_collect_shard(Game *g)
     return i;
 }
 
-static int castle_key_in_reach(const Game *g)
+static int castle_bridge_open(const Game *g)
 {
-    float ex, ey, dx, dy, d2;
-    if (g->has_castle_key)
-        return -1;
-    ex = (float)CASTLE_KEY_X * TILE + TILE * 0.5f;
-    ey = (float)CASTLE_KEY_Y * TILE + TILE * 0.5f;
-    dx = ex - g->p.x;
-    dy = ey - g->p.y;
-    d2 = dx * dx + dy * dy;
-    return (d2 <= INTERACT_RADIUS * INTERACT_RADIUS) ? 0 : -1;
-}
-
-static int try_pick_castle_key(Game *g)
-{
-    if (castle_key_in_reach(g) < 0)
-        return -1;
-    g->has_castle_key = 1;
-    /* Re-apply the fixed layout so the causeway opens without regenerating the world. */
-    castle_apply_layout(&g->w, 1);
-    return 0;
+    return g->ents[WELL_SOUL_IDX].restored;
 }
 
 /* The loop the whole game is built around: restore a memory, the region's
@@ -2677,6 +2651,10 @@ static void apply_restore(Game *g, int i)
         g->souls_restored++;
     else
         g->frags_restored++;
+    if (i == WELL_SOUL_IDX) {
+        g->has_castle_key = 1;
+        castle_apply_layout(&g->w, 1);
+    }
 }
 
 static int try_restore(Game *g)
@@ -3459,7 +3437,8 @@ static int game_load(Game *g, Rngs *rngs, const char *path, Uint64 *seed_out)
         }
     }
     tmp->has_castle_key = has_castle_key;
-    castle_apply_layout(&tmp->w, has_castle_key);
+    if (restored & (1u << WELL_SOUL_IDX)) tmp->has_castle_key = 1;
+    castle_apply_layout(&tmp->w, tmp->has_castle_key);
     castle_apply_heights(&tmp->w);
     /* Snap the eased floats to their targets — mid-ease values are animation,
      * not progress — and rebuild the fog reveal as one instant of standing at
@@ -3894,14 +3873,14 @@ static void hud_draw(SDL_Surface *fb, const Game *g, int seed)
     mm_draw(fb, g);
 }
 
-/* The one interaction key: portal, then restore, then shard pickup, then castle key. One
+/* The one interaction key: portal, then restore, then shard pickup. One
  * function so the tests drive exactly what E runs — this ordering lived only
  * in the event loop once, and a restructure left the shard branch unreachable
  * while every shard test bypassed the key path and stayed green. A portal
- * end, an unrestored entity, a shard and the castle key are never on the same
- * tile, so the order cannot actually matter — but fixing it makes the
- * interaction unambiguous rather than dependent on that staying true.
- * Returns 1 portal, 2 restore, 3 shard, 4 castle key, 0 nothing. */
+ * end, an unrestored entity and a shard are never on the same tile, so the
+ * order cannot actually matter — but fixing it makes the interaction
+ * unambiguous rather than dependent on that staying true.
+ * Returns 1 portal, 2 restore, 3 shard, 0 nothing. */
 static int try_interact(Game *g, Audio *a)
 {
     if (try_portal(g)) {
@@ -3931,13 +3910,6 @@ static int try_interact(Game *g, Audio *a)
     if (try_collect_shard(g) >= 0) {
         sfx_fire(a, SFX_SHARD);
         return 3;
-    }
-    if (try_pick_castle_key(g) >= 0) {
-        sfx_fire(a, SFX_CHIME);
-        SDL_snprintf(hud.toast, sizeof(hud.toast), "a castle key is found");
-        hud.toast_left = HUD_TOAST_FRAMES;
-        hud.mm_dirty = 1;
-        return 4;
     }
     return 0;
 }
@@ -6135,24 +6107,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                 draw_prompt(fb, sx, sy - PX(22), PROMPT_INTERACT, g->clock);
         }
 
-        /* Phase 13 Slice 1: castle key at the mainland watchtower — drawn as a
-         * small interactable until picked up, with the same reach prompt as shards. */
-        if (!g->has_castle_key && CASTLE_KEY_X + CASTLE_KEY_Y == band) {
-            int ex = CASTLE_KEY_X, ey = CASTLE_KEY_Y;
-            int sx, sy;
-            float rev = tile_reveal(g, ex, ey, overlay);
-            if (overlay || rev >= 0.06f) {
-                world_to_iso((float)(ex * TILE + TILE / 2), (float)(ey * TILE + TILE / 2), &sx, &sy);
-                sy -= height_at(&g->w, ex, ey);
-                sx -= g->cam_x;
-                sy -= g->cam_y;
-                fill_rect(fb, sx - PX(4), sy - PX(4), PX(8), PX(8),
-                          SDL_MapRGB(fb->format, 0xff, 0xe0, 0x30));
-                if (!overlay && castle_key_in_reach(g) == 0)
-                    draw_prompt(fb, sx, sy - PX(22), PROMPT_INTERACT, g->clock);
-            }
-        }
-        if (!g->has_castle_key && CASTLE_CAUSEWAY_X0 + CASTLE_CAUSEWAY_Y == band) {
+        if (!castle_bridge_open(g) && CASTLE_CAUSEWAY_X0 + CASTLE_CAUSEWAY_Y == band) {
             int ex = CASTLE_CAUSEWAY_X0, ey = CASTLE_CAUSEWAY_Y;
             float ddx2 = (float)(ex * TILE + TILE / 2) - g->p.x;
             float ddy2 = (float)(ey * TILE + TILE / 2) - g->p.y;
@@ -8977,7 +8932,7 @@ static int aether_selftest(Uint64 seed, int nseeds)
     if (!fails)
         printf("causeway: PASS  %d seeds, causeway closed before key\n", nseeds);
 
-    /* Key pickup through the real E path, and causeway opens as a side effect. */
+    /* Well Soul restoration opens the causeway as a side effect. */
     {
         Game *g = (Game *)SDL_malloc(sizeof(Game));
         Rngs rngs;
@@ -8986,18 +8941,24 @@ static int aether_selftest(Uint64 seed, int nseeds)
         if (!g) { printf("FAIL  out of memory\n"); return 1; }
         rngs_init(&rngs, seed);
         game_init(g, &rngs);
-        g->p.x = (float)CASTLE_KEY_X * TILE + TILE * 0.5f;
-        g->p.y = (float)CASTLE_KEY_Y * TILE + TILE * 0.5f;
-        SDL_zero(a);
-        r = try_interact(g, &a);
-        if (r != 4 || !g->has_castle_key) {
-            printf("FAIL  castle key pickup: try_interact returned %d, has_key %d\n", r, g->has_castle_key);
-            fails++;
-        } else if (g->w.solid[CASTLE_CAUSEWAY_Y][CASTLE_CAUSEWAY_X0] != 0) {
-            printf("FAIL  causeway still solid after key pickup\n");
+        if (g->w.well < 0) {
+            printf("FAIL  aether: no Well placed\n");
             fails++;
         } else {
-            printf("castle key: PASS  picked up through the real E path and causeway opened\n");
+            g->p.x = (float)(g->w.well % WORLD_W) * TILE + TILE * 0.5f;
+            g->p.y = (float)(g->w.well / WORLD_W) * TILE + TILE * 0.5f;
+            g->shards_held = SHARD_REQUIRED;
+            SDL_zero(a);
+            r = try_interact(g, &a);
+            if (r != 2 || !g->has_castle_key) {
+                printf("FAIL  castle bridge: Well Soul restore returned %d, has_key %d\n", r, g->has_castle_key);
+                fails++;
+            } else if (g->w.solid[CASTLE_BRIDGE_Y][CASTLE_BRIDGE_X] != 0) {
+                printf("FAIL  causeway still solid after Well Soul\n");
+                fails++;
+            } else {
+                printf("castle key: PASS  Well Soul restored through the real E path and causeway opened\n");
+            }
         }
         SDL_free(g);
     }
