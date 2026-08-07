@@ -58,7 +58,7 @@
  * doubling both the player box and the tile cancels exactly. Only absolute
  * pixel numbers move (speed_selftest's 110.00 becomes 220.00). */
 #define TILE     18
-#define WORLD_W  144
+#define WORLD_W  164
 
 /* TWO LANDMASSES IN ONE GRID — see design/phases/Phase 12 - Dream Realm.md, approach A.
  *
@@ -70,11 +70,11 @@
  * The void band is not decoration. It guarantees the two sectors share no tile edge, so the ONLY
  * connection between them is the portal — which is exactly what --portal-test measures, and what
  * --sector-test asserts is true before the portal exists. */
-#define OVERWORLD_H  80                        /* rows 0 .. 79   */
-#define DREAM_GAP    5                         /* rows 80 .. 84, always solid */
-#define DREAM_Y0     (OVERWORLD_H + DREAM_GAP) /* 85 */
-#define DREAM_H      53                        /* rows 85 .. 137 */
-#define WORLD_H      (DREAM_Y0 + DREAM_H)      /* 138 */
+#define OVERWORLD_H  91                        /* rows 0 .. 90   */
+#define DREAM_GAP    6                         /* rows 91 .. 96, always solid */
+#define DREAM_Y0     (OVERWORLD_H + DREAM_GAP) /* 97 */
+#define DREAM_H      60                        /* rows 97 .. 156 */
+#define WORLD_H      (DREAM_Y0 + DREAM_H)      /* 157 */
 
 /* Phase 13 Slice 1-2 - Aetherhold's fixed overworld island.
  * The previous implementation only painted a rectangle over procedural land
