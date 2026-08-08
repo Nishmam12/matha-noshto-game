@@ -85,11 +85,11 @@
 #define CASTLE_RESERVE_W  42
 #define CASTLE_RESERVE_H  42
 #define CASTLE_Y_SHIFT    (CASTLE_RESERVE_Y0 - 7)
-#define CASTLE_CAUSEWAY_Y 56
-#define CASTLE_CAUSEWAY_X0 94
-#define CASTLE_CAUSEWAY_X1 108
-#define CASTLE_BRIDGE_X   129
-#define CASTLE_BRIDGE_Y   40
+#define CASTLE_CAUSEWAY_Y 28
+#define CASTLE_CAUSEWAY_X0 82
+#define CASTLE_CAUSEWAY_X1 119
+#define CASTLE_BRIDGE_X   100
+#define CASTLE_BRIDGE_Y   28
 #define CASTLE_KEEP_X     129
 #define CASTLE_KEEP_Y     14
 #define CASTLE_FORT_X0    118
@@ -128,10 +128,14 @@ static int castle_approach_tile(int tx, int ty)
     int local_y = ty - CASTLE_Y_SHIFT;
 
     /* A broad, winding mainland shelf keeps the watchtower on land and gives
-     * the player a believable approach before the bridge. */
-    if (tx >= 76 && tx <= 101 && local_y >= 24 && local_y <= 36)
+     * the player a believable approach before the bridge. Capped at x<=82 so
+     * a 12-tile ocean gap (83..98 at y~28) remains between the shelf and the
+     * island bulge (castle_left min 99 at that row) — otherwise the island
+     * merges and the "long stone causeway, ocean below" read is lost. Keep
+     * castle_left/right intact; only the approach cap moves. */
+    if (tx >= 76 && tx <= 82 && local_y >= 24 && local_y <= 36)
         return 1;
-    if (tx < 58 || tx > 101)
+    if (tx < 58 || tx > 82)
         return 0;
     path_y = 43 - (tx - 58) / 3 + CASTLE_Y_SHIFT;
     return ty >= path_y - 2 && ty <= path_y + 2;
@@ -141,7 +145,7 @@ static int castle_approach_path_tile(int tx, int ty)
 {
     int path_y;
 
-    if (tx < 58 || tx > 108)
+    if (tx < 58 || tx > 82)
         return 0;
     path_y = 43 - (tx - 58) / 3 + CASTLE_Y_SHIFT;
     return ty == path_y;
@@ -1302,9 +1306,12 @@ static void castle_apply_layout(World *w, int unlocked)
 
     /* Clear the island's ocean buffer first. The generated overworld is not
      * allowed to leak through the coastline and make a second accidental land
-     * bridge. */
+     * bridge. The silhouette bulges to x=99 (castle_left min), 11 left of
+     * CASTLE_RESERVE_X0=110, so the buffer must start at X0-18 (=92) to give
+     * a 4-tile ocean gap (95..98) around the true coast — noticeable as water
+     * in the F1 overlay — not just a 1-tile seam. */
     for (y = CASTLE_RESERVE_Y0 - 2; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H + 2; y++)
-        for (x = CASTLE_RESERVE_X0 - 2; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2; x++) {
+        for (x = CASTLE_RESERVE_X0 - 18; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2; x++) {
             if (x < 0 || y < 0 || x >= WORLD_W || y >= OVERWORLD_H)
                 continue;
             w->surf[y][x] = SURF_OCEAN;
@@ -1326,9 +1333,11 @@ static void castle_apply_layout(World *w, int unlocked)
             }
 
     /* Landmass is a fixed, irregular silhouette. Its outer ring is cliff/rock;
-     * the interior is walkable meadow until the courtyard walls are added. */
+     * the interior is walkable meadow until the courtyard walls are added.
+     * X range must include the bulge to 99 (X0-18) — the reserve box alone
+     * misses 99..109 and leaves generated terrain intact. */
     for (y = CASTLE_RESERVE_Y0; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H; y++)
-        for (x = CASTLE_RESERVE_X0; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W; x++)
+        for (x = CASTLE_RESERVE_X0 - 18; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2; x++)
             if (castle_island_tile(x, y)) {
                 int edge = !castle_island_tile(x - 1, y) || !castle_island_tile(x + 1, y)
                          || !castle_island_tile(x, y - 1) || !castle_island_tile(x, y + 1);
@@ -1350,8 +1359,59 @@ static void castle_apply_layout(World *w, int unlocked)
                 w->path[y][x] = (Uint8)castle_path_tile(x, y);
             }
 
-    /* One horizontal causeway connects the mainland approach to the west gate.
-     * It never touches rows 80..84, which belong exclusively to the Dream gap. */
+    /* Hierarchical inner wall at y=24 separating upper and outer courtyards,
+     * with a central stair gate aligned under the keep's south stair. */
+    for (x = 118; x <= 138; x++) {
+        y = 24;
+        if (x == CASTLE_KEEP_X) continue; /* central stair opening (129,24) */
+        if (!castle_island_tile(x, y)) continue;
+        w->surf[y][x] = SURF_ROCK;
+        w->solid[y][x] = 1;
+        w->bridge[y][x] = 0;
+    }
+    /* Keep foundation wall around the hill — rounded corners via missing corners. */
+    for (y = CASTLE_KEEP_Y - 3; y <= CASTLE_KEEP_Y + 6; y++)
+        for (x = CASTLE_KEEP_X - 5; x <= CASTLE_KEEP_X + 5; x++) {
+            int is_edge = x == CASTLE_KEEP_X - 5 || x == CASTLE_KEEP_X + 5 ||
+                          y == CASTLE_KEEP_Y - 3 || y == CASTLE_KEEP_Y + 6;
+            int is_corner = (x == CASTLE_KEEP_X - 5 && y == CASTLE_KEEP_Y - 3) ||
+                            (x == CASTLE_KEEP_X + 5 && y == CASTLE_KEEP_Y - 3) ||
+                            (x == CASTLE_KEEP_X - 5 && y == CASTLE_KEEP_Y + 6) ||
+                            (x == CASTLE_KEEP_X + 5 && y == CASTLE_KEEP_Y + 6);
+            if (!is_edge || is_corner) continue;
+            if (!castle_island_tile(x, y)) continue;
+            if (x == CASTLE_KEEP_X && y == CASTLE_KEEP_Y + 6) continue; /* south stair */
+            w->surf[y][x] = SURF_ROCK;
+            w->solid[y][x] = 1;
+        }
+
+    /* Mainland gate and watchtower — monumental bridge entry. */
+    {
+        int gx = CASTLE_CAUSEWAY_X0 - 2, gy = CASTLE_CAUSEWAY_Y;
+        /* Stone gate pillars flanking the causeway start */
+        if (gx >= 0 && gy >= 0 && gx < WORLD_W && gy < WORLD_H) {
+            w->surf[gy][gx] = SURF_ROCK; w->solid[gy][gx] = 1;
+            if (gy > 0) { w->surf[gy-1][gx] = SURF_ROCK; w->solid[gy-1][gx] = 1; }
+            if (gy < WORLD_H-1) { w->surf[gy+1][gx] = SURF_ROCK; w->solid[gy+1][gx] = 1; }
+        }
+        /* Abandoned watchtower 6 tiles west of gate on the forest road */
+        {
+            int wx = 88, wy = 30, dx, dy;
+            for (dy = -1; dy <= 1; dy++)
+                for (dx = -1; dx <= 1; dx++) {
+                    int tx = wx + dx, ty = wy + dy;
+                    if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H) continue;
+                    w->surf[ty][tx] = SURF_ROCK; w->solid[ty][tx] = 1;
+                }
+            w->solid[wy][wx] = 0; /* hollow interior */
+            w->surf[wy][wx] = SURF_LAND;
+        }
+    }
+
+    /* One horizontal causeway connects the mainland approach to the west gate
+     * as a single architectural structure. Widened near the castle (gatehouse
+     * platform 2 tiles wide) and with a defensive tower mid-span — placed
+     * at 90° to the island's west coast for a monumental perpendicular. */
     for (x = CASTLE_CAUSEWAY_X0; x < CASTLE_CAUSEWAY_X1; x++) {
         y = CASTLE_CAUSEWAY_Y;
         w->solid[y][x] = unlocked ? 0 : 1;
@@ -1359,6 +1419,12 @@ static void castle_apply_layout(World *w, int unlocked)
         w->bridge[y][x] = (Uint8)unlocked;
         w->path[y][x] = (Uint8)unlocked;
         w->sea_dist[y][x] = 0;
+        /* Widen platform at castle end (last 3 tiles) for gatehouse */
+        if (x >= CASTLE_CAUSEWAY_X1 - 3 && y+1 < WORLD_H && castle_island_tile(x, y+1)) {
+            w->solid[y+1][x] = unlocked ? 0 : 1;
+            w->surf[y+1][x] = unlocked ? SURF_LAND : SURF_OCEAN;
+            w->bridge[y+1][x] = (Uint8)unlocked;
+        }
     }
 }
 
@@ -1366,11 +1432,23 @@ static void castle_apply_heights(World *w)
 {
     int x, y;
 
+    /* Hierarchical elevation: keep hill highest, upper courtyard terrace,
+     * outer courtyard at ground, gatehouse at causeway level. Visible as
+     * cliffs/retaining walls between levels. */
     for (y = CASTLE_RESERVE_Y0; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H; y++)
-        for (x = CASTLE_RESERVE_X0; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W; x++)
+        for (x = CASTLE_RESERVE_X0 - 18; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2; x++)
             if (castle_island_tile(x, y)) {
-                int h = (x >= CASTLE_KEEP_X - 4 && x <= CASTLE_KEEP_X + 4 &&
-                         y >= CASTLE_KEEP_Y - 2 && y <= CASTLE_KEEP_Y + 5) ? PX(18) : 0;
+                int h = 0;
+                if (x >= CASTLE_KEEP_X - 5 && x <= CASTLE_KEEP_X + 5 &&
+                    y >= CASTLE_KEEP_Y - 3 && y <= CASTLE_KEEP_Y + 6) {
+                    h = PX(28); /* Keep hill — throne/library/observatory */
+                } else if (x >= 120 && x <= 138 && y >= 16 && y <= 26) {
+                    h = PX(16); /* Upper courtyard terrace */
+                } else if (x >= 118 && x <= 140 && y >= 26 && y <= 38) {
+                    h = PX(6);  /* Outer courtyard slight rise */
+                } else if (x >= 114 && x <= 142 && y >= 38 && y <= 44) {
+                    h = PX(0);  /* Lower courtyard / gatehouse apron */
+                }
                 w->height[y][x] = (Sint8)h;
             }
 }
@@ -2159,6 +2237,13 @@ static int pick_tile_in_region(const World *w, int r, Rng *rng, int sector)
         for (x = 0; x < WORLD_W; x++) {
             if (w->region[y][x] != r)
                 continue;
+            /* The Aetherhold island is water-locked: its only entrance is the
+             * causeway, which opens when the Well Soul is restored. That gate is
+             * not modelled by world_solvable's region graph, so a required entity
+             * placed on the island reads as "reachable" to the verifier while the
+             * player cannot actually get to it. Never place required content there. */
+            if (castle_island_tile(x, y))
+                continue;
             seen++;
             if (rng_below(rng, (Uint32)seen) == 0)
                 chosen = y * WORLD_W + x;
@@ -2665,6 +2750,33 @@ static int try_restore(Game *g)
         return -1;
     apply_restore(g, i);
     return i;
+}
+
+/* Developer mode: unlock every progression gate in one call.
+ * Separate from --castle/--shards which are screenshot helpers; this is the
+ * single "give me everything" switch for playtesting. Unlocks the Aetherhold
+ * causeway, all three abilities, well shard requirement and map reveal.
+ * Safe to call repeatedly — re-applying an already-open castle is a no-op.
+ * hud toast is set by the caller so this helper stays usable before hud
+ * exists (early --dev) and from the in-game F12 handler. */
+static void dev_unlock_all(Game *g)
+{
+    int x, y, i;
+    if (!g->has_castle_key) {
+        g->has_castle_key = 1;
+        castle_apply_layout(&g->w, 1);
+        castle_apply_heights(&g->w);
+    }
+    g->p.abilities = (Uint8)(ABIL_WADE | ABIL_CLIMB | ABIL_KINDLE);
+    if (g->shards_held < SHARD_REQUIRED)
+        g->shards_held = SHARD_REQUIRED;
+    for (i = 0; i < g->w.region_count; i++) {
+        g->w.regions[i].restoration = 1.0f;
+        g->w.regions[i].restore_to = 1.0f;
+    }
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            g->w.reveal[y][x] = 1.0f;
 }
 
 static int game_complete(const Game *g)
@@ -5951,63 +6063,157 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                 /* Phase 13 Slice 2: the fixed castle composition. The island
                  * silhouette is a real ocean/rock/land mask; sprites only sit
                  * on the inner fortress ring and courtyard landmarks. */
-                if (castle_island_tile(tx, ty) || castle_causeway_tile(tx, ty)) {
+                /* Mainland monumental entry: forest → road → watchtower → stone gate → bridge */
+                if ((tx == 88 && ty == 30) || (tx == CASTLE_CAUSEWAY_X0 - 2 && ty == CASTLE_CAUSEWAY_Y)) {
                     int ax2 = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
                     int ay2 = band * ISO_HH + ISO_OY - g->cam_y;
                     int by2 = ay2 + ISO_HH - g->w.height[ty][tx];
                     float rev2 = tile_reveal(g, tx, ty, overlay);
                     if (overlay || rev2 >= 0.06f) {
+                        int id = (tx == 88) ? ART_AETHER_BLD_TOWER_ROUND_RUINED : ART_AETHER_BLD_GATEHOUSE_LARGE;
+                        draw_sprite(fb, id, ax2, by2, rev2);
+                    }
+                    continue;
+                }
+                if (castle_island_tile(tx, ty) || castle_causeway_tile(tx, ty)) {
+                    int ax2 = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
+                    int ay2 = band * ISO_HH + ISO_OY - g->cam_y;
+                    int by2 = ay2 + ISO_HH - g->w.height[ty][tx];
+                    float rev2 = tile_reveal(g, tx, ty, overlay);
+                    Uint32 h2 = tile_hash(g->seed, tx, ty);
+                    if (overlay || rev2 >= 0.06f) {
                         if (castle_causeway_tile(tx, ty)) {
-                            /* Causeway is rendered by the existing bridge
-                             * path; do not stamp castle art over its planks. */
-                            if (g->has_castle_key && tx == (CASTLE_CAUSEWAY_X0 + CASTLE_CAUSEWAY_X1) / 2)
-                                draw_sprite(fb, ART_BLD_BRIDGE_STONE, ax2, by2, rev2);
-                        } else if (castle_wall_tile(tx, ty) ||
-                                   (tx == CASTLE_FORT_X0 && ty == CASTLE_CAUSEWAY_Y)) {
-                            int id = ART_AETHER_WALL_PIECE_07;
-                            int module = 0;
-                            if (tx == CASTLE_FORT_X0 && ty == CASTLE_CAUSEWAY_Y) {
-                                id = ART_AETHER_BLD_GATEHOUSE_LARGE;
-                                module = 1;
-                            } else if ((tx == CASTLE_FORT_X0 || tx == CASTLE_FORT_X1) &&
-                                       (ty == CASTLE_FORT_Y0 || ty == CASTLE_FORT_Y1)) {
-                                id = ART_AETHER_BLD_TOWER_ROUND_RUINED;
-                                module = 1;
-                            } else if ((tx == CASTLE_FORT_X0 || tx == CASTLE_FORT_X1) &&
-                                       (ty == CASTLE_TOWER_Y0 || ty == CASTLE_TOWER_Y1)) {
-                                id = ART_AETHER_WALL_PIECE_06;
-                                module = 1;
-                            } else if ((ty == CASTLE_FORT_Y0 || ty == CASTLE_FORT_Y1) &&
-                                       (tx == 117 || tx == 125 || tx == 131)) {
-                                id = ART_AETHER_WALL_ARCH_01;
-                                module = 1;
-                            } else if ((tx == CASTLE_FORT_X0 || tx == CASTLE_FORT_X1) &&
-                                       (ty == CASTLE_FORT_Y0 + 5 || ty == CASTLE_FORT_Y1 - 4)) {
-                                id = ART_AETHER_WALL_PIECE_08;
-                                module = 1;
-                            }
-                            if (module)
+                            /* Stone causeway over water: single BLD_BRIDGE_STONE deck
+                             * (simple arch, no roof) tiles as one continuous
+                             * structure. Over island land, draw flat stone path.
+                             * Mid tower/arch remain landmarks. */
+                            if (g->has_castle_key) {
+                                int id;
+                                int mid = (CASTLE_CAUSEWAY_X0 + CASTLE_CAUSEWAY_X1) / 2;
+                                int row = CASTLE_CAUSEWAY_Y - CASTLE_RESERVE_Y0;
+                                int isWater = 0;
+                                if (row >= 0 && row < 42)
+                                    isWater = tx < castle_left[row];
+                                else
+                                    isWater = tx < 100;
+                                if (tx == CASTLE_CAUSEWAY_X0)
+                                    id = ART_CASTLE_STAIR_01;
+                                else if (tx == CASTLE_CAUSEWAY_X0 + 1)
+                                    id = ART_CASTLE_STAIRS_PLATFORMS_1;
+                                else if (tx == mid - 1 || tx == mid + 1)
+                                    id = ART_AETHER_BLD_TOWER_ROUND_RUINED;
+                                else if (tx == mid)
+                                    id = ART_CASTLE_BRIDGE_01;
+                                else if (tx == CASTLE_CAUSEWAY_X1 - 1)
+                                    id = ART_AETHER_BLD_GATEHOUSE_LARGE;
+                                else if (tx == CASTLE_CAUSEWAY_X1 - 2)
+                                    id = ART_CASTLE_WALL_STAIRS;
+                                else if (isWater)
+                                    id = ART_BLD_BRIDGE_STONE;
+                                else
+                                    id = ART_CASTLE_STAIRS_PLATFORMS_1; /* flat deck over island */
                                 draw_sprite(fb, id, ax2, by2, rev2);
+                            }
+                        } else if (castle_wall_tile(tx, ty) ||
+                                   (tx == CASTLE_FORT_X0 && ty == CASTLE_CAUSEWAY_Y) ||
+                                   (ty == 24 && tx >= 118 && tx <= 138)) {
+                            /* Outer / inner retaining walls — dark_fantasy AETHER set per Slice 2 plan. */
+                            int id = ART_AETHER_WALL_PIECE_07;
+                            int is_corner = (tx == CASTLE_FORT_X0 && ty == CASTLE_FORT_Y0) ||
+                                            (tx == CASTLE_FORT_X1 && ty == CASTLE_FORT_Y0) ||
+                                            (tx == CASTLE_FORT_X0 && ty == CASTLE_FORT_Y1) ||
+                                            (tx == CASTLE_FORT_X1 && ty == CASTLE_FORT_Y1);
+                            int is_gate = (tx == CASTLE_FORT_X0 && ty == CASTLE_CAUSEWAY_Y) ||
+                                          (tx == 118 && ty == 24);
+                            if (is_gate) id = ART_AETHER_BLD_GATEHOUSE_LARGE;
+                            else if (is_corner) id = ART_AETHER_BLD_TOWER_ROUND_RUINED;
+                            else if ((h2 & 7) == 0) id = ART_AETHER_WALL_PIECE_06;
+                            else if ((h2 & 7) == 1) id = ART_AETHER_WALL_PIECE_08;
+                            else if ((h2 & 3) == 0) id = ART_AETHER_WALL_ARCH_01;
+                            else if ((h2 & 3) == 1) id = ART_AETHER_WALL_PIECE_07;
+                            else id = ART_AETHER_WALL_PIECE_07;
+                            /* Tower at corners for hierarchy */
+                            if ((tx == CASTLE_FORT_X0 || tx == CASTLE_FORT_X1) &&
+                                (ty == CASTLE_FORT_Y0 || ty == CASTLE_FORT_Y1))
+                                id = ART_AETHER_BLD_TOWER_SQUARE_RUINED;
+                            else if (ty == 24 && (tx == 118 || tx == 138))
+                                id = ART_AETHER_BLD_TOWER_ROUND_RUINED;
+                            draw_sprite(fb, id, ax2, by2, rev2);
+                            /* Stairs where walls step between elevation layers */
+                            if ((tx == 118 && ty == 24) || (tx == CASTLE_KEEP_X && ty == CASTLE_KEEP_Y + 6))
+                                draw_sprite(fb, ART_CASTLE_WALL_STAIRS, ax2, by2 - PX(6), rev2);
                         } else {
-                            Uint32 h2 = tile_hash(g->seed, tx, ty);
                             int id = -1;
+                            /* Required buildings: keep, chapel, barracks, well, storage, guard tower */
                             if (tx == CASTLE_KEEP_X && ty == CASTLE_KEEP_Y) {
-                                id = ART_AETHER_BLD_KEEP_SMALL; /* supplied castle keep */
-                            } else if (tx == CASTLE_KEEP_X && ty == CASTLE_KEEP_Y - 7) {
-                                id = ART_AETHER_BLD_TOWER_SQUARE_RUINED; /* keep tower */
-                            } else if (tx == 128 && ty == CASTLE_CAUSEWAY_Y) {
-                                id = ART_AETHER_BLD_CHAPEL_STONE;
-                            } else if (tx == 116 && ty == CASTLE_CAUSEWAY_Y) {
-                                id = ART_AETHER_BLD_RUIN_STONE;
-                            } else if ((h2 & 31) == 0) {
-                                if (((h2 >> 4) & 3) == 0) id = ART_AETHER_PROP_04;
-                                else if (((h2 >> 5) & 7) == 0) id = ART_AETHER_PROP_05;
-                                else id = ((h2 & 8) ? ART_AETHER_PROP_06 : ART_AETHER_PROP_07);
+                                id = ART_AETHER_BLD_KEEP_SMALL;
+                            } else if (tx == 131 && ty == 18) {
+                                id = ART_AETHER_BLD_CHAPEL_STONE; /* chapel in upper courtyard */
+                            } else if (tx == 120 && ty == 22) {
+                                id = ART_AETHER_BLD_TOWER_ROUND_RUINED; /* barracks tower */
+                            } else if (tx == 128 && ty == 32) {
+                                id = ART_AETHER_BLD_RUIN_STONE; /* well courtyard */
+                            } else if (tx == 135 && ty == 35) {
+                                id = ART_AETHER_PROP_04; /* storage crates */
+                            } else if (tx == 125 && ty == 14) {
+                                id = ART_AETHER_BLD_TOWER_SQUARE_RUINED; /* keep guard tower */
+                            } else {
+                                /* Dense smaller decor: banners, barrels, rubble, weeds inside walls (stone/moss),
+                                 * cliffs/rocks/bushes outside — camera scale unchanged, density increased. */
+                                int inside = (tx >= 118 && tx <= 138 && ty >= 10 && ty <= 38);
+                                /* Second hash term to break lattice: mix tile_hash with position. */
+                                Uint32 hm = h2 ^ (h2 >> 8) ^ (Uint32)(tx * 374761393u + ty * 668265263u);
+                                if (inside) {
+                                    if ((hm & 31) == 0) {
+                                        if ((hm & 3) == 0) id = ART_AETHER_PROP_04;
+                                        else if ((hm & 7) == 1) id = ART_AETHER_PROP_05;
+                                        else id = ((hm & 8) ? ART_AETHER_PROP_06 : ART_AETHER_PROP_07);
+                                    } else if ((hm & 63) == 1) {
+                                        id = ART_CASTLE_WALL_STAIRS; /* courtyard stairs — castle stairs kept for causeway */
+                                    } else if ((hm & 127) == 2) {
+                                        id = ART_AETHER_PROP_05;
+                                    }
+                                } else {
+                                    /* Outside walls: cliffs, grass, rocks, pines — denser but varied */
+                                    if ((hm & 31) == 0) {
+                                        if ((hm & 3) == 0) id = ART_ROCK_SMALL_01;
+                                        else if ((hm & 7) == 1) id = ART_AETHER_PROP_04;
+                                        else id = ART_GRASS_TUFT_01;
+                                    } else if ((hm & 63) == 3) {
+                                        id = ART_BUSH_SMALL_01;
+                                    }
+                                }
                             }
                             if (id >= 0)
                                 draw_sprite(fb, id, ax2, by2, rev2);
                         }
                     }
+                    continue;
+                }
+                /* Water and shoreline enrichment: rocks, shallow, reeds, foam, docks */
+                if (g->w.surf[ty][tx] == SURF_OCEAN) {
+                    int near_island = castle_island_tile(tx+1, ty) || castle_island_tile(tx-1, ty) ||
+                                      castle_island_tile(tx, ty+1) || castle_island_tile(tx, ty-1) ||
+                                      castle_island_tile(tx+2, ty) || castle_island_tile(tx-2, ty) ||
+                                      castle_island_tile(tx, ty+2) || castle_island_tile(tx, ty-2);
+                    int dist2 = (tx - CASTLE_KEEP_X)*(tx - CASTLE_KEEP_X) + (ty - CASTLE_KEEP_Y)*(ty - CASTLE_KEEP_Y);
+                    float rev2 = tile_reveal(g, tx, ty, overlay);
+                    int ax2 = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
+                    int ay2 = band * ISO_HH + ISO_OY - g->cam_y;
+                    int by2 = ay2 + ISO_HH - g->w.height[ty][tx];
+                    Uint32 wh = tile_hash(g->seed, tx, ty);
+                    if (overlay || rev2 >= 0.04f) {
+                        if (near_island) {
+                            /* Small shoreline props only — avoid large rectangular
+                             * shore tiles. Use existing small nature props. */
+                            if ((wh & 31) == 0) draw_sprite(fb, ART_ROCK_SMALL_01, ax2, by2, rev2);
+                            else if ((wh & 31) == 1) draw_sprite(fb, ART_BUSH_SMALL_01, ax2, by2, rev2);
+                        } else if (dist2 < 900 && (wh & 127) == 0) {
+                            int id = (wh & 1) ? ART_ROCK_SMALL_01 : ART_BUSH_SMALL_01;
+                            draw_sprite(fb, id, ax2, by2, rev2 * 0.8f);
+                        }
+                    }
+                    /* Ocean tiles have no ground props — skip typical prop */
                     continue;
                 }
             }
@@ -8920,23 +9126,43 @@ static int aether_selftest(Uint64 seed, int nseeds)
         rngs_init(&rngs, seed + (Uint64)s);
         game_init(g, &rngs);
 
-        /* Causeway must be solid when key not held. */
+        /* Causeway must be solid when key not held — check entire span
+         * and that the island is not walk-reachable (noticeable water gap). */
         {
             int ty = CASTLE_CAUSEWAY_Y;
-            int tx = CASTLE_CAUSEWAY_X0;
-            if (g->w.solid[ty][tx] != 1) {
-                printf("  seed %d: causeway (%d,%d) not closed before key\n", s, tx, ty);
-                fails++;
+            int tx;
+            for (tx = CASTLE_CAUSEWAY_X0; tx < CASTLE_CAUSEWAY_X1; tx++) {
+                if (g->w.solid[ty][tx] != 1) {
+                    printf("  seed %d: causeway (%d,%d) not closed before key\n", s, tx, ty);
+                    fails++;
+                    break;
+                }
             }
             if (g->has_castle_key) {
                 printf("  seed %d: has_castle_key should start 0\n", s);
                 fails++;
             }
+            /* Walk BFS from spawn — island interior (129,14 keep) must be
+             * unreachable while causeway is closed, proving a real water gap. */
+            {
+                int *dist = (int *)SDL_malloc((size_t)WORLD_W * WORLD_H * sizeof(int));
+                int *queue = (int *)SDL_malloc((size_t)WORLD_W * WORLD_H * sizeof(int));
+                int spawn = (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE);
+                int keep = CASTLE_KEEP_Y * WORLD_W + CASTLE_KEEP_X;
+                if (dist && queue) {
+                    bfs_gated(&g->w, 0xFF, spawn, dist, queue);
+                    if (dist[keep] >= 0) {
+                        printf("  seed %d: keep walk-reachable before key (gap not isolating)\n", s);
+                        fails++;
+                    }
+                }
+                SDL_free(dist); SDL_free(queue);
+            }
         }
         SDL_free(g);
     }
     if (!fails)
-        printf("causeway: PASS  %d seeds, causeway closed before key\n", nseeds);
+        printf("causeway: PASS  %d seeds, causeway closed before key + island isolated by water\n", nseeds);
 
     /* Well Soul restoration opens the causeway as a side effect. */
     {
@@ -8959,11 +9185,34 @@ static int aether_selftest(Uint64 seed, int nseeds)
             if (r != 2 || !g->has_castle_key) {
                 printf("FAIL  castle bridge: Well Soul restore returned %d, has_key %d\n", r, g->has_castle_key);
                 fails++;
-            } else if (g->w.solid[CASTLE_BRIDGE_Y][CASTLE_BRIDGE_X] != 0) {
-                printf("FAIL  causeway still solid after Well Soul\n");
-                fails++;
             } else {
-                printf("castle key: PASS  Well Soul restored through the real E path and causeway opened\n");
+                int ty = CASTLE_CAUSEWAY_Y, tx, still_solid = 0;
+                for (tx = CASTLE_CAUSEWAY_X0; tx < CASTLE_CAUSEWAY_X1; tx++)
+                    if (g->w.solid[ty][tx] != 0) still_solid = 1;
+                if (still_solid || g->w.solid[CASTLE_BRIDGE_Y][CASTLE_BRIDGE_X] != 0) {
+                    printf("FAIL  causeway still solid after Well Soul\n");
+                    fails++;
+                } else {
+                    /* After unlocking, the keep must be walk-reachable
+                     * via the bridge + stairs — the player can step on the
+                     * bridge and cross. */
+                    int *dist = (int *)SDL_malloc((size_t)WORLD_W * WORLD_H * sizeof(int));
+                    int *queue = (int *)SDL_malloc((size_t)WORLD_W * WORLD_H * sizeof(int));
+                    int spawn = (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE);
+                    int keep = CASTLE_KEEP_Y * WORLD_W + CASTLE_KEEP_X;
+                    int ok = 0;
+                    if (dist && queue) {
+                        bfs_gated(&g->w, 0xFF, spawn, dist, queue);
+                        ok = dist[keep] >= 0;
+                    }
+                    SDL_free(dist); SDL_free(queue);
+                    if (!ok) {
+                        printf("FAIL  keep not walk-reachable after bridge opened\n");
+                        fails++;
+                    } else {
+                        printf("castle key: PASS  Well Soul restored through the real E path and causeway opened (bridge walkable)\n");
+                    }
+                }
             }
         }
         SDL_free(g);
@@ -11472,6 +11721,18 @@ int main(int argc, char **argv)
 
     (void)game_init(&game, &rngs);
 
+    /* Developer shortcut: --dev unlocks every progression gate so the
+     * entire castle, abilities and map can be inspected without playing
+     * through. Separate shortcut (build/Wayfarer DEV.lnk + Wayfarer-DEV.bat)
+     * launches with this flag; F12 does the same in-game. */
+    if (arg_flag(argc, argv, "--dev") || arg_flag(argc, argv, "--developer") ||
+        arg_flag(argc, argv, "--dev-mode")) {
+        dev_unlock_all(&game);
+        hud.mm_dirty = 1;
+        SDL_snprintf(hud.toast, sizeof(hud.toast), "DEV MODE: all locks opened  [F12]");
+        hud.toast_left = HUD_TOAST_FRAMES;
+    }
+
 #if WAYFARER_SELFTEST
     /* --dream: step through the portal on frame 0, so a scripted capture can stand IN the dream
      * realm. Added for the same reason --grid was: the player spawns in the overworld on every
@@ -11605,6 +11866,14 @@ int main(int argc, char **argv)
                     fullscreen = !fullscreen;
                     SDL_SetWindowFullscreen(win, fullscreen
                                             ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                    break;
+                case SDLK_F12: /* developer shortcut: unlock all progression gates */
+                    dev_unlock_all(&game);
+                    hud.mm_dirty = 1;
+                    SDL_snprintf(hud.toast, sizeof(hud.toast), "DEV MODE: all locks opened  [F12]");
+                    hud.toast_left = HUD_TOAST_FRAMES;
+                    sfx_fire(&audio, SFX_CHIME);
+                    SDL_AtomicAdd(&audio.layer_fire, 1);
                     break;
                 case SDLK_e:
                 case SDLK_SPACE:

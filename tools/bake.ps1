@@ -90,6 +90,41 @@ $script:DarkFantasyFiles = @(
     "buildings/bld_ruin_stone.png", "buildings/bld_chapel_stone.png",
     "props/prop_04.png", "props/prop_05.png", "props/prop_06.png", "props/prop_07.png")
 
+# Phase 13 Aetherhold — full castle set for 90-degree causeway composition.
+# Reverted per user request: all castle modules baked as pier/deck set.
+$script:CastleFiles = @(
+    "bridges_causeway/bridge_01.png",
+    "bridges_causeway/bridges_causeway_1.png",
+    "bridges_causeway/bridges_causeway_2.png",
+    "bridges_causeway/bridges_causeway_3.png",
+    "bridges_causeway/bridges_causeway_4.png",
+    "stairs_platforms/stair_01.png",
+    "stairs_platforms/stair_02.png",
+    "stairs_platforms/stair_03.png",
+    "stairs_platforms/stair_06.png",
+    "stairs_platforms/stairs_platforms_1.png",
+    "stairs_platforms/stairs_platforms_2.png",
+    "walls_modules/wall_01.png",
+    "walls_modules/wall_straight.png",
+    "walls_modules/wall_tall_corner.png",
+    "walls_modules/wall_medium.png",
+    "walls_modules/wall_ruined.png",
+    "walls_modules/wall_rubble.png",
+    "walls_modules/wall_corner.png",
+    "walls_modules/wall_gatehouse.png",
+    "walls_modules/wall_square_tower.png",
+    "walls_modules/wall_guard_tower.png",
+    "walls_modules/wall_stairs.png",
+    "water_shore/rock_cluster.png",
+    "water_shore/rock_mossy.png",
+    "water_shore/shore_transition.png",
+    "water_shore/water_shore_1.png",
+    "rocks_cliffs/rock_01.png",
+    "rocks_cliffs/rocks_cliffs_1.png",
+    "keep_structures/keep_01.png",
+    "keep_structures/keep_complete_4story.png",
+    "terrain_tiles/terrain_01.png")
+
 # ------------------------------------------------------------ dream recolour --
 # A dream sprite is the SAME pixel stream with a different palette: ArtSprite keeps pal_off
 # separate from data_off, so a variant costs one 16-byte record plus its palette - about 70 bytes
@@ -294,6 +329,16 @@ foreach ($rel in $script:DarkFantasyFiles) {
     $sprites += $sp
 }
 
+# The castle bridge/stairs set — same scale, prefix CASTLE_ to avoid collisions.
+foreach ($rel in $script:CastleFiles) {
+    $path = Join-Path (Join-Path $AssetRoot "castle") $rel
+    if (-not (Test-Path $path)) { throw "missing castle asset: $path" }
+    $leaf = [System.IO.Path]::GetFileNameWithoutExtension($rel)
+    $name = ("CASTLE_" + ($leaf -replace '[^A-Za-z0-9]', '_')).ToUpperInvariant()
+    $sp = ConvertTo-Sprite -Path $path -Name $name
+    $sp | Add-Member -NotePropertyName Category -NotePropertyValue "castle"
+    $sprites += $sp
+}
 
 if ($sprites.Count -eq 0) { throw "no sprites found under $AssetRoot" }
 
