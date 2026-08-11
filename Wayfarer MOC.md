@@ -25,6 +25,8 @@ Exploration-driven memory-restoration game for the 2P Game Arcade 1.44MB Floppy 
 - [[Open Decisions]] — unresolved questions to settle before/during Week 1–2
 - [[Cut List]] — pre-committed descoping order if time runs short
 - [[QA Checklist]] — continuous verification rules
+- [[Bug Fix Plan]] — **NEW** 8 confirmed bugs from a full codebase audit (2026-08-11), with exact
+  fixes and verification steps, ready to hand to an implementation session
 
 ## Roadmap
 - [[Phase Roadmap]] — the forward plan, phase by phase, in `design/phases/`. Read this before picking a task; it sequences everything left with a definition of done and a verification gate per phase, so the plan doesn't get re-derived from scratch each session.

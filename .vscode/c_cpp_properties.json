@@ -1,0 +1,19 @@
+{
+  "configurations": [
+    {
+      "name": "Win32",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "G:/tools/SDL2-min/include",
+        "G:/tools/SDL2-min/include/SDL2",
+        "G:/tools/w64devkit/x86_64-w64-mingw32/include"
+      ],
+      "defines": [],
+      "compilerPath": "G:/tools/w64devkit/bin/gcc.exe",
+      "cStandard": "c99",
+      "intelliSenseMode": "windows-gcc-x64",
+      "compileCommands": "${workspaceFolder}/compile_commands.json"
+    }
+  ],
+  "version": 4
+}

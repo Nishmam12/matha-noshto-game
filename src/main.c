@@ -98,6 +98,16 @@
 #define CASTLE_FORT_Y1    30
 #define CASTLE_TOWER_Y0   15
 #define CASTLE_TOWER_Y1   25
+/* The abandoned watchtower on the mainland approach. Named because it is
+ * hand-placed and therefore needed by BOTH castle_apply_layout (which builds it)
+ * and the render dispatch (which draws its sprite); those two used to carry
+ * independently hand-copied literals, and they had already drifted apart from
+ * the "6 tiles west of the gate" the comment claims. The gate is at
+ * CASTLE_CAUSEWAY_X0 - 2, and the y follows castle_approach_tile's own path
+ * formula so the tower lands ON the approach shelf — which is what puts it
+ * inside is_castle_reserved, and so out of reach of place_rivers' carve step. */
+#define CASTLE_WATCHTOWER_X (CASTLE_CAUSEWAY_X0 - 2 - 6)                       /* 74 */
+#define CASTLE_WATCHTOWER_Y (43 - (CASTLE_WATCHTOWER_X - 58) / 3 + CASTLE_Y_SHIFT) /* 33 */
 
 /* Hand-authored coast silhouette, one inclusive span per local row y=0..41;
  * applied at world rows 35..76. */
@@ -572,6 +582,14 @@ typedef struct {
     SDL_atomic_t layer_fire;   /* bumped per fragment restore             */
     SDL_atomic_t voice_fire;   /* bumped per Found Soul restore          */
     SDL_atomic_t reset_req;    /* main thread asks callback to zero state */
+    /* Same request/latch shape as reset_req, for the one piece of callback-owned
+     * state the main thread used to write directly: `rng`. R (regen) and F9
+     * (load) both reseed the world's audio stream, and the callback is already
+     * live and drawing from that same Rng (W_NOISE / the --noise path). Payload
+     * first, then the flag — the callback only reads rng_seed_req after seeing
+     * rng_req set. */
+    SDL_atomic_t rng_req;
+    Uint64       rng_seed_req;
     Synth        synth;
 #if WAYFARER_SELFTEST
     Uint64 calls;
@@ -616,6 +634,13 @@ static void synth_latch(Audio *a)
         SDL_memset(s->v, 0, sizeof(s->v));
         s->layer_seen = SDL_AtomicGet(&a->layer_fire);
         s->voice_seen = SDL_AtomicGet(&a->voice_fire);
+    }
+
+    /* Reseed on request. rng_seed(..., STREAM_AUDIO) is the same derivation
+     * rngs_init uses, so the audio stream has exactly one source of truth. */
+    if (SDL_AtomicGet(&a->rng_req)) {
+        SDL_AtomicSet(&a->rng_req, 0);
+        rng_seed(&a->rng, a->rng_seed_req, STREAM_AUDIO);
     }
 
     lf = SDL_AtomicGet(&a->layer_fire);
@@ -1116,11 +1141,20 @@ typedef struct {
     int    shards[SHARD_COUNT];
     int    shards_held;
     Uint8  has_castle_key; /* Phase 13 Slice 1: new key at the mainland watchtower */
+    /* Fog reveal animation: per-region cluster reveal triggered when
+     * restoration hits 1 (per-fragment) and when game_complete fires
+     * for the remaining regions. Not saved — rebuilt from restoration. */
+    float  region_reveal_prog[REGION_COUNT];
+    Uint8  region_revealing[REGION_COUNT];
 } Game;
 
 typedef struct {
     int up, down, left, right;
 } Input;
+
+static int game_complete(const Game *g);
+static int near_building(const World *w, int tx, int ty, int r);
+static int woody_count_around(Uint64 seed, int cx, int cy, int rad);
 
 static int solid_at(const World *w, int tx, int ty)
 {
@@ -1390,18 +1424,18 @@ static void castle_apply_layout(World *w, int unlocked)
         int gx = CASTLE_CAUSEWAY_X0 - 2, gy = CASTLE_CAUSEWAY_Y;
         /* Stone gate pillars flanking the causeway start */
         if (gx >= 0 && gy >= 0 && gx < WORLD_W && gy < WORLD_H) {
-            w->surf[gy][gx] = SURF_ROCK; w->solid[gy][gx] = 1;
-            if (gy > 0) { w->surf[gy-1][gx] = SURF_ROCK; w->solid[gy-1][gx] = 1; }
-            if (gy < WORLD_H-1) { w->surf[gy+1][gx] = SURF_ROCK; w->solid[gy+1][gx] = 1; }
+            w->surf[gy][gx] = SURF_ROCK; w->solid[gy][gx] = 1; w->path[gy][gx] = 0;
+            if (gy > 0) { w->surf[gy-1][gx] = SURF_ROCK; w->solid[gy-1][gx] = 1; w->path[gy-1][gx] = 0; }
+            if (gy < WORLD_H-1) { w->surf[gy+1][gx] = SURF_ROCK; w->solid[gy+1][gx] = 1; w->path[gy+1][gx] = 0; }
         }
-        /* Abandoned watchtower 6 tiles west of gate on the forest road */
+        /* Abandoned watchtower, 6 tiles west of the gate on the forest road. */
         {
-            int wx = 88, wy = 30, dx, dy;
+            int wx = CASTLE_WATCHTOWER_X, wy = CASTLE_WATCHTOWER_Y, dx, dy;
             for (dy = -1; dy <= 1; dy++)
                 for (dx = -1; dx <= 1; dx++) {
                     int tx = wx + dx, ty = wy + dy;
                     if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H) continue;
-                    w->surf[ty][tx] = SURF_ROCK; w->solid[ty][tx] = 1;
+                    w->surf[ty][tx] = SURF_ROCK; w->solid[ty][tx] = 1; w->path[ty][tx] = 0;
                 }
             w->solid[wy][wx] = 0; /* hollow interior */
             w->surf[wy][wx] = SURF_LAND;
@@ -2278,11 +2312,15 @@ static void regions_by_sector(const World *w, Uint32 *over, Uint32 *dream)
  * reachable once everything is held. Placing by frontier rather than at random
  * makes solvable layouts the common case; world_solvable is still what proves
  * it, since this alone guarantees nothing. */
-static void place_entities(World *w, Rng *rng, Entity *ents)
+static void place_entities(World *w, Rng *rng, Entity *ents, Uint64 seed)
 {
     static const Uint8 grant_order[3] = { ABIL_WADE, ABIL_CLIMB, ABIL_KINDLE };
     Uint8 held = 0;
+    Uint32 over_mask, dream_mask;
     int i;
+
+    /* Hoisted above the grant loop: both loops need it now. */
+    regions_by_sector(w, &over_mask, &dream_mask);
 
     for (i = 0; i < ENTITY_COUNT; i++) {
         ents[i].tile = -1;
@@ -2295,23 +2333,57 @@ static void place_entities(World *w, Rng *rng, Entity *ents)
     /* The three ability grants stay where they were: on the advancing frontier, in the OVERWORLD.
      * They are the progression, and putting one behind the portal would make the route to the
      * portal depend on an ability that is itself behind it — not unsolvable (the verifier would
-     * catch that), but a needless knot in the one placement that has to stay legible. */
+     * catch that), but a needless knot in the one placement that has to stay legible.
+     *
+     * "In the OVERWORLD" has to be ENFORCED, not just intended: some regions are exempt from
+     * ability gating (depth <= 1, and the dream arrival region always) and the portal is an
+     * ordinary region-graph edge, so an unfiltered `reach` really can offer a dream region here.
+     * Neither world_solvable nor entities_split_ok checks grants by sector, so nothing downstream
+     * would reject it — and a grant landing in the dream sector would additionally be miscounted
+     * against entities_split_ok's DREAM_FRAGMENTS quota. Filter with the same two-tier fallback
+     * the loop below uses. */
     for (i = 0; i < 3; i++) {
         Uint32 reach = regions_reachable(w, held);
-        int r = pick_region(reach, w->region_count, rng);
+        int r = pick_region(reach & over_mask, w->region_count, rng);
+        if (r < 0)
+            r = pick_region(reach, w->region_count, rng);
         if (r < 0)
             break;
         ents[i].region = (Uint8)r;
-        ents[i].tile = pick_tile_in_region(w, r, rng, -1);
+        ents[i].tile = pick_tile_in_region(w, r, rng, 0);   /* 0 = overworld */
+        if (ents[i].tile < 0)
+            ents[i].tile = pick_tile_in_region(w, r, rng, -1); /* straddling region */
+        /* Thin foliage around grants as well — same building/woody rule. */
+        {
+            int tries = 0;
+            while (tries < 4 && ents[i].tile >= 0) {
+                int tx = ents[i].tile % WORLD_W, ty = ents[i].tile / WORLD_W;
+                int nearB = near_building(w, tx, ty, 2);
+                int woody = woody_count_around(seed, tx, ty, 1);
+                if (!nearB && woody <= 3) break;
+                {
+                    int alt = pick_tile_in_region(w, r, rng, 0);
+                    if (alt < 0) alt = pick_tile_in_region(w, r, rng, -1);
+                    if (alt < 0) break;
+                    {
+                        int atx = alt % WORLD_W, aty = alt / WORLD_W;
+                        int awoody = woody_count_around(seed, atx, aty, 1);
+                        int anearB = near_building(w, atx, aty, 2);
+                        if ((anearB < nearB) || (awoody < woody) || (!anearB && awoody <= 3)) {
+                            ents[i].tile = alt;
+                            break;
+                        }
+                    }
+                }
+                tries++;
+            }
+        }
         ents[i].grants = grant_order[i];
         held |= grant_order[i];
     }
 
     {
         Uint32 reach = regions_reachable(w, held);
-        Uint32 over_mask, dream_mask;
-
-        regions_by_sector(w, &over_mask, &dream_mask);
 
         for (i = 3; i < ENTITY_COUNT; i++) {
             /* Phase 12 task 11: she does not get a region/tile PICK at all. She stands wherever
@@ -2356,6 +2428,32 @@ static void place_entities(World *w, Rng *rng, Entity *ents)
              * entity unplaced, which --reach-test would (rightly) call a failure. */
             if (ents[i].tile < 0)
                 ents[i].tile = pick_tile_in_region(w, r, rng, -1);
+            /* ~30% sparser around fragments/souls: keep soul/fragment not buried in thicket
+             * nor tight to a house wall. Try up to 4 alts in same region/sector. */
+            {
+                int tries = 0;
+                while (tries < 4 && ents[i].tile >= 0) {
+                    int tx = ents[i].tile % WORLD_W, ty = ents[i].tile / WORLD_W;
+                    int nearB = near_building(w, tx, ty, 2);
+                    int woody = woody_count_around(seed, tx, ty, 1);
+                    if (!nearB && woody <= 3) break;
+                    {
+                        int alt = pick_tile_in_region(w, r, rng, sector);
+                        if (alt < 0) alt = pick_tile_in_region(w, r, rng, -1);
+                        if (alt < 0) break;
+                        {
+                            int atx = alt % WORLD_W, aty = alt / WORLD_W;
+                            int awoody = woody_count_around(seed, atx, aty, 1);
+                            int anearB = near_building(w, atx, aty, 2);
+                            if ((anearB < nearB) || (awoody < woody) || (!anearB && awoody <= 3)) {
+                                ents[i].tile = alt;
+                                break;
+                            }
+                        }
+                    }
+                    tries++;
+                }
+            }
         }
     }
 }
@@ -2393,7 +2491,7 @@ static int entities_split_ok(const Entity *ents)
  * dream sector has too little reachable ground to hold SHARD_REQUIRED, shards_sufficient()
  * rejects the seed and the generate-then-verify loop tries again — the same shape as
  * entities_split_ok, not a new mechanism. */
-static void place_shards(const World *w, Rng *rng, int *shards)
+static void place_shards(const World *w, Rng *rng, int *shards, Uint64 seed)
 {
     Uint32 reach = regions_reachable(w, (Uint8)(ABIL_WADE | ABIL_CLIMB | ABIL_KINDLE));
     Uint32 over_mask, dream_mask, pool;
@@ -2404,7 +2502,28 @@ static void place_shards(const World *w, Rng *rng, int *shards)
 
     for (i = 0; i < SHARD_COUNT; i++) {
         int r = pick_region(pool, w->region_count, rng);
-        shards[i] = (r < 0) ? -1 : pick_tile_in_region(w, r, rng, 1);
+        int t = (r < 0) ? -1 : pick_tile_in_region(w, r, rng, 1);
+        if (t >= 0) {
+            int tries = 0;
+            while (tries < 4) {
+                int tx = t % WORLD_W, ty = t / WORLD_W;
+                int nearB = near_building(w, tx, ty, 2);
+                int woody = woody_count_around(seed, tx, ty, 1);
+                if (!nearB && woody <= 3) break;
+                {
+                    int alt = pick_tile_in_region(w, r, rng, 1);
+                    if (alt < 0) break;
+                    {
+                        int atx = alt % WORLD_W, aty = alt / WORLD_W;
+                        int awoody = woody_count_around(seed, atx, aty, 1);
+                        int anearB = near_building(w, atx, aty, 2);
+                        if ((anearB < nearB) || (awoody < woody) || (!anearB && awoody <= 3)) { t = alt; break; }
+                    }
+                }
+                tries++;
+            }
+        }
+        shards[i] = t;
     }
 }
 
@@ -2434,8 +2553,8 @@ static int world_place_and_verify(World *w, Rngs *rngs, const int *depth, Entity
 
     for (attempt = 0; attempt < 64; attempt++) {
         regions_assign_terrain(w, &rngs->terrain, depth);
-        place_entities(w, &rngs->entities, ents);
-        place_shards(w, &rngs->entities, shards);
+        place_entities(w, &rngs->entities, ents, rngs->seed);
+        place_shards(w, &rngs->entities, shards, rngs->seed);
         if (world_solvable(w, ents, NULL) && entities_split_ok(ents)
             && shards_sufficient(shards))
             return attempt + 1;
@@ -2450,16 +2569,16 @@ static int world_place_and_verify(World *w, Rngs *rngs, const int *depth, Entity
         for (i = 0; i < w->region_count; i++)
             if (depth[i] == d)
                 w->regions[i].terrain = TERRAIN_NORMAL;
-        place_entities(w, &rngs->entities, ents);
-        place_shards(w, &rngs->entities, shards);
+        place_entities(w, &rngs->entities, ents, rngs->seed);
+        place_shards(w, &rngs->entities, shards, rngs->seed);
         if (world_solvable(w, ents, NULL))
             return -d;
     }
 
     for (i = 0; i < w->region_count; i++)
         w->regions[i].terrain = TERRAIN_NORMAL;
-    place_entities(w, &rngs->entities, ents);
-    place_shards(w, &rngs->entities, shards);
+    place_entities(w, &rngs->entities, ents, rngs->seed);
+    place_shards(w, &rngs->entities, shards, rngs->seed);
     return -100;
 }
 
@@ -2728,10 +2847,18 @@ static int castle_bridge_open(const Game *g)
  * "restored" means, instead of a second copy that could drift. */
 static void apply_restore(Game *g, int i)
 {
+    int r;
     g->ents[i].restored = 1;
     g->p.abilities |= g->ents[i].grants;
-    if (g->ents[i].region < g->w.region_count)
-        g->w.regions[g->ents[i].region].restore_to = 1.0f;
+    if (g->ents[i].region < g->w.region_count) {
+        r = g->ents[i].region;
+        g->w.regions[r].restore_to = 1.0f;
+        /* Trigger cluster reveal for this region — animated in sim_step. */
+        if (r >= 0 && r < REGION_COUNT) {
+            g->region_revealing[r] = 1;
+            g->region_reveal_prog[r] = 0.0f;
+        }
+    }
     if (g->ents[i].is_soul)
         g->souls_restored++;
     else
@@ -2739,6 +2866,21 @@ static void apply_restore(Game *g, int i)
     if (i == WELL_SOUL_IDX) {
         g->has_castle_key = 1;
         castle_apply_layout(&g->w, 1);
+    }
+    /* When the last entity is restored, queue global clear for any
+     * remaining regions so the whole map fades in via the same cluster
+     * animation (per your spec: entire region but not instantly). */
+    if (game_complete(g)) {
+        for (r = 0; r < g->w.region_count; r++) {
+            if (g->w.regions[r].restoration < 1.0f || g->w.regions[r].restore_to < 1.0f) {
+                g->w.regions[r].restore_to = 1.0f;
+            }
+            if (!g->region_revealing[r]) {
+                g->region_revealing[r] = 1;
+                /* Stagger start slightly per region for visible wave */
+                g->region_reveal_prog[r] = -(float)(r % 3) * 0.15f;
+            }
+        }
     }
 }
 
@@ -2883,6 +3025,69 @@ static void sim_step(Game *g, const Input *in, float dt)
                 r->restoration = r->restore_to;
         }
     }
+    /* Cluster reveal animation: when a region is queued (apply_restore set
+     * region_revealing), advance reveal_prog and reveal tile clusters outward
+     * from the region's seed tile. ~0.9 units/sec matches RESTORE_RATE so
+     * colour and fog finish together. Stagger keeps global 19/19 wave visible. */
+    for (i = 0; i < g->w.region_count; i++) {
+        if (!g->region_revealing[i]) continue;
+        /* Wait until that region's colour is mostly back */
+        if (g->w.regions[i].restoration < 0.95f && g->w.regions[i].restore_to >= 1.0f)
+            continue;
+        g->region_reveal_prog[i] += dt * 1.1f;
+        if (g->region_reveal_prog[i] < 0.0f) continue; /* staggered start */
+        {
+            float prog = g->region_reveal_prog[i];
+            int rtiles = g->w.regions[i].tiles;
+            int target = (int)(prog * (float)rtiles * 1.2f);
+            int cx = g->w.regions[i].seed_tile % WORLD_W;
+            int cy = g->w.regions[i].seed_tile / WORLD_W;
+            int revealed = 0, x, y;
+            int maxR = 0;
+            /* Find max radius needed to cover region (upper bound 200). */
+            if (target > rtiles) target = rtiles;
+            /* Expand outward in Chebyshev rings from seed, revealing up to target tiles. */
+            for (maxR = 0; maxR < WORLD_W + WORLD_H; maxR++) {
+                int hit = 0;
+                for (y = cy - maxR; y <= cy + maxR; y++) {
+                    for (x = cx - maxR; x <= cx + maxR; x++) {
+                        if (x < 0 || y < 0 || x >= WORLD_W || y >= WORLD_H) continue;
+                        if (x != cx - maxR && x != cx + maxR && y != cy - maxR && y != cy + maxR) continue;
+                        if (g->w.region[y][x] != i) continue;
+                        if (g->w.reveal[y][x] >= 1.0f) { revealed++; continue; }
+                        if (revealed < target) {
+                            g->w.reveal[y][x] = 1.0f;
+                            revealed++;
+                            hit = 1;
+                        }
+                    }
+                }
+                if (revealed >= target) break;
+                if (!hit && maxR > 40) break;
+            }
+            /* Count actual revealed in region to decide completion */
+            {
+                int cnt = 0, tot = 0;
+                for (y = 0; y < WORLD_H; y++)
+                    for (x = 0; x < WORLD_W; x++)
+                        if (g->w.region[y][x] == i) { tot++; if (g->w.reveal[y][x] >= 1.0f) cnt++; }
+                if (cnt >= tot && tot > 0) {
+                    g->region_revealing[i] = 0;
+                }
+            }
+        }
+    }
+    /* Fallback: if region is fully restored but reveal somehow never queued
+     * (e.g. load of old save), queue it lazily. */
+    for (i = 0; i < g->w.region_count; i++) {
+        if (g->w.regions[i].restoration >= 1.0f && !g->region_revealing[i]) {
+            int any = 0, x, y;
+            for (y = 0; y < WORLD_H && !any; y++)
+                for (x = 0; x < WORLD_W && !any; x++)
+                    if (g->w.region[y][x] == i && g->w.reveal[y][x] < 1.0f) any = 1;
+            if (any) { g->region_revealing[i] = 1; g->region_reveal_prog[i] = 0.0f; }
+        }
+    }
 }
 
 /* Flood-fill the open region containing (sx,sy). Returns its tile count and,
@@ -3010,19 +3215,18 @@ static void world_heights(World *w)
                  * wall height, which IS the wall — no separate wall-drawing code exists
                  * anywhere.
                  *
-                 * UNLESS the building is drawn as a baked sprite, in which case the sprite is
-                 * the entire building and the ground under it must stay FLAT. Leaving the
-                 * extrusion in place stood a 96 px house on top of a 42 px block, which read as
-                 * a cottage on a plinth. This is the one place the art seam reaches outside the
-                 * renderer, and it has to agree with draw_building exactly — both ask
-                 * building_sprite_id, so there is one decision, not two that can drift.
+                 * Previously baked buildings were flattened (h=0) so the sprite would not
+                 * stand on a plinth, but that left phase 0/1/2 ruins as a flat invisible
+                 * square (solid but no wall faces) — the exact box in the report images.
+                 * Fix: always extrude walls so ruin phases have visible walls. The baked
+                 * sprite path now compensates by drawing at wall-top height (see draw_building)
+                 * rather than requiring a flat base. Both branches agree on
+                 * building_sprite_id vs procedural, so the seam stays single-sourced.
                  *
                  * Still render-only: `height` has never been a collision input, and the tiles
                  * remain `solid` either way, so nothing about reachability moves. */
                 const Building *bb = &w->bld[w->bld_at[y][x] - 1];
-                h = (building_sprite_id(bb) == ART_NONE)
-                        ? WALL_BASE + bb->levels * STOREY_H
-                        : 0;
+                h = WALL_BASE + bb->levels * STOREY_H;
             } else if (w->surf[y][x] == SURF_OCEAN) {
                 /* Sea floor, stepping down away from the shore. Without this the
                  * chamfer below would read open water as the deep interior of a
@@ -3192,7 +3396,7 @@ static int near_open_tile(const Uint8 *seen, int near, int max_r)
     return -1;
 }
 
-static void place_portal(World *w, Rng *rng, Uint8 *seen, int *stack)
+static void place_portal(World *w, Rng *rng, Uint8 *seen, int *stack, Uint64 seed)
 {
     w->portal[0] = -1;
     w->portal[1] = -1;
@@ -3205,6 +3409,32 @@ static void place_portal(World *w, Rng *rng, Uint8 *seen, int *stack)
      * that already sits between the player and the deep interior. */
     w->portal[0] = biggest_component_tile(w, rng, seen, stack, 1, OVERWORLD_H - 1);
     w->portal[1] = biggest_component_tile(w, rng, seen, stack, DREAM_Y0, WORLD_H);
+    /* Portal open radius (2 tiles, ~30% sparser). biggest_component_tile samples
+     * randomly inside the largest component; resample a few times and keep the
+     * sparsest so the arch does not land inside a thicket. Uses tile_hash
+     * woody count (tree+bush roll<7) — height/region not yet built, but roll
+     * alone predicts canopy. */
+    {
+        int p;
+        for (p = 0; p < 2; p++) {
+            int cur = w->portal[p];
+            if (cur < 0) continue;
+            {
+                int best = cur, bestScore = woody_count_around(seed, cur % WORLD_W, cur / WORLD_W, 2);
+                int tries;
+                for (tries = 0; tries < 3; tries++) {
+                    int alt = biggest_component_tile(w, rng, seen, stack,
+                        p == 0 ? 1 : DREAM_Y0, p == 0 ? OVERWORLD_H - 1 : WORLD_H);
+                    if (alt < 0) continue;
+                    {
+                        int s = woody_count_around(seed, alt % WORLD_W, alt / WORLD_W, 2);
+                        if (s < bestScore) { bestScore = s; best = alt; }
+                    }
+                }
+                w->portal[p] = best;
+            }
+        }
+    }
 
     /* A portal with only one end is not a portal. portal_link would return -1 for a half-pair
      * anyway; zeroing both makes that explicit rather than incidental. */
@@ -3259,7 +3489,7 @@ static int game_init(Game *g, Rngs *rngs)
      * verifier, so a layout it cannot serve is rejected and regenerated by machinery that already
      * exists (decision 13). From here on, tile_neighbours reports the portal edge to every
      * traversal, so the spawn fill, the region graph and the completability proof all see it. */
-    place_portal(&g->w, &rngs->terrain, sc.seen, sc.stack);
+    place_portal(&g->w, &rngs->terrain, sc.seen, sc.stack, rngs->seed);
     SDL_memset(seen, 0, sizeof(sc.seen));
 
     /* Pass 1: find the largest open region. */
@@ -3511,6 +3741,8 @@ static int game_load(Game *g, Rngs *rngs, const char *path, Uint64 *seed_out)
     if (restored & ~entity_mask)
         return -1;
     abilities = buf[20];
+    if (abilities & ~(Uint8)(ABIL_WADE | ABIL_CLIMB | ABIL_KINDLE))
+        return -1;
     shards = buf[21];
     if ((Uint32)shards & ~shard_mask)
         return -1;
@@ -3935,7 +4167,7 @@ static void mm_draw(SDL_Surface *fb, const Game *g)
               SDL_MapRGB(fb->format, 0xff, 0xff, 0xff), MM_TILE * 2 + 1);
 }
 
-static void hud_draw(SDL_Surface *fb, const Game *g, int seed)
+static void hud_draw(SDL_Surface *fb, const Game *g, Uint64 seed)
 {
     char buf[64];
     Uint32 warm = SDL_MapRGB(fb->format, 0xf0, 0xd8, 0xb0);
@@ -3983,8 +4215,11 @@ static void hud_draw(SDL_Surface *fb, const Game *g, int seed)
         hud.win_left--;
     }
 
-    /* Seed, bottom-right. */
-    SDL_snprintf(buf, sizeof(buf), "seed %d", seed);
+    /* Seed, bottom-right. %.0f rather than %llu/PRIu64: the seed is a Uint64 and
+     * a save file can carry one above 2^31, but pulling the 64-bit integer
+     * formatter into the shipping build costs more than this project's byte
+     * budget wants to spend on a HUD line. Same idiom the selftests use. */
+    SDL_snprintf(buf, sizeof(buf), "seed %.0f", (double)seed);
     draw_text_shadow(fb, LOGICAL_W - 12 - (int)strlen(buf) * 12, LOGICAL_H - 14 - 8,
                      buf, pale);
 
@@ -4447,11 +4682,15 @@ static const Uint8 roof_pal[4][3][3] = {
  * so a roof ring lines up exactly with the tile grid it sits over. */
 static void iso_diamond(SDL_Surface *fb, int cx, int cy, int rw, Uint32 c)
 {
-    int i, i0 = -rw, i1 = rw;
+    /* Half-open [i0, i1), matching iso_tile exactly. vspan does no x-clipping of
+     * its own, so an inclusive loop against this same clamp would write column
+     * fb->w — one past the last valid column, and off the end of the buffer
+     * entirely on the last row. */
+    int i, i0 = -rw, i1 = rw + 1;
 
     if (cx + i0 < 0)      i0 = -cx;
     if (cx + i1 > fb->w)  i1 = fb->w - cx;
-    for (i = i0; i <= i1; i++) {
+    for (i = i0; i < i1; i++) {
         int a = i < 0 ? -i : i;
         int half = (rw - a) / 2;
         vspan(fb, cx + i, cy - half, half * 2 + 1, c);
@@ -4473,11 +4712,11 @@ static void iso_diamond(SDL_Surface *fb, int cx, int cy, int rw, Uint32 c)
 static void iso_diamond_lr(SDL_Surface *fb, int cx, int cy, int rw,
                            Uint32 cl, Uint32 cr)
 {
-    int i, i0 = -rw, i1 = rw;
+    int i, i0 = -rw, i1 = rw + 1;   /* half-open, as in iso_diamond/iso_tile */
 
     if (cx + i0 < 0)      i0 = -cx;
     if (cx + i1 > fb->w)  i1 = fb->w - cx;
-    for (i = i0; i <= i1; i++) {
+    for (i = i0; i < i1; i++) {
         int a = i < 0 ? -i : i;
         int half = (rw - a) / 2;
         vspan(fb, cx + i, cy - half, half * 2 + 1, i < 0 ? cl : cr);
@@ -5161,6 +5400,31 @@ static void draw_prompt(SDL_Surface *fb, int cx, int by, int kind, float t)
     }
 }
 
+static int near_building(const World *w, int tx, int ty, int r)
+{
+    int i;
+    for (i = 0; i < w->bld_count; i++) {
+        const Building *b = &w->bld[i];
+        if (tx >= (int)b->x - r && tx < (int)b->x + b->w + r &&
+            ty >= (int)b->y - r && ty < (int)b->y + b->h + r)
+            return 1;
+    }
+    return 0;
+}
+static int woody_count_around(Uint64 seed, int cx, int cy, int rad)
+{
+    int dx, dy, c = 0;
+    for (dy = -rad; dy <= rad; dy++)
+        for (dx = -rad; dx <= rad; dx++) {
+            int x = cx + dx, y = cy + dy;
+            Uint32 h;
+            if (x < 0 || y < 0 || x >= WORLD_W || y >= WORLD_H) continue;
+            h = tile_hash(seed, x, y);
+            if (((h >> 8) & 31) < 7) c++;
+        }
+    return c;
+}
+
 /* Which prop, if any, stands on this tile. Presence is decided from its own bit
  * field, before shape, so retuning a tree's jitter never moves a tree. */
 static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
@@ -5179,6 +5443,17 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
         height_at(w, tx, ty + 1) - height_at(w, tx, ty) >= PX(24))
         return PROP_NONE;
 
+    /* Hard veto: no foliage on impassable water/rock/river or bridge decks.
+     * Path is allowed (dirt lane can have tuft under it, but we thin later).
+     * Castle island/causeway already skipped by render's island check, but also
+     * reject here for entity-distance scoring. Bridge tiles are solid=0 surf=RIVER
+     * so they would otherwise pass to the terrain switch and grow trees on planks.
+     * Approach shelf (castle_approach_tile) stays elicible — it is the forest
+     * road leading to the tower and should keep its woods. */
+    if (w->surf[ty][tx] == SURF_OCEAN || w->surf[ty][tx] == SURF_RIVER ||
+        w->surf[ty][tx] == SURF_ROCK || w->bridge[ty][tx] ||
+        castle_island_tile(tx, ty) || castle_causeway_tile(tx, ty))
+        return PROP_NONE;
     /* Boulders on the tops of cliffs, sparsely — enough to break the bare
      * plateau silhouette without turning it into scree. */
     if (w->solid[ty][tx])
@@ -5201,26 +5476,28 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
          *
          * Density is not a collision input, so this cannot alter solvability; but it does
          * change what the reveal mechanic has to show, which is the actual reason to care. */
-        if (dream_palette(ty))
-            /* The dream realm's ground cover, at IDENTICAL density — same rolls, same
-             * thresholds, same tiles carrying a prop. Only which prop changes, and only for the
-             * two kinds with no baked art: a sawn stump is a woodcutter's leavings and a meadow
-             * flower is a warm yellow bloom, and both read as the overworld's countryside no
-             * matter what colour the trees behind them are. Crystals are the one procedural prop
-             * already drawn as EMITTING rather than reflecting, which is the Lumiara concept
-             * art's whole signature.
-             *
-             * Keeping the density identical is deliberate: prop rate is what decides how much
-             * terrain the reveal mechanic can still show (see the Phase 07 retune above), and
-             * changing the look should not quietly change that too. */
-            return (roll <  4) ? PROP_TREE
-                 : (roll <  7) ? PROP_BUSH
-                 : (roll < 15) ? PROP_CRYSTAL : PROP_NONE;
-
-        return (roll <  4) ? PROP_TREE     /* 12.5% */
-             : (roll <  7) ? PROP_BUSH     /*  9.4% */
-             : (roll <  9) ? PROP_STUMP    /*  6.3% */
-             : (roll < 15) ? PROP_FLOWER : PROP_NONE;
+         if (dream_palette(ty)) {
+             int near = near_building(w, tx, ty, 2);
+             if (near)
+                 return (roll <  3) ? PROP_TREE   /* 9.4% (-25%) */
+                      : (roll <  6) ? PROP_BUSH   /* 9.4→6.3% (-33%) */
+                      : (roll < 14) ? PROP_CRYSTAL : PROP_NONE;
+             return (roll <  4) ? PROP_TREE
+                  : (roll <  7) ? PROP_BUSH
+                  : (roll < 15) ? PROP_CRYSTAL : PROP_NONE;
+         }
+         {
+             int near = near_building(w, tx, ty, 2);
+             if (near)
+                 return (roll <  3) ? PROP_TREE     /* 12.5→9.4 (-25%) trees */
+                      : (roll <  6) ? PROP_BUSH     /* 9.4→6.3  (-33%) bushes */
+                      : (roll <  9) ? PROP_STUMP    /* unchanged */
+                      : (roll < 14) ? PROP_FLOWER : PROP_NONE; /* 18.8→15.6 slight */
+             return (roll <  4) ? PROP_TREE     /* 12.5% */
+                  : (roll <  7) ? PROP_BUSH     /*  9.4% */
+                  : (roll <  9) ? PROP_STUMP    /*  6.3% */
+                  : (roll < 15) ? PROP_FLOWER : PROP_NONE;
+         }
     }
 }
 
@@ -5326,14 +5603,16 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
      * Below that, the procedural path below draws the ruin state with parts suppressed. */
     {
         int art = building_sprite_id(b);
-        if (art != ART_NONE && phase >= 3) {
+        if (art != ART_NONE) {
             const ArtSprite *sp = &ART_SPRITES[art];
-            draw_sprite(fb, art, cx, cy, rev);
-            /* Full restoration: smoke over the sprite's roof ridge. The sprite
-             * is the whole building, so the chimney is wherever the art says —
-             * top centre is the least-wrong anchor, with a per-building nudge. */
-            draw_smoke(fb, cx + (int)(v & 3) - 1, cy - sp->anchor_y,
-                       v, t, rev, 2);
+            /* World footprint still extruded at wall height (see world_heights:
+             * ruin walls must show at phase 0), so the sprite's feet must sit
+             * on the wall-top rather than at ground level or it appears sunk.
+             * Matches the procedural roof's cy - wall offset below. */
+            draw_sprite(fb, art, cx, cy - wall, rev);
+            /* Full restoration: smoke over the sprite's roof ridge. */
+            draw_smoke(fb, cx + (int)(v & 3) - 1, cy - wall - sp->anchor_y,
+                       v, t, rev, (phase >= 3) ? 2 : 0);
             return;
         }
     }
@@ -6064,13 +6343,15 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                  * silhouette is a real ocean/rock/land mask; sprites only sit
                  * on the inner fortress ring and courtyard landmarks. */
                 /* Mainland monumental entry: forest → road → watchtower → stone gate → bridge */
-                if ((tx == 88 && ty == 30) || (tx == CASTLE_CAUSEWAY_X0 - 2 && ty == CASTLE_CAUSEWAY_Y)) {
+                if ((tx == CASTLE_WATCHTOWER_X && ty == CASTLE_WATCHTOWER_Y) ||
+                    (tx == CASTLE_CAUSEWAY_X0 - 2 && ty == CASTLE_CAUSEWAY_Y)) {
                     int ax2 = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
                     int ay2 = band * ISO_HH + ISO_OY - g->cam_y;
                     int by2 = ay2 + ISO_HH - g->w.height[ty][tx];
                     float rev2 = tile_reveal(g, tx, ty, overlay);
                     if (overlay || rev2 >= 0.06f) {
-                        int id = (tx == 88) ? ART_AETHER_BLD_TOWER_ROUND_RUINED : ART_AETHER_BLD_GATEHOUSE_LARGE;
+                        int id = (tx == CASTLE_WATCHTOWER_X) ? ART_AETHER_BLD_TOWER_ROUND_RUINED
+                                                            : ART_AETHER_BLD_GATEHOUSE_LARGE;
                         draw_sprite(fb, id, ax2, by2, rev2);
                     }
                     continue;
@@ -6080,13 +6361,24 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                     int ay2 = band * ISO_HH + ISO_OY - g->cam_y;
                     int by2 = ay2 + ISO_HH - g->w.height[ty][tx];
                     float rev2 = tile_reveal(g, tx, ty, overlay);
-                    Uint32 h2 = tile_hash(g->seed, tx, ty);
                     if (overlay || rev2 >= 0.06f) {
-                        if (castle_causeway_tile(tx, ty)) {
-                            /* Stone causeway over water: single BLD_BRIDGE_STONE deck
-                             * (simple arch, no roof) tiles as one continuous
-                             * structure. Over island land, draw flat stone path.
-                             * Mid tower/arch remain landmarks. */
+                        if (castle_island_tile(tx, ty)) {
+                            /* Single non-randomized castle asset — replaces all
+                             * previous modular wall/keep/chapel/tower scattering
+                             * which used h2 hash and hm variations. Only this
+                             * rect is not randomized (per your spec); approach
+                             * and causeway remain as before. Draw once at the
+                             * keep centre so its bottom aligns to the hill top
+                             * height. Other island tiles draw no additional
+                             * sprites — just the ground already rendered in the
+                             * first pass — so the asset is the whole castle. */
+                            if (tx == CASTLE_KEEP_X && ty == CASTLE_KEEP_Y) {
+                                draw_sprite(fb, ART_CASTLE_CASTLE_FULL_MULTITIER_V2, ax2, by2, rev2);
+                            }
+                        } else if (castle_causeway_tile(tx, ty)) {
+                            /* Stone causeway over water: deterministic (no h2)
+                             * per your "only castle not randomized" — fixed
+                             * sequence, no hash rolls. */
                             if (g->has_castle_key) {
                                 int id;
                                 int mid = (CASTLE_CAUSEWAY_X0 + CASTLE_CAUSEWAY_X1) / 2;
@@ -6111,85 +6403,17 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                                 else if (isWater)
                                     id = ART_BLD_BRIDGE_STONE;
                                 else
-                                    id = ART_CASTLE_STAIRS_PLATFORMS_1; /* flat deck over island */
+                                    id = ART_CASTLE_STAIRS_PLATFORMS_1;
                                 draw_sprite(fb, id, ax2, by2, rev2);
                             }
-                        } else if (castle_wall_tile(tx, ty) ||
-                                   (tx == CASTLE_FORT_X0 && ty == CASTLE_CAUSEWAY_Y) ||
-                                   (ty == 24 && tx >= 118 && tx <= 138)) {
-                            /* Outer / inner retaining walls — dark_fantasy AETHER set per Slice 2 plan. */
-                            int id = ART_AETHER_WALL_PIECE_07;
-                            int is_corner = (tx == CASTLE_FORT_X0 && ty == CASTLE_FORT_Y0) ||
-                                            (tx == CASTLE_FORT_X1 && ty == CASTLE_FORT_Y0) ||
-                                            (tx == CASTLE_FORT_X0 && ty == CASTLE_FORT_Y1) ||
-                                            (tx == CASTLE_FORT_X1 && ty == CASTLE_FORT_Y1);
-                            int is_gate = (tx == CASTLE_FORT_X0 && ty == CASTLE_CAUSEWAY_Y) ||
-                                          (tx == 118 && ty == 24);
-                            if (is_gate) id = ART_AETHER_BLD_GATEHOUSE_LARGE;
-                            else if (is_corner) id = ART_AETHER_BLD_TOWER_ROUND_RUINED;
-                            else if ((h2 & 7) == 0) id = ART_AETHER_WALL_PIECE_06;
-                            else if ((h2 & 7) == 1) id = ART_AETHER_WALL_PIECE_08;
-                            else if ((h2 & 3) == 0) id = ART_AETHER_WALL_ARCH_01;
-                            else if ((h2 & 3) == 1) id = ART_AETHER_WALL_PIECE_07;
-                            else id = ART_AETHER_WALL_PIECE_07;
-                            /* Tower at corners for hierarchy */
-                            if ((tx == CASTLE_FORT_X0 || tx == CASTLE_FORT_X1) &&
-                                (ty == CASTLE_FORT_Y0 || ty == CASTLE_FORT_Y1))
-                                id = ART_AETHER_BLD_TOWER_SQUARE_RUINED;
-                            else if (ty == 24 && (tx == 118 || tx == 138))
-                                id = ART_AETHER_BLD_TOWER_ROUND_RUINED;
-                            draw_sprite(fb, id, ax2, by2, rev2);
-                            /* Stairs where walls step between elevation layers */
-                            if ((tx == 118 && ty == 24) || (tx == CASTLE_KEEP_X && ty == CASTLE_KEEP_Y + 6))
-                                draw_sprite(fb, ART_CASTLE_WALL_STAIRS, ax2, by2 - PX(6), rev2);
-                        } else {
-                            int id = -1;
-                            /* Required buildings: keep, chapel, barracks, well, storage, guard tower */
-                            if (tx == CASTLE_KEEP_X && ty == CASTLE_KEEP_Y) {
-                                id = ART_AETHER_BLD_KEEP_SMALL;
-                            } else if (tx == 131 && ty == 18) {
-                                id = ART_AETHER_BLD_CHAPEL_STONE; /* chapel in upper courtyard */
-                            } else if (tx == 120 && ty == 22) {
-                                id = ART_AETHER_BLD_TOWER_ROUND_RUINED; /* barracks tower */
-                            } else if (tx == 128 && ty == 32) {
-                                id = ART_AETHER_BLD_RUIN_STONE; /* well courtyard */
-                            } else if (tx == 135 && ty == 35) {
-                                id = ART_AETHER_PROP_04; /* storage crates */
-                            } else if (tx == 125 && ty == 14) {
-                                id = ART_AETHER_BLD_TOWER_SQUARE_RUINED; /* keep guard tower */
-                            } else {
-                                /* Dense smaller decor: banners, barrels, rubble, weeds inside walls (stone/moss),
-                                 * cliffs/rocks/bushes outside — camera scale unchanged, density increased. */
-                                int inside = (tx >= 118 && tx <= 138 && ty >= 10 && ty <= 38);
-                                /* Second hash term to break lattice: mix tile_hash with position. */
-                                Uint32 hm = h2 ^ (h2 >> 8) ^ (Uint32)(tx * 374761393u + ty * 668265263u);
-                                if (inside) {
-                                    if ((hm & 31) == 0) {
-                                        if ((hm & 3) == 0) id = ART_AETHER_PROP_04;
-                                        else if ((hm & 7) == 1) id = ART_AETHER_PROP_05;
-                                        else id = ((hm & 8) ? ART_AETHER_PROP_06 : ART_AETHER_PROP_07);
-                                    } else if ((hm & 63) == 1) {
-                                        id = ART_CASTLE_WALL_STAIRS; /* courtyard stairs — castle stairs kept for causeway */
-                                    } else if ((hm & 127) == 2) {
-                                        id = ART_AETHER_PROP_05;
-                                    }
-                                } else {
-                                    /* Outside walls: cliffs, grass, rocks, pines — denser but varied */
-                                    if ((hm & 31) == 0) {
-                                        if ((hm & 3) == 0) id = ART_ROCK_SMALL_01;
-                                        else if ((hm & 7) == 1) id = ART_AETHER_PROP_04;
-                                        else id = ART_GRASS_TUFT_01;
-                                    } else if ((hm & 63) == 3) {
-                                        id = ART_BUSH_SMALL_01;
-                                    }
-                                }
-                            }
-                            if (id >= 0)
-                                draw_sprite(fb, id, ax2, by2, rev2);
                         }
                     }
                     continue;
                 }
+                /* Bridge decks must never receive props — checked here as well as
+                 * in prop_at, so the shoreline enrichment does not mask it. */
+                if (g->w.bridge[ty][tx])
+                    continue;
                 /* Water and shoreline enrichment: rocks, shallow, reeds, foam, docks */
                 if (g->w.surf[ty][tx] == SURF_OCEAN) {
                     int near_island = castle_island_tile(tx+1, ty) || castle_island_tile(tx-1, ty) ||
@@ -6984,7 +7208,7 @@ static Uint32 walk_regions(const World *w, Uint8 abilities, int spawn_tile,
  * ever disagree, the guarantee is worthless — the generator would certify a
  * world as completable that the movement code makes impossible. So compare them
  * directly at every ability tier. */
-static int gating_selftest(Uint64 seed, int verbose)
+static int gating_selftest(Uint64 seed, int verbose, int *out_gated)
 {
     Game g;
     Rngs rngs;
@@ -7022,6 +7246,10 @@ static int gating_selftest(Uint64 seed, int verbose)
     if (verbose)
         printf("  seed %-10.0f tiers agree  gating actually blocks: %-3s  %s\n",
                (double)seed, gated_seen ? "yes" : "no", fails ? "FAIL" : "PASS");
+    /* Reported out rather than folded into `fails`: no single seed is required
+     * to gate, but the sweep as a whole is — see the caller's negative control. */
+    if (gated_seen)
+        (*out_gated)++;
     return fails;
 }
 
@@ -7534,8 +7762,19 @@ static int reach_selftest(Uint64 seed, int verbose, int *relaxed)
         }
         if (g.ents[i].is_soul)
             souls++;
-        if (g.ents[i].grants)
+        if (g.ents[i].grants) {
             grants++;
+            /* place_entities' own comment says the three ability grants stay in the OVERWORLD.
+             * Checked on the tile row, the same way the sector split below is checked — a region
+             * can straddle the portal, so where the entity STANDS is the only answer that always
+             * exists. Nothing else asserts this: world_solvable only asks about reachability and
+             * entities_split_ok would happily count a stray grant toward the dream quota. */
+            if (dream_sector(y)) {
+                printf("  seed %.0f: ability grant (entity %d) is in the dream sector, row %d\n",
+                       (double)seed, i, y);
+                fails++;
+            }
+        }
     }
 
     if (souls != SOUL_COUNT) {
@@ -8166,6 +8405,49 @@ static int iso_selftest(Uint64 seed)
         }
         SDL_free(src);
         SDL_free(dst);
+    }
+
+    /* ---- case 5: the diamonds clip their own right edge --------------------
+     * vspan tests only y (its contract says x is the caller's job), so
+     * iso_diamond/iso_diamond_lr are the last line of defence on x. Both used
+     * to loop inclusively against a clamp computed exclusively, so a diamond
+     * whose right edge landed exactly on fb->w still wrote column fb->w: on an
+     * interior row that lands on pixel (0, y+1), and on the LAST row it lands
+     * past the end of the pixel buffer entirely. Sentinel words after the
+     * buffer catch the overflow; column 0 — which these diamonds can never
+     * legitimately reach — catches the scanline bleed. */
+    {
+        const int gw = 96, gh = 48, guard = 16;
+        Uint32 *px = (Uint32 *)SDL_calloc((size_t)gw * gh + guard, sizeof(Uint32));
+        SDL_Surface gs;
+        int rw, k, over = 0, bleed = 0;
+
+        if (!px) {
+            printf("FAIL  out of memory in diamond-clip check\n");
+            fails++;
+        } else {
+            fake_surface(&gs, px, gw, gh);
+            for (rw = 1; rw <= 8; rw++) {
+                for (k = 0; k < guard; k++)
+                    px[gw * gh + k] = 0xDEADBEEFu;
+                /* cx chosen so the right edge is exactly fb->w. Last row for the
+                 * overflow, an interior row for the wrap onto column 0. */
+                iso_diamond(&gs, gw - rw, gh - 1, rw, 0xFFFFFFFFu);
+                iso_diamond_lr(&gs, gw - rw, gh - 1, rw, 0xFFFFFFFFu, 0xFFFFFFFFu);
+                iso_diamond(&gs, gw - rw, gh / 2, rw, 0xFFFFFFFFu);
+                iso_diamond_lr(&gs, gw - rw, gh / 2, rw, 0xFFFFFFFFu, 0xFFFFFFFFu);
+                for (k = 0; k < guard; k++)
+                    if (px[gw * gh + k] != 0xDEADBEEFu)
+                        over++;
+            }
+            for (k = 0; k < gh; k++)
+                if (px[k * gw])
+                    bleed++;
+            printf("diamond right-edge: %d px past the buffer, %d bled to column 0"
+                   " (expect 0, 0)\n", over, bleed);
+            if (over || bleed) fails++;
+        }
+        SDL_free(px);
     }
 
     SDL_free(comp);
@@ -9965,6 +10247,45 @@ static int land_selftest(Uint64 seed, int verbose, Uint8 *seen, int *stack)
     (void)game_init(g, &rngs);
     spawn = (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE);
     bad = land_check(&g->w, spawn, seen, stack, seed, verbose);
+
+    /* The watchtower is hand-placed, and castle_apply_layout's contract is that
+     * procedural generation never overwrites hand-crafted features. place_rivers
+     * enforces that by skipping is_castle_reserved tiles ONLY — it never checks
+     * w->solid — so a tower outside the reserve can be carved straight through
+     * on some seeds. Assert the structure actually survived generation: a solid
+     * SURF_ROCK ring around a hollow SURF_LAND centre, and no SURF_RIVER
+     * anywhere in it. */
+    {
+        int dx, dy;
+        for (dy = -1; dy <= 1; dy++)
+            for (dx = -1; dx <= 1; dx++) {
+                int tx = CASTLE_WATCHTOWER_X + dx, ty = CASTLE_WATCHTOWER_Y + dy;
+                int wall = (dx != 0 || dy != 0);
+                int solid = g->w.solid[ty][tx];
+                int surf  = g->w.surf[ty][tx];
+                /* The reservation is the load-bearing half, and unlike an
+                 * overwrite it does not depend on a seed happening to route a
+                 * river here: place_rivers consults ONLY is_castle_reserved, so
+                 * a tower tile outside the reserve is unprotected whether or not
+                 * this particular seed exercises it. */
+                if (!is_castle_reserved(tx, ty)) {
+                    if (verbose)
+                        printf("  seed %.0f: watchtower (%d,%d) is not castle-reserved - "
+                               "procedural generation may overwrite it\n",
+                               (double)seed, tx, ty);
+                    bad++;
+                }
+                if (wall ? (!solid || surf != SURF_ROCK)
+                         : (solid || surf != SURF_LAND)) {
+                    if (verbose)
+                        printf("  seed %.0f: watchtower (%d,%d) solid=%d surf=%d, "
+                               "expected %s\n", (double)seed, tx, ty, solid, surf,
+                               wall ? "solid SURF_ROCK" : "hollow SURF_LAND");
+                    bad++;
+                }
+            }
+    }
+
     SDL_free(g);
     return bad ? 1 : 0;
 }
@@ -10207,6 +10528,41 @@ static int hud_selftest(const char *shot_path)
         if (c <= 20) fails++;
     }
 
+    /* ---- 1b. the seed line carries all 64 bits ----------------------------
+     * hud_draw used to take an int and main() kept its seed in one, so a save
+     * file carrying a full 64-bit seed displayed only its low half. Two seeds
+     * differing ONLY above bit 31 must therefore not render identically. */
+    {
+        const Uint64 lo = 4242, hi = 4242 + ((Uint64)1 << 32);
+        Uint32 *snap = (Uint32 *)SDL_malloc((size_t)seedline.w * seedline.h *
+                                            sizeof(Uint32));
+        if (!snap) {
+            printf("FAIL  out of memory in seed-width check\n");
+            fails++;
+        } else {
+            int x, y, diff = 0;
+            fill_rect(fb, 0, 0, W, H, fillv);
+            hud_draw(fb, &g, lo);
+            for (y = 0; y < seedline.h; y++)
+                for (x = 0; x < seedline.w; x++)
+                    snap[y * seedline.w + x] =
+                        hud_px(fb, seedline.x0 + x, seedline.y0 + y);
+            fill_rect(fb, 0, 0, W, H, fillv);
+            hud_draw(fb, &g, hi);
+            for (y = 0; y < seedline.h; y++)
+                for (x = 0; x < seedline.w; x++)
+                    if (snap[y * seedline.w + x] !=
+                        hud_px(fb, seedline.x0 + x, seedline.y0 + y))
+                        diff++;
+            printf("seed 64-bit   : %d px differ between %.0f and %.0f "
+                   "(expect > 0): %s\n", diff, (double)lo, (double)hi,
+                   diff > 0 ? "PASS" : "FAIL");
+            if (diff <= 0) fails++;
+            SDL_free(snap);
+        }
+        fill_rect(fb, 0, 0, W, H, fillv);
+    }
+
     /* ---- 2. toast appears, then expires ---- */
     SDL_snprintf(hud.toast, sizeof(hud.toast), "a soul is remembered  1/5");
     hud.toast_left = 2;
@@ -10410,13 +10766,19 @@ static int path_selftest(Uint64 seed, int verbose, int *total)
     (void)game_init(&g, &rngs);
 
     /* (1) A path tile is open ground: never a footprint, never a river or sea
-     * tile, never inside rock. */
+     * tile, never inside rock. Castle approach/causeway/island paths are
+     * hand-placed and not part of the village lane network, so they are
+     * counted toward total but never flagged as bad — they are allowed to sit
+     * on the road shelf even when the tower or gate has turned adjacent road
+     * tiles to rock (those rocks now correctly clear their path flag above). */
     for (y = 0; y < WORLD_H; y++)
         for (x = 0; x < WORLD_W; x++)
             if (g.w.path[y][x]) {
+                int isCastle = castle_island_tile(x, y) || castle_causeway_tile(x, y) ||
+                               castle_approach_tile(x, y);
                 paths++;
-                if (g.w.solid[y][x] || g.w.bld_at[y][x]
-                    || g.w.surf[y][x] == SURF_RIVER || g.w.surf[y][x] == SURF_OCEAN)
+                if (!isCastle && (g.w.solid[y][x] || g.w.bld_at[y][x]
+                    || g.w.surf[y][x] == SURF_RIVER || g.w.surf[y][x] == SURF_OCEAN))
                     bad++;
             }
 
@@ -10467,7 +10829,11 @@ static int path_negative_test(Uint64 seed)
     }
     for (y = 0; y < WORLD_H; y++)
         for (x = 0; x < WORLD_W; x++)
-            if (g.w.path[y][x]) paths++;
+            if (g.w.path[y][x]) {
+                int isCastle = castle_island_tile(x, y) || castle_causeway_tile(x, y) ||
+                               castle_approach_tile(x, y);
+                if (!isCastle) paths++;
+            }
     for (i = 0; i < g.w.bld_count; i++) {
         const Building *b = &g.w.bld[i];
         int touch = 0;
@@ -10479,7 +10845,7 @@ static int path_negative_test(Uint64 seed)
         if (!touch)
             doorless++;
     }
-    printf("negative control (paths suppressed: %d tiles, %d of %d houses doorless): %s\n",
+    printf("negative control (paths suppressed: %d house tiles, %d of %d houses doorless): %s\n",
            paths, doorless, g.w.bld_count,
            (paths == 0 && doorless == g.w.bld_count) ? "PASS" : "FAIL");
     if (!(paths == 0 && doorless == g.w.bld_count)) fails++;
@@ -11023,7 +11389,7 @@ static int audio_selftest(int argc, char **argv, int ms)
     SDL_AudioDeviceID dev;
     const char *dump = arg_val(argc, argv, "--dump");
     double period_ms, max_ms, freq;
-    int i, layers;
+    int i, layers, fails = 0;
 
     SDL_zero(a);
     a.noise = arg_flag(argc, argv, "--noise");
@@ -11109,6 +11475,15 @@ static int audio_selftest(int argc, char **argv, int ms)
     printf("worst case     : %.3f ms\n", max_ms);
     printf("headroom       : %.1f%% of deadline used\n", 100.0 * max_ms / period_ms);
     printf("partial writes : %d  (must be 0)\n", a.partial_len);
+    if (a.partial_len) fails++;
+    /* A capture that never happened would satisfy every "must be 0" below
+     * vacuously, so the counts are only meaningful if the callback actually
+     * ran. audio_open succeeding but the device never calling back is itself
+     * the kind of fault this test exists to catch. */
+    if (a.calls == 0 || a.cap_len == 0) {
+        printf("FAIL  the callback produced no samples - nothing was measured\n");
+        fails++;
+    }
 
     /* Independent-ish signal check on the captured samples. */
     {
@@ -11138,6 +11513,12 @@ static int audio_selftest(int argc, char **argv, int ms)
                a.cap_len ? SDL_sqrt(sumsq / a.cap_len) : 0.0);
         printf("NaN            : %d  (must be 0)\n", nan);
         printf("out of range   : %d  (must be 0)\n", clipped);
+        /* "must be 0" is now enforced on EVERY invocation, not only --layers.
+         * design/Agent Prompt.md calls NaN/clipping/partial writes in the audio
+         * callback release blockers; printing them and returning 0 anyway meant
+         * the plain tone, --noise and --rate runs could not catch any of them. */
+        if (nan) fails++;
+        if (clipped) fails++;
         printf("zero crossings : %d -> %.1f Hz%s\n", crossings, freq,
                (layers || a.noise) ? " (meaningless for this signal)" : " (expected 440.0)");
         if (layers) {
@@ -11166,11 +11547,7 @@ static int audio_selftest(int argc, char **argv, int ms)
                        det ? "PASS" : "FAIL");
                 ok = ok && det;
             }
-            if (!ok) {
-                SDL_free(a.cap);
-                SDL_Quit();
-                return 1;
-            }
+            if (!ok) fails++;
         }
     }
 
@@ -11182,12 +11559,14 @@ static int audio_selftest(int argc, char **argv, int ms)
             printf("\ndumped %d floats to %s\n", a.cap_len, dump);
         } else {
             printf("\nFAIL  could not open %s for writing\n", dump);
+            fails++;
         }
     }
 
+    printf("\n%s (%d checks failed)\n", fails ? "FAIL" : "PASS", fails);
     SDL_free(a.cap);
     SDL_Quit();
-    return 0;
+    return fails ? 1 : 0;
 }
 
 /* ---- Phase 08: save/load -------------------------------------------------
@@ -11384,7 +11763,7 @@ static int save_selftest(Uint64 base)
                 const char *name;
                 Uint8 buf[SAVE_SIZE];
                 size_t len;
-            } ctl[4];
+            } ctl[5];
 
             save_snap(loaded, &before);
 
@@ -11412,8 +11791,17 @@ static int save_selftest(Uint64 base)
             }
             ctl[3].name = "out-of-bounds position";
             ctl[3].len = SAVE_SIZE;
+            /* abilities outside the legal bitmask. Not a crash risk — collision
+             * code always masks with & — but a hand-edited save must not be able
+             * to grant abilities that were never earned. (There is deliberately
+             * no matching shards control: SHARD_COUNT is 8, so every Uint8 is a
+             * legal shard mask and the case cannot be represented.) */
+            SDL_memcpy(ctl[4].buf, good, SAVE_SIZE);
+            ctl[4].buf[20] |= 0xF8;
+            ctl[4].name = "abilities outside the legal mask";
+            ctl[4].len = SAVE_SIZE;
 
-            for (i = 0; i < 4; i++) {
+            for (i = 0; i < 5; i++) {
                 if (save_write_bytes(path, ctl[i].buf, ctl[i].len) != 0) {
                     printf("FAIL  could not write the %s control\n", ctl[i].name);
                     fails++;
@@ -11487,7 +11875,10 @@ int main(int argc, char **argv)
     /* One-keypress feedback for F5/F9 in the only text channel that exists
      * before the Week 5 font: shown in the title bar until the next key. */
     const char *note = "";
-    int seed = arg_int(argc, argv, "--seed", 1);
+    /* Uint64, not int: game_load can hand back a full 64-bit seed from a save
+     * file, and Game.seed is 64-bit throughout. --seed on the CLI can only
+     * express an int, but F9 is not so limited. */
+    Uint64 seed = (Uint64)arg_int(argc, argv, "--seed", 1);
 #if WAYFARER_PERF
     Perf pf;
     int show_perf = arg_flag(argc, argv, "--perf");
@@ -11616,11 +12007,20 @@ int main(int argc, char **argv)
         if (arg_flag(argc, argv, "--gating-test")) {
             int n = arg_int(argc, argv, "--seeds", 20);
             int base = arg_int(argc, argv, "--seed", 1);
-            int s, bad = 0;
+            int s, bad = 0, gated = 0;
             printf("=== ability gating: walk vs graph, %d seeds ===\n", n);
             for (s = 0; s < n; s++)
-                bad += gating_selftest((Uint64)(base + s), 1);
-            printf("\n%s (%d failures across %d seeds)\n", bad ? "FAIL" : "PASS", bad, n);
+                bad += gating_selftest((Uint64)(base + s), 1, &gated);
+            printf("\ngating actually blocked something on %d of %d seeds\n", gated, n);
+            /* Negative control: walk == graph is satisfied trivially if gating is
+             * a no-op, so without this the whole test passes on a world where
+             * abilities gate nothing at all. */
+            if (!gated) {
+                printf("FAIL  no seed had any region out of reach at tier 0 - "
+                       "gating is decorative\n");
+                bad++;
+            }
+            printf("%s (%d failures across %d seeds)\n", bad ? "FAIL" : "PASS", bad, n);
             return bad ? 1 : 0;
         }
         if (arg_flag(argc, argv, "--reach-test")) {
@@ -11706,7 +12106,7 @@ int main(int argc, char **argv)
     SDL_zero(audio);
     audio.noise = arg_flag(argc, argv, "--noise");
     audio.req_rate = AUDIO_RATE;
-    rngs_init(&rngs, (Uint64)seed);
+    rngs_init(&rngs, seed);
     audio.rng = rngs.audio;
 
     /* Silence is an acceptable degraded mode; failing to launch is not. */
@@ -11887,7 +12287,10 @@ int main(int argc, char **argv)
                     seed++;
                     rngs_init(&rngs, seed);
                     (void)game_init(&game, &rngs);
-                    audio.rng = rngs.audio;
+                    /* Payload, then flag: the callback owns audio.rng and is
+                     * live by now, so ask rather than write. */
+                    audio.rng_seed_req = seed;
+                    SDL_AtomicSet(&audio.rng_req, 1);
                     SDL_AtomicSet(&audio.reset_req, 1); /* music restarts with the world */
                     hud.win_shown = 0;
                     hud.mm_dirty = 1;
@@ -11900,8 +12303,9 @@ int main(int argc, char **argv)
                 case SDLK_F9: { /* load */
                     Uint64 ls;
                     if (game_load(&game, &rngs, SAVE_FILENAME, &ls) == 0) {
-                        seed = (int)ls;
-                        audio.rng = rngs.audio; /* same sync the R key does */
+                        seed = ls;
+                        audio.rng_seed_req = ls;        /* same handoff the R key does */
+                        SDL_AtomicSet(&audio.rng_req, 1);
                         SDL_AtomicSet(&audio.reset_req, 1); /* music restarts with the world */
                         hud.win_shown = 0;
                         hud.mm_dirty = 1;
@@ -11968,7 +12372,7 @@ int main(int argc, char **argv)
         /* Screen-space HUD on top of the world; hidden in the F1 debug overlay
          * (which is already a prompt-suppressed diagnostic view). */
         if (!grid && !overlay)
-            hud_draw(draw, &game, (int)seed);
+            hud_draw(draw, &game, seed);
 #if WAYFARER_SELFTEST
         /* After render, before present: the overlay reads as a HUD over the
          * world, which is also the only honest test of whether the shadowed
@@ -12004,8 +12408,8 @@ int main(int argc, char **argv)
             };
             char t[224];
             int n = SDL_snprintf(t, sizeof(t),
-                         "Wayfarer  seed %d  fragments %d/%d  souls %d/%d  %s%s%s%s",
-                         (int)seed, game.frags_restored, FRAGMENT_COUNT,
+                         "Wayfarer  seed %.0f  fragments %d/%d  souls %d/%d  %s%s%s%s",
+                         (double)seed, game.frags_restored, FRAGMENT_COUNT,
                          game.souls_restored, SOUL_COUNT, stage_name[world_stage(&game)],
                          overlay ? "  [F1 overlay]" : "",
                          grid ? "  [F2 grid]" : "",

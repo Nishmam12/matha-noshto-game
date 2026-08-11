@@ -123,6 +123,7 @@ $script:CastleFiles = @(
     "rocks_cliffs/rocks_cliffs_1.png",
     "keep_structures/keep_01.png",
     "keep_structures/keep_complete_4story.png",
+    "keep_structures/castle_full_multitier_v2.png",
     "terrain_tiles/terrain_01.png")
 
 # ------------------------------------------------------------ dream recolour --
