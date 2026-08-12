@@ -7,9 +7,9 @@ tags: [devlog, wayfarer]
 See [[Wayfarer MOC]] for the project hub. Updated every session per [[Agent Prompt]]'s
 session-logging rules. Picking this up cold? Start with [[Handover]].
 
-**Current `.exe` size:** 1,080,320 bytes (on `feat/phase-14-castle-full-set-dev-mode`)
-**Suite status:** 25 of 25 `--*-test` on default gate (`--seeds 20`) green; `--path-test` now green after hand-placed castle path fix. `--land-test --seeds 500` still 3/500 (`85/417/430` `22-23%` vs `50%`, identical at `428c9fd`) — pre-existing generation quality, not introduced — see [[2026-08-11-session-01]] and [[2026-08-12-session-01]].
-**Current status:** **Phases 00–12 all done; Phase 13 Aetherhold single-castle switched; invisible-wall + foliage + bridge/water bans + portal/enterprise thinning + cluster fog done pending visual screenshot.** Phase 11
+**Current `.exe` size:** 1,085,440 bytes (on `feat/phase-14-castle-full-set-dev-mode` — TASK-01 Groups A–D)
+**Suite status:** default gate **23/23 green in one run**, `--play-test --seeds 50` **50/50**, `--audio-test` PASS — all re-run from a fresh build in Session 17. `--land-test --seeds 500` **re-swept: fails exactly `85/417/430`**, identical to the pre-existing set at `428c9fd`; the character switch introduced no regression. `--fade-test` now carries the `facing6` truth table with two non-sentinel controls plus a real `g->clock`-not-`p->anim` assertion, each proven against a break.
+**Current status:** **TASK-01 character switch Groups A–D done (136 sprites, six-way bob on `g->clock`) and reviewed; Group E closed except the cadence.** `idle_down` confirmed showing the face, character legible at `TILE 18`; **the 8 fps bob cadence remains unjudged and needs a human to watch it run.** Phases 00–12 all done; Phase 13 Aetherhold single-castle switched; invisible-wall + foliage + bridge/water bans + portal/enterprise thinning + cluster fog done pending visual screenshot. Phase 11
 (ship-critical) is built and verified:
 5-layer procedural softsynth (Base/Strings/Pad/Bells/Voice of Souls, deterministic, measured
 0.325 ms worst case vs a 21.333 ms deadline), chime/shard/portal SFX, and the HUD on the Phase 03
@@ -18,7 +18,7 @@ font with lowercase a–z and `/` (the old table was uppercase-only; every HUD s
 skipped). Phase 12 (dream realm) remains feature-complete on its own branch.
 **Forward plan:** see [[Phase Roadmap]] — Aetherhold's keep/dungeon slices remain deferred; submission
 checklist is second-machine smoke test, repo visibility, final wrap.
-**Headroom:** 359,680 bytes under the 1,440,000 ship target (`394,240` under hard `1,474,560`)
+**Headroom:** 354,560 bytes under the 1,440,000 ship target (`389,120` under hard `1,474,560`) — delta `+5,120` over 1,080,320
 
 > **Note on the entry below:** written by a second, separately-run agent (`qwen`, via a tool called
 > `opencode`) that was pointed at this same working directory while Phase 12 slice 5 was mid-flight.
@@ -30,7 +30,7 @@ checklist is second-machine smoke test, repo visibility, final wrap.
 
 ## Sessions
 
-- [[2026-08-12-session-01]] *(Session 15)* — **Invisible-wall squares, bridge/water foliage bans, 30% portal/enterprise thinning, single `castle_full_multitier_v2` island, cluster fog + `--path-test` green.** Empty `w*h` ruin squares were flat (`world_heights` `h=0` for baked houses at `phase 0`); now always `WALL_BASE+levels*STOREY_H` and baked sprite draws at `cy-wall`. Props now veto `SURF/RIVER/ROCK` + `bridge` + `castle_island/causeway`; approach woods kept. Portal resamples `3` for `woody r=2`; entities/shards `≤4` alts for `near_building r=2` / `woody r=1`. `castle_island` render now single `ART_CASTLE_CASTLE_FULL_MULTITIER_V2` `284×304` at `KEEP 129,14`; interior hash scatter removed, causeway kept deterministic, watchtower `74,33` + gate `80,28` rock path cleared. Fog `Game.region_revealing` cluster-rings from `seed_tile` at `1.1/s` after `restoration≥0.95`, queued per-fragment and on `game_complete` with `r%3` stagger. `--path-test` `0 bad / 0 house-tiles negative` (was `10/96`). Release `1,080,320` (`+51,200`), `110` sprites. Verified `25/25` default, `500` still `85/417/430`.
+- [[2026-08-12-session-01]] *(Session 15+16 — Session 15 body + Session 16 appended section)* — **Session 15: Invisible-wall squares, bridge/water foliage bans, 30% thinning, single `castle_full_multitier_v2`, cluster fog + `--path-test` green** (release `1,080,320`, `110` sprites, `25/25` default). **Session 16: TASK-01 character switch Groups A–D** — six-way idle `assets/player_new/` `384×64` pitch 48 `0–6` (frame 7 dup skipped) via `CharSheets` + `ConvertTo-SpriteFromRegion` (same magenta strip/trim/anchor/RLE); `FACE6_*`, `facing6_from_intent(sx,sy)` pure screen intent `±X→down-diag`, `Player.facing6` render-only, `player_idle[6][7]` + `player_sprite_id(Player*,clock)` on `g->clock` `IDLE_FPS 8.0`; `--sprite-test 136` + `--fade-test facing6 9 + control 6/9` green; release `1,085,440` (`+5,120`), bake `370390` const (`110→152→136`), headroom `354,560`. **Group E visual gate owed:** six facings standing+moving at `TILE 18`, `idle_down` face check, bob cadence, size read, full `25/25 --seeds 20` + `--land-test 500 =85/417/430`.
 
 - [[2026-08-11-session-01]] *(Session 14)* — **[[Bug Fix Plan]] implemented in full, all 8 issues.**
   A real heap overflow in `iso_diamond`/`iso_diamond_lr` (inclusive loop against an exclusive clamp,
@@ -270,6 +270,9 @@ checklist is second-machine smoke test, repo visibility, final wrap.
 | 08-06 | **786,432** | +4,608 | Phase 11: softsynth (5 layers) + SFX + HUD/minimap/toasts/win banner + font lowercase |
 | 08-11 | 1,029,120 | +512 | Bug Fix Plan 8/8 (iso overflow, gating/audio/abilities/seed/U64, watchtower/grant) |
 | 08-12 | **1,080,320** | +51,200 | Invisible-wall + bridge/water veto + 30% thinning + single `castle_full` + cluster fog + path green |
+| 08-12 | **1,085,440** | +5,120 | TASK-01 character switch Groups A–D: 6-way idle 136 sprites, `facing6_from_intent`) + `player_idle` + `IDLE_FPS 8.0` on `g->clock` |
+| 08-12 | **1,085,440** | +0 | Session 17 review: real `facing6` controls, real `g->clock` assertion, one sprite encoder instead of two (`art_data.h` byte-identical), dead `WALK_*` removed |
+| 08-12 | **1,085,440** | +0 | Session 17b: levitating houses fixed — restored `world_heights` flatten for baked buildings + sprite back to `cy` (Session 15 regression, same-seed before/after) |
 
 Self-test builds (`wayfarer-selftest.exe`) are not deliverables and are deliberately excluded
 from this table and from the budget gate.

@@ -1,4 +1,4 @@
-<#
+﻿<#
     bake.ps1 - turn authored PNGs into a compiled-in C header.
 
     Wayfarer ships ZERO external files (contest rule, Handover.md section 1), so no PNG can be
@@ -44,7 +44,7 @@ param(
     # they are named one by one in $FxFrames below rather than by taking the whole folder.
     # Baking a sprite nothing draws is pure byte cost - the same rule that kept the bitmap font
     # at +0 shipping bytes until something called it.
-    [string[]] $Categories = @("player", "nature", "buildings")
+    [string[]] $Categories = @("nature", "buildings")
 )
 
 $ErrorActionPreference = "Stop"
@@ -80,7 +80,7 @@ $script:FxFrames = @("fx_portal_0",  "fx_portal_2",  "fx_portal_4",  "fx_portal_
                       "fx_well_8",    "fx_well_10",   "fx_well_12",   "fx_well_14")
 
 # Phase 13: bake only what has a caller; dungeon/interior sets stay source-only.
-# Curated from the supplied packs — 13 dark-fantasy files actually referenced in
+# Curated from the supplied packs â€” 13 dark-fantasy files actually referenced in
 # src/main.c (AETHER_*), no castle placeholders.
 $script:DarkFantasyFiles = @(
     "walls/wall_piece_06.png", "walls/wall_piece_07.png", "walls/wall_piece_08.png",
@@ -90,7 +90,7 @@ $script:DarkFantasyFiles = @(
     "buildings/bld_ruin_stone.png", "buildings/bld_chapel_stone.png",
     "props/prop_04.png", "props/prop_05.png", "props/prop_06.png", "props/prop_07.png")
 
-# Phase 13 Aetherhold — full castle set for 90-degree causeway composition.
+# Phase 13 Aetherhold â€” full castle set for 90-degree causeway composition.
 # Reverted per user request: all castle modules baked as pier/deck set.
 $script:CastleFiles = @(
     "bridges_causeway/bridge_01.png",
@@ -125,6 +125,17 @@ $script:CastleFiles = @(
     "keep_structures/keep_complete_4story.png",
     "keep_structures/castle_full_multitier_v2.png",
     "terrain_tiles/terrain_01.png")
+
+# TASK 01 Group A: six-way idle sheets, 8 frames at pitch 48, cycle 0-6 (frame 7 dup).
+# Only this table touches assets/player_new; $Categories stays without it.
+$script:CharSheets = @(
+    @{ File = "idle_down.png";       Stem = "CHAR_IDLE_DOWN";       FrameW = 48; Frames = 7 },
+    @{ File = "idle_right_down.png"; Stem = "CHAR_IDLE_RIGHT_DOWN"; FrameW = 48; Frames = 7 },
+    @{ File = "idle_right_up.png";   Stem = "CHAR_IDLE_RIGHT_UP";   FrameW = 48; Frames = 7 },
+    @{ File = "idle_up.png";         Stem = "CHAR_IDLE_UP";         FrameW = 48; Frames = 7 },
+    @{ File = "idle_left_up.png";    Stem = "CHAR_IDLE_LEFT_UP";    FrameW = 48; Frames = 7 },
+    @{ File = "idle_left_down.png";  Stem = "CHAR_IDLE_LEFT_DOWN";  FrameW = 48; Frames = 7 }
+)
 
 # ------------------------------------------------------------ dream recolour --
 # A dream sprite is the SAME pixel stream with a different palette: ArtSprite keeps pal_off
@@ -176,10 +187,25 @@ function Get-PixelData {
 
 # ------------------------------------------------------------ encode one sprite --
 function ConvertTo-Sprite {
-    param([string] $Path, [string] $Name)
+    param(
+        [string] $Path, [string] $Name,
+        # Optional sub-rectangle, for slicing one frame out of a sprite sheet. Defaults to the
+        # whole image, so every caller baking a one-sprite PNG is unchanged.
+        #
+        # A parameter rather than a second function on purpose: a copied encoder would mean two RLE
+        # writers, two palette builders, two magenta strippers and two anchor conventions kept in
+        # sync by discipline. This file already keeps the key-magenta list in sync BY TEST rather
+        # than by discipline, for exactly that reason - see the note above $KeyMagenta.
+        [int] $X0 = 0, [int] $Y0 = 0, [int] $RW = 0, [int] $RH = 0
+    )
 
     $img = Get-PixelData -Path $Path
     $w = $img.Width; $h = $img.Height; $stride = $img.Stride; $b = $img.Bytes
+    if ($RW -le 0) { $RW = $w - $X0 }
+    if ($RH -le 0) { $RH = $h - $Y0 }
+    if ($X0 -lt 0 -or $Y0 -lt 0 -or $X0 + $RW -gt $w -or $Y0 + $RH -gt $h) {
+        throw "$Name region ${X0},${Y0} ${RW}x${RH} lies outside ${w}x${h} in $Path"
+    }
 
     # Decision 41: knock out the authored magenta base disc, BEFORE the bounding box is measured.
     # Order matters. The disc sits under the bush's real base, so removing it afterwards would
@@ -192,9 +218,9 @@ function ConvertTo-Sprite {
     # art_is_key_magenta carries the same four colours as an independent second copy, and
     # --sprite-test fails if any of them ever reaches a baked palette.
     $stripped = 0
-    for ($y = 0; $y -lt $h; $y++) {
+    for ($y = $Y0; $y -lt $Y0 + $RH; $y++) {
         $row = $y * $stride
-        for ($x = 0; $x -lt $w; $x++) {
+        for ($x = $X0; $x -lt $X0 + $RW; $x++) {
             $o = $row + $x * 4
             if ($b[$o + 3] -lt 128) { continue }
             if ($script:KeyMagenta.Contains("$($b[$o+2]),$($b[$o+1]),$($b[$o])")) {
@@ -208,11 +234,11 @@ function ConvertTo-Sprite {
         $script:TotalStripped += $stripped
     }
 
-    # Opaque bounding box.
-    $minX = $w; $minY = $h; $maxX = -1; $maxY = -1
-    for ($y = 0; $y -lt $h; $y++) {
+    # Opaque bounding box, measured within the region only.
+    $minX = $X0 + $RW; $minY = $Y0 + $RH; $maxX = -1; $maxY = -1
+    for ($y = $Y0; $y -lt $Y0 + $RH; $y++) {
         $row = $y * $stride
-        for ($x = 0; $x -lt $w; $x++) {
+        for ($x = $X0; $x -lt $X0 + $RW; $x++) {
             if ($b[$row + $x * 4 + 3] -ge 128) {
                 if ($x -lt $minX) { $minX = $x }
                 if ($x -gt $maxX) { $maxX = $x }
@@ -289,8 +315,10 @@ function ConvertTo-Sprite {
         AnchorY  = $th
         Pal      = $pal
         Data     = $out
-        SrcW     = $w
-        SrcH     = $h
+        # The source canvas this sprite was cut from: the whole image for a one-sprite PNG,
+        # the frame cell for a sheet slice.
+        SrcW     = $RW
+        SrcH     = $RH
     }
 }
 
@@ -330,7 +358,7 @@ foreach ($rel in $script:DarkFantasyFiles) {
     $sprites += $sp
 }
 
-# The castle bridge/stairs set — same scale, prefix CASTLE_ to avoid collisions.
+# The castle bridge/stairs set â€” same scale, prefix CASTLE_ to avoid collisions.
 foreach ($rel in $script:CastleFiles) {
     $path = Join-Path (Join-Path $AssetRoot "castle") $rel
     if (-not (Test-Path $path)) { throw "missing castle asset: $path" }
@@ -339,6 +367,22 @@ foreach ($rel in $script:CastleFiles) {
     $sp = ConvertTo-Sprite -Path $path -Name $name
     $sp | Add-Member -NotePropertyName Category -NotePropertyValue "castle"
     $sprites += $sp
+}
+
+# Six-way idle sheets: sliced per frame, only this table touches player_new.
+foreach ($sh in $script:CharSheets) {
+    $path = Join-Path (Join-Path $AssetRoot "player_new") $sh.File
+    if (-not (Test-Path $path)) { throw "missing char sheet: $path" }
+    $img = Get-PixelData -Path $path
+    if ($img.Width -ne $sh.FrameW * 8 -or $img.Height -ne 64) {
+        throw ("char sheet {0} expected {1}x64, got {2}x{3}" -f $sh.File, ($sh.FrameW*8), $img.Width, $img.Height)
+    }
+    for ($fi = 0; $fi -lt $sh.Frames; $fi++) {
+        $stem = ($sh.Stem + "_" + $fi).ToUpperInvariant()
+        $sp = ConvertTo-Sprite -Path $path -Name $stem -X0 ($fi * $sh.FrameW) -Y0 0 -RW $sh.FrameW -RH 64
+        $sp | Add-Member -NotePropertyName Category -NotePropertyValue "player_new"
+        $sprites += $sp
+    }
 }
 
 if ($sprites.Count -eq 0) { throw "no sprites found under $AssetRoot" }

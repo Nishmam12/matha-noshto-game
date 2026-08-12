@@ -1102,6 +1102,28 @@ typedef char wayfarer_stack_guard[
  * the face, `s` shows the back. So FACE_FRONT (moving down-screen, toward the viewer) maps to
  * the `n` set, and FACE_BACK to `s`. */
 enum { FACE_FRONT = 0, FACE_RIGHT, FACE_BACK, FACE_LEFT, FACE_COUNT };
+enum { FACE6_DOWN = 0, FACE6_RIGHT_DOWN, FACE6_RIGHT_UP, FACE6_UP, FACE6_LEFT_UP, FACE6_LEFT_DOWN, FACE6_COUNT };
+
+/* TASK 01 D1: six-way facing, render-only, derived from SCREEN intent (sx,sy).
+ * Pure left/right have no art, so they resolve to the down diagonal, keeping
+ * the face toward the viewer. Same reasoning as the existing vertical tie-break. */
+static int facing6_from_intent(float sx, float sy)
+{
+    if (sy > 0.0f) {
+        if (sx > 0.0f) return FACE6_RIGHT_DOWN;
+        if (sx < 0.0f) return FACE6_LEFT_DOWN;
+        return FACE6_DOWN;
+    }
+    if (sy < 0.0f) {
+        if (sx > 0.0f) return FACE6_RIGHT_UP;
+        if (sx < 0.0f) return FACE6_LEFT_UP;
+        return FACE6_UP;
+    }
+    /* sy == 0: pure horizontal or zero intent */
+    if (sx > 0.0f) return FACE6_RIGHT_DOWN;
+    if (sx < 0.0f) return FACE6_LEFT_DOWN;
+    return FACE6_DOWN;
+}
 
 typedef struct {
     float x, y;      /* centre, in world pixels */
@@ -1109,7 +1131,8 @@ typedef struct {
     /* Render-only, like `height` and `surf`: the simulation never reads either of these back,
      * so no trajectory, collision result or playthrough can observe them. Zeroed by game_init's
      * SDL_zero, which is what makes a fresh world start facing front on frame 0. */
-    Uint8 facing;    /* FACE_* */
+    Uint8 facing;    /* FACE_* kept for now; facing6 is the new six-way facing */
+    Uint8 facing6;   /* FACE6_* render-only; save format unchanged */
     float anim;      /* walk-cycle phase in seconds; frozen while standing still */
 } Player;
 
@@ -3000,6 +3023,7 @@ static void sim_step(Game *g, const Input *in, float dt)
             g->p.facing = (Uint8)(sx > 0.0f ? FACE_RIGHT : FACE_LEFT);
         else
             g->p.facing = (Uint8)(sy > 0.0f ? FACE_FRONT : FACE_BACK);
+        g->p.facing6 = (Uint8)facing6_from_intent(sx, sy);
         g->p.anim += dt;
     } else {
         g->p.anim = 0.0f; /* stand still on the rest frame rather than freezing mid-stride */
@@ -3215,18 +3239,26 @@ static void world_heights(World *w)
                  * wall height, which IS the wall — no separate wall-drawing code exists
                  * anywhere.
                  *
-                 * Previously baked buildings were flattened (h=0) so the sprite would not
-                 * stand on a plinth, but that left phase 0/1/2 ruins as a flat invisible
-                 * square (solid but no wall faces) — the exact box in the report images.
-                 * Fix: always extrude walls so ruin phases have visible walls. The baked
-                 * sprite path now compensates by drawing at wall-top height (see draw_building)
-                 * rather than requiring a flat base. Both branches agree on
-                 * building_sprite_id vs procedural, so the seam stays single-sourced.
+                 * UNLESS the building is drawn as a baked sprite, in which case the sprite is
+                 * the entire building and the ground under it must stay FLAT. Leaving the
+                 * extrusion in place stood a 96 px house on top of a 42 px block, which read as
+                 * a cottage on a plinth. This is the one place the art seam reaches outside the
+                 * renderer, and it has to agree with draw_building exactly — both ask
+                 * building_sprite_id, so there is one decision, not two that can drift.
+                 *
+                 * A previous pass removed this guard to give phase 0/1/2 ruins visible walls,
+                 * and brought the plinth straight back: every baked house stood on a
+                 * packed-earth box, because tile_colour paints this footprint as GROUND
+                 * (0x8f7d5e) on the strength of the flattening promised right here. Ruin
+                 * visibility is not this branch's job — draw_building draws the sprite at every
+                 * phase, so the villages are visible from a cold start either way.
                  *
                  * Still render-only: `height` has never been a collision input, and the tiles
                  * remain `solid` either way, so nothing about reachability moves. */
                 const Building *bb = &w->bld[w->bld_at[y][x] - 1];
-                h = WALL_BASE + bb->levels * STOREY_H;
+                h = (building_sprite_id(bb) == ART_NONE)
+                        ? WALL_BASE + bb->levels * STOREY_H
+                        : 0;
             } else if (w->surf[y][x] == SURF_OCEAN) {
                 /* Sea floor, stepping down away from the shore. Without this the
                  * chamfer below would read open water as the deep interior of a
@@ -4960,12 +4992,6 @@ static void draw_sprite(SDL_Surface *fb, int id, int cx, int by, float rev)
     draw_sprite_fade(fb, id, cx, by, rev, 0);
 }
 
-/* The character's sprite table: [facing][walk frame].
- *
- * Rows are in FACE_* order, so the art's n/e/s/w naming is translated exactly once, here, and
- * nothing downstream has to remember that `n` is the front view. */
-#define WALK_FRAMES 4
-#define WALK_FPS    8.0f   /* walk-cycle frames per second */
 
 /* The portal, Phase 12 task 7.
  *
@@ -5034,20 +5060,25 @@ static int well_frame(int stage, float t)
     return f;
 }
 
-static const short player_frames[FACE_COUNT][WALK_FRAMES] = {
-    { ART_CHAR_PLAYER_N_0, ART_CHAR_PLAYER_N_1, ART_CHAR_PLAYER_N_2, ART_CHAR_PLAYER_N_3 },
-    { ART_CHAR_PLAYER_E_0, ART_CHAR_PLAYER_E_1, ART_CHAR_PLAYER_E_2, ART_CHAR_PLAYER_E_3 },
-    { ART_CHAR_PLAYER_S_0, ART_CHAR_PLAYER_S_1, ART_CHAR_PLAYER_S_2, ART_CHAR_PLAYER_S_3 },
-    { ART_CHAR_PLAYER_W_0, ART_CHAR_PLAYER_W_1, ART_CHAR_PLAYER_W_2, ART_CHAR_PLAYER_W_3 }
+#define IDLE_FPS  8.0f
+#define IDLE_FRAMES 7
+/* TASK 01 D2: single bob cycle for standing and moving, indexed by g->clock.
+ * Naming is screen direction: down = toward viewer = the face, up = back. */
+static const short player_idle[FACE6_COUNT][IDLE_FRAMES] = {
+    { ART_CHAR_IDLE_DOWN_0, ART_CHAR_IDLE_DOWN_1, ART_CHAR_IDLE_DOWN_2, ART_CHAR_IDLE_DOWN_3, ART_CHAR_IDLE_DOWN_4, ART_CHAR_IDLE_DOWN_5, ART_CHAR_IDLE_DOWN_6 },
+    { ART_CHAR_IDLE_RIGHT_DOWN_0, ART_CHAR_IDLE_RIGHT_DOWN_1, ART_CHAR_IDLE_RIGHT_DOWN_2, ART_CHAR_IDLE_RIGHT_DOWN_3, ART_CHAR_IDLE_RIGHT_DOWN_4, ART_CHAR_IDLE_RIGHT_DOWN_5, ART_CHAR_IDLE_RIGHT_DOWN_6 },
+    { ART_CHAR_IDLE_RIGHT_UP_0, ART_CHAR_IDLE_RIGHT_UP_1, ART_CHAR_IDLE_RIGHT_UP_2, ART_CHAR_IDLE_RIGHT_UP_3, ART_CHAR_IDLE_RIGHT_UP_4, ART_CHAR_IDLE_RIGHT_UP_5, ART_CHAR_IDLE_RIGHT_UP_6 },
+    { ART_CHAR_IDLE_UP_0, ART_CHAR_IDLE_UP_1, ART_CHAR_IDLE_UP_2, ART_CHAR_IDLE_UP_3, ART_CHAR_IDLE_UP_4, ART_CHAR_IDLE_UP_5, ART_CHAR_IDLE_UP_6 },
+    { ART_CHAR_IDLE_LEFT_UP_0, ART_CHAR_IDLE_LEFT_UP_1, ART_CHAR_IDLE_LEFT_UP_2, ART_CHAR_IDLE_LEFT_UP_3, ART_CHAR_IDLE_LEFT_UP_4, ART_CHAR_IDLE_LEFT_UP_5, ART_CHAR_IDLE_LEFT_UP_6 },
+    { ART_CHAR_IDLE_LEFT_DOWN_0, ART_CHAR_IDLE_LEFT_DOWN_1, ART_CHAR_IDLE_LEFT_DOWN_2, ART_CHAR_IDLE_LEFT_DOWN_3, ART_CHAR_IDLE_LEFT_DOWN_4, ART_CHAR_IDLE_LEFT_DOWN_5, ART_CHAR_IDLE_LEFT_DOWN_6 }
 };
 
-static int player_sprite_id(const Player *p)
+static int player_sprite_id(const Player *p, float clock)
 {
-    int f = p->facing < FACE_COUNT ? p->facing : FACE_FRONT;
-    /* anim is reset to 0 the moment the keys are released, so a standing player always shows
-     * frame 0 rather than freezing mid-stride. */
-    int k = (int)(p->anim * WALK_FPS) % WALK_FRAMES;
-    return player_frames[f][k];
+    int f = p->facing6 < FACE6_COUNT ? p->facing6 : FACE6_DOWN;
+    int k = (int)(clock * IDLE_FPS) % IDLE_FRAMES;
+    if (k < 0) k += IDLE_FRAMES;
+    return player_idle[f][k];
 }
 
 /* ---------------------------------------------------------------- props --
@@ -5605,13 +5636,13 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
         int art = building_sprite_id(b);
         if (art != ART_NONE) {
             const ArtSprite *sp = &ART_SPRITES[art];
-            /* World footprint still extruded at wall height (see world_heights:
-             * ruin walls must show at phase 0), so the sprite's feet must sit
-             * on the wall-top rather than at ground level or it appears sunk.
-             * Matches the procedural roof's cy - wall offset below. */
-            draw_sprite(fb, art, cx, cy - wall, rev);
-            /* Full restoration: smoke over the sprite's roof ridge. */
-            draw_smoke(fb, cx + (int)(v & 3) - 1, cy - wall - sp->anchor_y,
+            /* Ground centre, with NO correction. world_heights flattens this footprint (it asks
+             * building_sprite_id, the same question asked here), so (cx, cy) is already the
+             * ground-contact point draw_sprite wants. Subtracting `wall` here is what put every
+             * cottage on a visible packed-earth plinth. */
+            draw_sprite(fb, art, cx, cy, rev);
+            /* Smoke over the sprite's roof ridge, counted against restoration. */
+            draw_smoke(fb, cx + (int)(v & 3) - 1, cy - sp->anchor_y,
                        v, t, rev, (phase >= 3) ? 2 : 0);
             return;
         }
@@ -6110,7 +6141,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
      * drift, which is the fault that put the roof half a tile off its walls for four sessions. */
     int p_ax, p_ay;
     int pbox[4];
-    const ArtSprite *p_sp = &ART_SPRITES[player_sprite_id(&g->p)];
+    const ArtSprite *p_sp = &ART_SPRITES[player_sprite_id(&g->p, g->clock)];
 
     world_to_iso(g->p.x, g->p.y, &p_ax, &p_ay);
     p_ay -= height_at(&g->w, ptx, pty);
@@ -6656,7 +6687,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
              * The sprite is taller and wider than PLAYER_SIZE on purpose: 48 px of art over an
              * 18 px collision box is the normal relationship between a character's silhouette
              * and its footprint. Collision is unchanged — this is the render seam only. */
-            draw_sprite(fb, player_sprite_id(&g->p), px, py + PLAYER_SIZE / 2,
+            draw_sprite(fb, player_sprite_id(&g->p, g->clock), px, py + PLAYER_SIZE / 2,
                         tile_reveal(g, ptx, pty, overlay));
         }
     }
@@ -8829,6 +8860,108 @@ static int fade_selftest(void)
 
             fails += bad;
             SDL_FreeSurface(ps);
+        }
+    }
+
+    /* TASK 01 Group B: facing6 pure-function sweep, plus the two controls below.
+     * The nine movement intents are the whole input space - eight key combinations and rest. */
+    {
+        struct { float sx, sy; int want; const char *name; } cases[] = {
+            {  0.0f,  1.0f, FACE6_DOWN,       "down" },
+            {  0.0f, -1.0f, FACE6_UP,         "up" },
+            {  1.0f,  1.0f, FACE6_RIGHT_DOWN, "down+right" },
+            { -1.0f,  1.0f, FACE6_LEFT_DOWN,  "down+left" },
+            {  1.0f, -1.0f, FACE6_RIGHT_UP,   "up+right" },
+            { -1.0f, -1.0f, FACE6_LEFT_UP,    "up+left" },
+            {  1.0f,  0.0f, FACE6_RIGHT_DOWN, "pure right -> down diag" },
+            { -1.0f,  0.0f, FACE6_LEFT_DOWN,  "pure left -> down diag" },
+            {  0.0f,  0.0f, FACE6_DOWN,       "no intent -> down" }
+        };
+        int bad6 = 0, j;
+        for (j = 0; j < (int)(sizeof cases / sizeof *cases); j++) {
+            int got = facing6_from_intent(cases[j].sx, cases[j].sy);
+            if (got != cases[j].want) {
+                printf("FAIL  facing6 %s: got %d want %d\n", cases[j].name, got, cases[j].want);
+                bad6++;
+            }
+        }
+        if (bad6) fails++;
+        else printf("facing6: PASS  %d intents mapped correctly\n", (int)(sizeof cases / sizeof *cases));
+        /* TWO negative controls, because the truth table guards two different things. Neither
+         * may use an out-of-range sentinel: a control that returns a value no facing can ever
+         * equal is caught for free and proves nothing about the case it claims to cover. Both
+         * below are mappings someone could plausibly have written. */
+        {
+            int caught_up = 0, caught_axis = 0;
+            for (j = 0; j < (int)(sizeof cases / sizeof *cases); j++) {
+                float sx = cases[j].sx, sy = cases[j].sy;
+                int up_variant, axis_variant;
+
+                /* Control 1 — THE DESIGN DECISION. Identical to the real function except that
+                 * pure left/right resolve to the UP diagonal. That was a genuine alternative
+                 * (the art has no side view, so either diagonal was available); we chose down to
+                 * keep the face toward the viewer. Must be caught on exactly the two
+                 * pure-horizontal cases and nowhere else - that is what pins the choice. */
+                if (sy > 0.0f)      up_variant = (sx > 0.0f) ? FACE6_RIGHT_DOWN
+                                               : (sx < 0.0f) ? FACE6_LEFT_DOWN : FACE6_DOWN;
+                else if (sy < 0.0f) up_variant = (sx > 0.0f) ? FACE6_RIGHT_UP
+                                               : (sx < 0.0f) ? FACE6_LEFT_UP : FACE6_UP;
+                else                up_variant = (sx > 0.0f) ? FACE6_RIGHT_UP
+                                               : (sx < 0.0f) ? FACE6_LEFT_UP : FACE6_DOWN;
+                if (up_variant != cases[j].want) caught_up++;
+
+                /* Control 2 — THE DIAGONALS. The old four-way "dominant axis wins" shape, which
+                 * collapses every diagonal onto a cardinal. */
+                if (sx == 0.0f && sy == 0.0f)           axis_variant = FACE6_DOWN;
+                else if (SDL_fabsf(sx) > SDL_fabsf(sy)) axis_variant = (sy >= 0.0f) ? FACE6_DOWN : FACE6_UP;
+                else                                    axis_variant = (sy > 0.0f)  ? FACE6_DOWN : FACE6_UP;
+                if (axis_variant != cases[j].want) caught_axis++;
+            }
+            if (caught_up != 2) {
+                printf("FAIL  facing6 control 1: up-diagonal variant caught on %d cases, want exactly 2\n", caught_up);
+                fails++;
+            } else {
+                printf("facing6 control 1: PASS  up-diagonal variant rejected on exactly the 2 pure-horizontal cases\n");
+            }
+            if (caught_axis < 4) {
+                printf("FAIL  facing6 control 2: dominant-axis variant caught on only %d cases, want >= 4\n", caught_axis);
+                fails++;
+            } else {
+                printf("facing6 control 2: PASS  dominant-axis variant rejected on %d of %d cases\n",
+                       caught_axis, (int)(sizeof cases / sizeof *cases));
+            }
+        }
+
+        /* D2: the frame index must come off the WORLD clock, not the walk phase. p->anim is
+         * zeroed the moment the keys are released, so had the index stayed on it the bob would
+         * freeze whenever the player stood still - which is the entire point of the switch.
+         * Assert both halves: the clock moves the frame, and anim does not. */
+        {
+            Player pp;
+            int f_t0, f_t3, f_anim;
+
+            SDL_zero(pp);
+            pp.facing6 = (Uint8)FACE6_DOWN;
+
+            f_t0 = player_sprite_id(&pp, 0.0f);
+            f_t3 = player_sprite_id(&pp, 3.0f / IDLE_FPS);   /* exactly three frames on */
+            if (f_t0 == f_t3) {
+                printf("FAIL  idle bob: clock advanced 3 frames, sprite id unchanged (%d)\n", f_t0);
+                fails++;
+            } else {
+                printf("idle bob: PASS  clock drives the frame (id %d -> %d over 3 frames)\n", f_t0, f_t3);
+            }
+
+            /* The control: anim must not be an input at all. */
+            pp.anim = 12.5f;
+            f_anim = player_sprite_id(&pp, 0.0f);
+            if (f_anim != f_t0) {
+                printf("FAIL  idle bob control: p->anim moved the frame (%d -> %d); index is still on the walk phase\n",
+                       f_t0, f_anim);
+                fails++;
+            } else {
+                printf("idle bob control: PASS  p->anim does not affect the frame\n");
+            }
         }
     }
 

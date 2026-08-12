@@ -7,6 +7,7 @@ tags: [moc, wayfarer]
 Exploration-driven memory-restoration game for the 2P Game Arcade 1.44MB Floppy Disk contest. Deadline: **September 4, 2026, 23:59**.
 
 ## Process
+- **[[Project Status]] — progress to date and everything still outstanding**, prioritised against the deadline. Read this to decide *what to do next*; read [[Handover]] to understand *how anything works*.
 - **[[Handover]] — start here if picking this up cold.** Current state, build commands, test suite, decisions already made, and every trap that has already cost time once.
 - [[Agent Prompt]] — role, engineering loop, QA rules, language/toolchain rationale for whoever (human or agent) is writing code against this plan.
 
@@ -27,6 +28,9 @@ Exploration-driven memory-restoration game for the 2P Game Arcade 1.44MB Floppy 
 - [[QA Checklist]] — continuous verification rules
 - [[Bug Fix Plan]] — **NEW** 8 confirmed bugs from a full codebase audit (2026-08-11), with exact
   fixes and verification steps, ready to hand to an implementation session
+- [[Character Switch Plan]] — **NEW** (2026-08-12) the new 6-direction player art measured and
+  specced: sheet geometry, the bob-not-stride finding, the six-way facing, and what the baker still
+  needs. Executable punch list in `handoff/TASK-01-character-switch.md`
 
 ## Roadmap
 - [[Phase Roadmap]] — the forward plan, phase by phase, in `design/phases/`. Read this before picking a task; it sequences everything left with a definition of done and a verification gate per phase, so the plan doesn't get re-derived from scratch each session.
