@@ -239,6 +239,17 @@ static int is_castle_reserved(int tx, int ty)
 #define PLAYER_SIZE  PX(24)
 #define PLAYER_SPEED PXF(220.0f) /* world px/sec; 6.9 tiles/sec at any TILE */
 
+/* The walk cycle. Up here rather than beside player_walk[] because update_player wraps the phase
+ * against WALK_FRAMES / WALK_FPS, and that is a good 2000 lines earlier in the file.
+ *
+ * WALK_FPS is a READABILITY choice, not a physical one. Foot-lock is unreachable at this
+ * speed-to-size ratio: PLAYER_SPEED is 6.9 tiles/sec under a character about 24 px tall, so the
+ * feet skate whatever the cadence. The old four-frame set ran 8 fps = 2 cycles/sec; eight frames
+ * at 8 fps would halve that to 1 and read as slow motion. 12 gives 1.5 cycles/sec, or 3 steps/sec
+ * against the cycle's two contacts. NEEDS A HUMAN — 16 restores the old cadence if it reads slow. */
+#define WALK_FPS     12.0f
+#define WALK_FRAMES  8
+
 /* In tiles, so it scales with tile COUNT rather than tile size. Raised from 5
  * alongside TILE 32 -> 24 to keep the sight circle roughly the same size in
  * world pixels — 5 tiles at 32 px, 7 at 24 px and 9 at 18 px are all about
@@ -1133,7 +1144,10 @@ typedef struct {
      * SDL_zero, which is what makes a fresh world start facing front on frame 0. */
     Uint8 facing;    /* FACE_* kept for now; facing6 is the new six-way facing */
     Uint8 facing6;   /* FACE6_* render-only; save format unchanged */
-    float anim;      /* walk-cycle phase in seconds; frozen while standing still */
+    /* Walk-cycle phase in seconds, wrapped to one cycle. Advances only under movement intent and
+     * is NEVER reset, which is what holds the standing pose on the frame the stride stopped on -
+     * see update_player. player_sprite_id reads this and nothing else but facing6. */
+    float anim;
 } Player;
 
 typedef struct {
@@ -3024,16 +3038,32 @@ static void sim_step(Game *g, const Input *in, float dt)
         else
             g->p.facing = (Uint8)(sy > 0.0f ? FACE_FRONT : FACE_BACK);
         g->p.facing6 = (Uint8)facing6_from_intent(sx, sy);
+
+        /* The walk phase advances ONLY while there is movement intent, and is deliberately NOT
+         * reset when that intent stops. Standing still therefore holds whichever frame the stride
+         * last reached, and stepping off again resumes from that pose instead of snapping back to
+         * the contact frame. This is the whole mechanism behind the held standing pose — there is
+         * no separate idle state, no "is moving" flag and no second sprite table.
+         *
+         * It reverses what this branch used to do (`anim = 0` on release), which was correct for
+         * the previous art: those sheets were a vertical bob whose frame 0 was a genuine rest
+         * pose. These are a real eight-frame stride with two contacts, and frame 0 is mid-step,
+         * so snapping to it on release would read as a flinch.
+         *
+         * The wrap keeps the phase inside one cycle. Without it anim accumulates for the whole
+         * session and the float loses the resolution the frame quantiser needs. Subtracting one
+         * cycle rather than fmod is exact here because at most one cycle can have elapsed in a
+         * single frame's dt. */
         g->p.anim += dt;
-    } else {
-        g->p.anim = 0.0f; /* stand still on the rest frame rather than freezing mid-stride */
+        if (g->p.anim >= (float)WALK_FRAMES / WALK_FPS)
+            g->p.anim -= (float)WALK_FRAMES / WALK_FPS;
     }
 
-    /* A clock that does NOT stop when the player does. p.anim is the walk cycle and is reset to
-     * zero the moment the keys are released, which is right for a character and wrong for anything
-     * in the world: driving the portal from it would freeze the vortex mid-swirl every time you
-     * stood still. Render-only, like facing and anim — nothing in movement, collision or the
-     * verifier reads it, so no trajectory can observe it. */
+    /* A clock that does NOT stop when the player does. p.anim is the walk cycle and stops dead the
+     * moment the keys are released, which is right for a character and wrong for anything in the
+     * world: driving the portal from it would freeze the vortex every time you stood still.
+     * Render-only, like facing and anim — nothing in movement, collision or the verifier reads it,
+     * so no trajectory can observe it. */
     g->clock += dt;
 
     move_axis(g, mx * PLAYER_SPEED * dt, 0.0f);
@@ -5060,25 +5090,34 @@ static int well_frame(int stage, float t)
     return f;
 }
 
-#define IDLE_FPS  8.0f
-#define IDLE_FRAMES 7
-/* TASK 01 D2: single bob cycle for standing and moving, indexed by g->clock.
- * Naming is screen direction: down = toward viewer = the face, up = back. */
-static const short player_idle[FACE6_COUNT][IDLE_FRAMES] = {
-    { ART_CHAR_IDLE_DOWN_0, ART_CHAR_IDLE_DOWN_1, ART_CHAR_IDLE_DOWN_2, ART_CHAR_IDLE_DOWN_3, ART_CHAR_IDLE_DOWN_4, ART_CHAR_IDLE_DOWN_5, ART_CHAR_IDLE_DOWN_6 },
-    { ART_CHAR_IDLE_RIGHT_DOWN_0, ART_CHAR_IDLE_RIGHT_DOWN_1, ART_CHAR_IDLE_RIGHT_DOWN_2, ART_CHAR_IDLE_RIGHT_DOWN_3, ART_CHAR_IDLE_RIGHT_DOWN_4, ART_CHAR_IDLE_RIGHT_DOWN_5, ART_CHAR_IDLE_RIGHT_DOWN_6 },
-    { ART_CHAR_IDLE_RIGHT_UP_0, ART_CHAR_IDLE_RIGHT_UP_1, ART_CHAR_IDLE_RIGHT_UP_2, ART_CHAR_IDLE_RIGHT_UP_3, ART_CHAR_IDLE_RIGHT_UP_4, ART_CHAR_IDLE_RIGHT_UP_5, ART_CHAR_IDLE_RIGHT_UP_6 },
-    { ART_CHAR_IDLE_UP_0, ART_CHAR_IDLE_UP_1, ART_CHAR_IDLE_UP_2, ART_CHAR_IDLE_UP_3, ART_CHAR_IDLE_UP_4, ART_CHAR_IDLE_UP_5, ART_CHAR_IDLE_UP_6 },
-    { ART_CHAR_IDLE_LEFT_UP_0, ART_CHAR_IDLE_LEFT_UP_1, ART_CHAR_IDLE_LEFT_UP_2, ART_CHAR_IDLE_LEFT_UP_3, ART_CHAR_IDLE_LEFT_UP_4, ART_CHAR_IDLE_LEFT_UP_5, ART_CHAR_IDLE_LEFT_UP_6 },
-    { ART_CHAR_IDLE_LEFT_DOWN_0, ART_CHAR_IDLE_LEFT_DOWN_1, ART_CHAR_IDLE_LEFT_DOWN_2, ART_CHAR_IDLE_LEFT_DOWN_3, ART_CHAR_IDLE_LEFT_DOWN_4, ART_CHAR_IDLE_LEFT_DOWN_5, ART_CHAR_IDLE_LEFT_DOWN_6 }
+/* The six-way walk cycle. Row order IS FACE6_* order, and the rows are indexed by p->facing6
+ * directly — a row out of place here walks the character in the wrong direction with nothing to
+ * catch it, which is why --fade-test asserts all six rows are distinct.
+ *
+ * Naming is screen direction: down = toward the viewer = the face, up = the back.
+ *
+ * All eight frames are listed because all eight are distinct art. The retired idle sheets closed
+ * their loop by repeating frame 0 at frame 7 and so were baked as seven; these are a true stride
+ * with two contact poses, and dropping the eighth would clip the cycle. */
+static const short player_walk[FACE6_COUNT][WALK_FRAMES] = {
+    { ART_CHAR_WALK_DOWN_0, ART_CHAR_WALK_DOWN_1, ART_CHAR_WALK_DOWN_2, ART_CHAR_WALK_DOWN_3, ART_CHAR_WALK_DOWN_4, ART_CHAR_WALK_DOWN_5, ART_CHAR_WALK_DOWN_6, ART_CHAR_WALK_DOWN_7 },
+    { ART_CHAR_WALK_RIGHT_DOWN_0, ART_CHAR_WALK_RIGHT_DOWN_1, ART_CHAR_WALK_RIGHT_DOWN_2, ART_CHAR_WALK_RIGHT_DOWN_3, ART_CHAR_WALK_RIGHT_DOWN_4, ART_CHAR_WALK_RIGHT_DOWN_5, ART_CHAR_WALK_RIGHT_DOWN_6, ART_CHAR_WALK_RIGHT_DOWN_7 },
+    { ART_CHAR_WALK_RIGHT_UP_0, ART_CHAR_WALK_RIGHT_UP_1, ART_CHAR_WALK_RIGHT_UP_2, ART_CHAR_WALK_RIGHT_UP_3, ART_CHAR_WALK_RIGHT_UP_4, ART_CHAR_WALK_RIGHT_UP_5, ART_CHAR_WALK_RIGHT_UP_6, ART_CHAR_WALK_RIGHT_UP_7 },
+    { ART_CHAR_WALK_UP_0, ART_CHAR_WALK_UP_1, ART_CHAR_WALK_UP_2, ART_CHAR_WALK_UP_3, ART_CHAR_WALK_UP_4, ART_CHAR_WALK_UP_5, ART_CHAR_WALK_UP_6, ART_CHAR_WALK_UP_7 },
+    { ART_CHAR_WALK_LEFT_UP_0, ART_CHAR_WALK_LEFT_UP_1, ART_CHAR_WALK_LEFT_UP_2, ART_CHAR_WALK_LEFT_UP_3, ART_CHAR_WALK_LEFT_UP_4, ART_CHAR_WALK_LEFT_UP_5, ART_CHAR_WALK_LEFT_UP_6, ART_CHAR_WALK_LEFT_UP_7 },
+    { ART_CHAR_WALK_LEFT_DOWN_0, ART_CHAR_WALK_LEFT_DOWN_1, ART_CHAR_WALK_LEFT_DOWN_2, ART_CHAR_WALK_LEFT_DOWN_3, ART_CHAR_WALK_LEFT_DOWN_4, ART_CHAR_WALK_LEFT_DOWN_5, ART_CHAR_WALK_LEFT_DOWN_6, ART_CHAR_WALK_LEFT_DOWN_7 }
 };
 
-static int player_sprite_id(const Player *p, float clock)
+/* A pure function of the player alone — no clock, by design. The frame comes off p->anim, which
+ * update_player advances only while there is movement intent and never resets, so a standing
+ * player holds the frame the stride stopped on. Passing a world clock in here instead would
+ * animate the character on the spot, which is the exact bug this shape prevents. */
+static int player_sprite_id(const Player *p)
 {
     int f = p->facing6 < FACE6_COUNT ? p->facing6 : FACE6_DOWN;
-    int k = (int)(clock * IDLE_FPS) % IDLE_FRAMES;
-    if (k < 0) k += IDLE_FRAMES;
-    return player_idle[f][k];
+    int k = (int)(p->anim * WALK_FPS) % WALK_FRAMES;
+    if (k < 0) k += WALK_FRAMES;
+    return player_walk[f][k];
 }
 
 /* ---------------------------------------------------------------- props --
@@ -6141,7 +6180,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
      * drift, which is the fault that put the roof half a tile off its walls for four sessions. */
     int p_ax, p_ay;
     int pbox[4];
-    const ArtSprite *p_sp = &ART_SPRITES[player_sprite_id(&g->p, g->clock)];
+    const ArtSprite *p_sp = &ART_SPRITES[player_sprite_id(&g->p)];
 
     world_to_iso(g->p.x, g->p.y, &p_ax, &p_ay);
     p_ay -= height_at(&g->w, ptx, pty);
@@ -6687,7 +6726,7 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
              * The sprite is taller and wider than PLAYER_SIZE on purpose: 48 px of art over an
              * 18 px collision box is the normal relationship between a character's silhouette
              * and its footprint. Collision is unchanged — this is the render seam only. */
-            draw_sprite(fb, player_sprite_id(&g->p, g->clock), px, py + PLAYER_SIZE / 2,
+            draw_sprite(fb, player_sprite_id(&g->p), px, py + PLAYER_SIZE / 2,
                         tile_reveal(g, ptx, pty, overlay));
         }
     }
@@ -7028,6 +7067,61 @@ static int move_selftest(Uint64 seed, int verbose)
             steps++;
             if (player_blocked(&g.w, g.p.abilities, g.p.x, g.p.y))
                 overlaps++;
+        }
+    }
+
+    /* The held standing pose, at simulation level. fade_selftest proves player_sprite_id is a pure
+     * function of (facing6, anim); this proves the other half - that sim_step leaves anim alone
+     * once the keys are released, so the frame it stopped on is the frame that stays on screen.
+     *
+     * It runs here rather than in fade_selftest because it needs a stepped Game, and one already
+     * exists in this function. The 8-direction sweep above has just left the player mid-stride,
+     * which is exactly the state that matters.
+     *
+     * The control is the behaviour this replaced: had the else-branch kept zeroing anim, the phase
+     * would read 0 after these 120 idle steps and the sprite would have snapped to the contact
+     * frame. Asserting anim is UNCHANGED rather than merely non-zero is what makes that
+     * distinguishable - a variant that reset it to any fixed value would still be caught. */
+    {
+        float held;
+        int held_id;
+
+        /* Put the phase provably mid-cycle FIRST. The 8-direction sweep above lands on an exact
+         * multiple of the wrap - 240 steps per direction against a 40-step cycle at TICK_DT - so
+         * it leaves anim at 0, which is also the value the reverted behaviour would produce. Read
+         * straight from there, every assertion below holds vacuously and the whole check passes
+         * against a broken build. It did, the first time this was written; 7 steps is coprime with
+         * the 40-step cycle, so it cannot land back on the boundary.
+         *
+         * Blocked movement is fine here: the phase advances on movement INTENT, not displacement,
+         * so it does not matter whether this walks into a wall. */
+        SDL_zero(in);
+        in.right = 1;
+        for (i = 0; i < 7; i++)
+            sim_step(&g, &in, TICK_DT);
+
+        held = g.p.anim;
+        held_id = player_sprite_id(&g.p);
+
+        /* The vacuity guard, kept as a live assertion rather than a comment. */
+        if (held <= 0.0f) {
+            printf("  seed %.0f: walk phase is %.6f after moving - held-pose check would be vacuous\n",
+                   (double)seed, (double)held);
+            fails++;
+        }
+
+        SDL_zero(in);
+        for (i = 0; i < 120; i++) /* two seconds of standing still */
+            sim_step(&g, &in, TICK_DT);
+
+        if (g.p.anim != held) {
+            printf("  seed %.0f: walk phase moved while standing: %.6f -> %.6f\n",
+                   (double)seed, (double)held, (double)g.p.anim);
+            fails++;
+        } else if (player_sprite_id(&g.p) != held_id) {
+            printf("  seed %.0f: standing sprite changed %d -> %d with the phase held\n",
+                   (double)seed, held_id, player_sprite_id(&g.p));
+            fails++;
         }
     }
 
@@ -8932,35 +9026,133 @@ static int fade_selftest(void)
             }
         }
 
-        /* D2: the frame index must come off the WORLD clock, not the walk phase. p->anim is
-         * zeroed the moment the keys are released, so had the index stayed on it the bob would
-         * freeze whenever the player stood still - which is the entire point of the switch.
-         * Assert both halves: the clock moves the frame, and anim does not. */
+        /* The walk cycle's contract - REVERSED from what this block asserted while the idle
+         * sheets were the shipped art. Back then the frame came off the world clock and a control
+         * proved p->anim was not an input at all, because those sheets were a bob that had to keep
+         * breathing while the player stood still.
+         *
+         * The shipped art is now a true eight-frame stride, and the frame index comes off p->anim
+         * ALONE - the phase update_player advances only under movement intent and never resets.
+         * That is the entire mechanism behind the held standing pose. Four properties here, then
+         * two controls; the sim-level half (that anim actually survives a no-input step) is
+         * asserted in move_selftest, where a Game already exists.
+         *
+         * Note there is no clock to pass in any more: player_sprite_id takes the Player alone, so
+         * "the clock must not drive this" is now enforced by the signature rather than by a test. */
         {
             Player pp;
-            int f_t0, f_t3, f_anim;
+            int ids[WALK_FRAMES], rows[FACE6_COUNT];
+            int a, b, distinct = 1;
 
             SDL_zero(pp);
             pp.facing6 = (Uint8)FACE6_DOWN;
 
-            f_t0 = player_sprite_id(&pp, 0.0f);
-            f_t3 = player_sprite_id(&pp, 3.0f / IDLE_FPS);   /* exactly three frames on */
-            if (f_t0 == f_t3) {
-                printf("FAIL  idle bob: clock advanced 3 frames, sprite id unchanged (%d)\n", f_t0);
+            /* 1. One cycle of anim visits WALK_FRAMES DISTINCT sprites. All eight authored frames
+             *    are unique art - measured at bake time, unlike the retired idle sheets whose
+             *    frame 7 duplicated frame 0 - so a collapsed cycle means the table or the
+             *    quantiser is wrong. */
+            for (a = 0; a < WALK_FRAMES; a++) {
+                pp.anim = ((float)a + 0.5f) / WALK_FPS;    /* centre of slot a */
+                ids[a] = player_sprite_id(&pp);
+            }
+            for (a = 0; a < WALK_FRAMES && distinct; a++)
+                for (b = a + 1; b < WALK_FRAMES; b++)
+                    if (ids[a] == ids[b]) { distinct = 0; break; }
+            if (!distinct) {
+                printf("FAIL  walk cycle: one cycle of anim did not visit %d distinct frames\n",
+                       WALK_FRAMES);
                 fails++;
             } else {
-                printf("idle bob: PASS  clock drives the frame (id %d -> %d over 3 frames)\n", f_t0, f_t3);
+                printf("walk cycle: PASS  anim drives %d distinct frames per cycle\n", WALK_FRAMES);
             }
 
-            /* The control: anim must not be an input at all. */
-            pp.anim = 12.5f;
-            f_anim = player_sprite_id(&pp, 0.0f);
-            if (f_anim != f_t0) {
-                printf("FAIL  idle bob control: p->anim moved the frame (%d -> %d); index is still on the walk phase\n",
-                       f_t0, f_anim);
+            /* 2. The quantiser holds: two anim values inside one frame's slot are the same frame.
+             *    Without this the cycle could be right on the slot centres and still jitter. */
+            pp.anim = 2.10f / WALK_FPS;
+            a = player_sprite_id(&pp);
+            pp.anim = 2.85f / WALK_FPS;
+            b = player_sprite_id(&pp);
+            if (a != b) {
+                printf("FAIL  walk quantiser: two anim values in slot 2 gave ids %d and %d\n", a, b);
                 fails++;
             } else {
-                printf("idle bob control: PASS  p->anim does not affect the frame\n");
+                printf("walk quantiser: PASS  anim within one slot is one frame\n");
+            }
+
+            /* 3. facing6 and anim are the ONLY inputs. Anything else moving the frame - a global,
+             *    a reintroduced clock, the dead four-way facing - is caught here. */
+            pp.anim = 3.5f / WALK_FPS;
+            a = player_sprite_id(&pp);
+            pp.x = 1234.0f;
+            pp.y = -99.0f;
+            pp.abilities = 0xFFu;
+            pp.facing = (Uint8)FACE_LEFT;
+            b = player_sprite_id(&pp);
+            if (a != b) {
+                printf("FAIL  walk purity: sprite id %d -> %d with only unrelated Player fields changed\n",
+                       a, b);
+                fails++;
+            } else {
+                printf("walk purity: PASS  frame depends on facing6 and anim alone\n");
+            }
+
+            /* 4. Six facings, six DISTINCT rows. player_walk is indexed by facing6 directly, so a
+             *    row duplicated or transposed in the table - or a row swapped in the baker's
+             *    $CharSheets, which is the same bug one file earlier - walks the character in a
+             *    direction it is not moving, with nothing else to catch it. */
+            pp.anim = 1.5f / WALK_FPS;
+            for (a = 0; a < FACE6_COUNT; a++) {
+                pp.facing6 = (Uint8)a;
+                rows[a] = player_sprite_id(&pp);
+            }
+            distinct = 1;
+            for (a = 0; a < FACE6_COUNT && distinct; a++)
+                for (b = a + 1; b < FACE6_COUNT; b++)
+                    if (rows[a] == rows[b]) { distinct = 0; break; }
+            if (!distinct) {
+                printf("FAIL  walk rows: the six facings do not map to six distinct sprites\n");
+                fails++;
+            } else {
+                printf("walk rows: PASS  six facings, six distinct sprites\n");
+            }
+
+            /* Control 1 - THE REVERTED BEHAVIOUR. The old branch zeroed anim the moment the keys
+             * were released, so a standing player snapped to frame 0. Comparing every slot against
+             * frame 0 is exactly that variant, and it must be caught on all WALK_FRAMES-1 slots
+             * that are not frame 0. If it is caught on fewer, the cycle is not really advancing
+             * and property 1 passed for the wrong reason. */
+            {
+                int caught = 0;
+                for (a = 1; a < WALK_FRAMES; a++)
+                    if (ids[a] != ids[0]) caught++;
+                if (caught != WALK_FRAMES - 1) {
+                    printf("FAIL  walk control 1: snap-to-frame-0 variant caught on %d slots, want %d\n",
+                           caught, WALK_FRAMES - 1);
+                    fails++;
+                } else {
+                    printf("walk control 1: PASS  snap-to-frame-0 rejected on all %d moving slots\n",
+                           caught);
+                }
+            }
+
+            /* Control 2 - THE ROW ORDERING. The old four-way shape, where each diagonal collapses
+             * onto the nearest cardinal. Must be caught on exactly the four diagonals; catching
+             * more or fewer would mean rows[] is not laid out the way property 4 assumes. */
+            {
+                int caught = 0;
+                for (a = 0; a < FACE6_COUNT; a++) {
+                    int collapsed = (a == FACE6_RIGHT_DOWN || a == FACE6_LEFT_DOWN) ? FACE6_DOWN
+                                  : (a == FACE6_RIGHT_UP   || a == FACE6_LEFT_UP)   ? FACE6_UP
+                                  : a;
+                    if (rows[collapsed] != rows[a]) caught++;
+                }
+                if (caught != 4) {
+                    printf("FAIL  walk control 2: four-way collapse caught on %d facings, want exactly 4\n",
+                           caught);
+                    fails++;
+                } else {
+                    printf("walk control 2: PASS  four-way collapse rejected on exactly the 4 diagonals\n");
+                }
             }
         }
     }

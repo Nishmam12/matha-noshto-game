@@ -126,15 +126,29 @@ $script:CastleFiles = @(
     "keep_structures/castle_full_multitier_v2.png",
     "terrain_tiles/terrain_01.png")
 
-# TASK 01 Group A: six-way idle sheets, 8 frames at pitch 48, cycle 0-6 (frame 7 dup).
+# Six-way WALK sheets, 8 frames at pitch 48, full cycle 0-7.
+#
+# All 8 frames are baked because all 8 are UNIQUE in every sheet - measured, not assumed. That is
+# the difference from the idle sheets this table used to name: those closed the loop by repeating
+# frame 0 at frame 7, so baking the 8th spent a record and a pixel stream on a duplicate. These do
+# not, and dropping frame 7 here would visibly clip the cycle.
+#
+# The idle sheets stay in assets/player_new UNBAKED. Unbaked art costs zero shipped bytes, and
+# keeping them is what makes the walk-only decision reversible - the same treatment the old
+# four-way set in assets/player got when it was retired.
+#
+# Row order is FACE6_* order (DOWN, RIGHT_DOWN, RIGHT_UP, UP, LEFT_UP, LEFT_DOWN). The renderer's
+# player_walk[] table indexes by facing6, so a row swapped here silently walks the wrong way -
+# which is why --fade-test asserts the six directions map to six distinct rows.
+#
 # Only this table touches assets/player_new; $Categories stays without it.
 $script:CharSheets = @(
-    @{ File = "idle_down.png";       Stem = "CHAR_IDLE_DOWN";       FrameW = 48; Frames = 7 },
-    @{ File = "idle_right_down.png"; Stem = "CHAR_IDLE_RIGHT_DOWN"; FrameW = 48; Frames = 7 },
-    @{ File = "idle_right_up.png";   Stem = "CHAR_IDLE_RIGHT_UP";   FrameW = 48; Frames = 7 },
-    @{ File = "idle_up.png";         Stem = "CHAR_IDLE_UP";         FrameW = 48; Frames = 7 },
-    @{ File = "idle_left_up.png";    Stem = "CHAR_IDLE_LEFT_UP";    FrameW = 48; Frames = 7 },
-    @{ File = "idle_left_down.png";  Stem = "CHAR_IDLE_LEFT_DOWN";  FrameW = 48; Frames = 7 }
+    @{ File = "walk_down.png";       Stem = "CHAR_WALK_DOWN";       FrameW = 48; Frames = 8 },
+    @{ File = "walk_right_down.png"; Stem = "CHAR_WALK_RIGHT_DOWN"; FrameW = 48; Frames = 8 },
+    @{ File = "walk_right_up.png";   Stem = "CHAR_WALK_RIGHT_UP";   FrameW = 48; Frames = 8 },
+    @{ File = "walk_up.png";         Stem = "CHAR_WALK_UP";         FrameW = 48; Frames = 8 },
+    @{ File = "walk_left_up.png";    Stem = "CHAR_WALK_LEFT_UP";    FrameW = 48; Frames = 8 },
+    @{ File = "walk_left_down.png";  Stem = "CHAR_WALK_LEFT_DOWN";  FrameW = 48; Frames = 8 }
 )
 
 # ------------------------------------------------------------ dream recolour --
@@ -369,7 +383,7 @@ foreach ($rel in $script:CastleFiles) {
     $sprites += $sp
 }
 
-# Six-way idle sheets: sliced per frame, only this table touches player_new.
+# Six-way walk sheets: sliced per frame, only this table touches player_new.
 foreach ($sh in $script:CharSheets) {
     $path = Join-Path (Join-Path $AssetRoot "player_new") $sh.File
     if (-not (Test-Path $path)) { throw "missing char sheet: $path" }

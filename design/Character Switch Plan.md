@@ -1,10 +1,16 @@
 ---
 tags: [design, wayfarer, art, character]
 date: 2026-08-12
-status: planned
+status: superseded-in-part
 ---
 
 # Character Switch Plan — the new player art
+
+> **§1a and §D2 below are SUPERSEDED. Read [§6](#6-superseded-the-walk-set-ships-instead) first.**
+> They describe the *idle* sheets, which are no longer the shipped art. Their conclusion — that the
+> art is a bob with no gait, so one cycle can serve both standing and moving — was correct about the
+> sheets it measured and is wrong about the sheets that ship. The walk set replaced them on
+> 2026-08-12; everything else in this note still holds.
 
 Hub: [[Wayfarer MOC]] · Process: [[Agent Prompt]] · Visual identity: [[Art Bible]] ·
 The seam this goes through: [[Phase 07 - Asset Seam]] · Renderer: [[Isometric Rendering]] ·
@@ -166,3 +172,93 @@ are, so the renderer can index a run.
 - **The bob cadence is unjudged.** 8 fps is a starting guess, not a measured choice.
 - The two pure-horizontal facings are a designed compromise (D1). If walking due left or right reads
   wrong, the fix is art — a pure side view — not code.
+
+---
+
+## 6. Superseded: the walk set ships instead
+
+**2026-08-12.** The six `walk_*.png` sheets replaced the idle sheets as the baked player art. §1a and
+§D2 above are retained as a record of the idle sheets, not as a description of the game.
+
+### What changed and why
+
+§D2 chose a single shared cycle **because** §1a measured the idle art as a bob: `opaque_x` identical
+across all 8 frames, both feet planted, no leg alternation. That reasoning does not transfer. The
+walk sheets were measured the same way and are **a genuine stride**:
+
+| | Idle sheets (retired) | Walk sheets (**shipped**) |
+|---|---|---|
+| Geometry | 384×64, pitch 48 | **identical** — the baker's dimension check took them unchanged |
+| Unique frames | 41 of 48; frame 7 duplicates frame 0 in all six | **8 of 8 in every sheet** |
+| Horizontal motion | none — `opaque_x` fixed per sheet | diagonals vary 1–2 px; cardinals still fixed |
+| Leg separation | none | **2–3 scanlines split into two runs on frames 0/3/4/7**, closing to one run on 1/2/5/6 |
+| Key-magenta hits | 0 | **0** — checked again, not assumed |
+| Distinct colours | 19–25 | 20–27 |
+| Baked records | 42 (6 × 7) | **48 (6 × 8)** |
+
+Frames 0 and 4 are the two contact poses and 2/6 the passing poses — the classic eight-frame,
+two-contact structure. **All eight frames must be baked**; there is no loop-closing duplicate to drop
+the way there was for idle.
+
+### The decisions that replaced D2
+
+**D2′ — the frame index comes off `p->anim`, not the world clock.** `player_sprite_id` takes the
+`Player` alone. `g->clock` is no longer passed in, so "the clock must not drive the character" is
+enforced by the function signature rather than by a test.
+
+**D5 — standing holds the last frame reached.** `update_player` advances `anim` only under movement
+intent and **no longer resets it on release**. A standing player therefore holds whichever frame the
+stride stopped on, and stepping off again resumes from that pose. The old `anim = 0` reset was right
+for the idle art, whose frame 0 was a true rest pose; frame 0 of a stride is mid-step, so snapping to
+it on release would read as a flinch. There is no idle state, no "is moving" flag and no second
+sprite table — the behaviour falls out of not resetting a float.
+
+A wrap keeps `anim` inside one cycle, so it cannot accumulate across a session and lose the
+resolution the frame quantiser needs.
+
+**Consequence, accepted deliberately: a standing character is completely static.** No breath, no
+sway. At ~24 px this is a judgement call that needs a human, not a correctness one.
+
+**D3′ — the idle sheets stay on disk, unbaked.** Same treatment `assets/player/` got when the old
+four-way set was retired: unbaked art costs zero shipped bytes and keeps the decision reversible.
+`$script:DreamCategories` is still `nature` only (D4 unchanged).
+
+### Measured cost
+
+| | |
+|---|---|
+| Walk records | 48 — 13,889 B data + 1,009 B palette + 768 B record = **15,666 B** |
+| Idle records removed | 42 — 12,459 + 911 + 672 = **14,042 B** |
+| Net const data | **+1,896 B** attributable to the character |
+| Release binary | 1,085,440 → **1,091,584** (+6,144) |
+
+The binary delta is larger than the const-data delta because a concurrently untracked
+`assets/buildings/bld_house_small_v4_frame_0.png` is being auto-globbed by the `buildings` category
+and baked at a cost of **4,285 B**, with no caller in `art_bld_small[]`/`art_bld_large[]`. That is
+separate from this work and wants its own decision — wire it or move it out.
+
+### `WALK_FPS` — the one number nobody can derive
+
+**12.0, and it is unjudged.** Foot-lock is unreachable at this speed-to-size ratio: `PLAYER_SPEED` is
+6.9 tiles/sec under a ~24 px character, so the feet skate at any cadence. The old four-frame set ran
+8 fps = 2 cycles/sec; eight frames at 8 fps halves that to 1 and reads as slow motion. 12 gives 1.5
+cycles/sec — 3 steps/sec against two contacts. **16 restores the old cadence** if 12 reads slow. One
+`#define`, next to `PLAYER_SPEED`.
+
+### Verification
+
+`--fade-test` carries the pure-function contract: one cycle visits 8 distinct sprites, the quantiser
+holds within a slot, the frame depends on `facing6` and `anim` alone, and the six facings map to six
+distinct rows. Two controls — a snap-to-frame-0 variant (the reverted behaviour) caught on all 7
+moving slots, and a four-way row collapse caught on exactly the 4 diagonals.
+
+`--move-test` carries the sim-level half: `anim` survives 120 no-input steps unchanged, and the
+sprite id with it.
+
+> **A trap worth keeping.** The first version of the `--move-test` check read `anim` straight after
+> the 8-direction sweep and **passed against a deliberately broken build**. 240 steps per direction
+> is a whole multiple of the 40-step wrap cycle at `TICK_DT`, so the sweep leaves `anim` at exactly
+> 0 — which is also the value the broken behaviour produces. Every assertion held vacuously. The fix
+> is 7 extra input steps (coprime with the cycle) plus a live guard asserting the phase is non-zero
+> before anything is concluded from it. This was caught only by breaking the fix on purpose and
+> re-running, which is why that step is not optional.
