@@ -202,20 +202,18 @@ static int is_castle_reserved(int tx, int ty)
  * is a one-line change. */
 #define dream_sector(ty) ((ty) >= DREAM_Y0)
 
-/* The same question asked of the PALETTE, and the answer differs by exactly the four void-band
- * rows. Phase 12 task 6.
+/* The same question asked of the PALETTE. Used to paint the DREAM_GAP void-band rows
+ * (OVERWORLD_H..DREAM_Y0) violet ahead of dream_sector's own boundary, on the theory that they
+ * are the gulf the dream islands float in. In practice that strip of violet sits on the overworld
+ * side of the sector line and is visible from ordinary overworld ground near the south coast —
+ * the two maps are supposed to be visually distinct, and a wedge of the dream palette showing up
+ * while still in the overworld broke that. Now identical to dream_sector: the void band renders
+ * as plain overworld sea, and the palette only turns violet exactly where the sector does.
  *
- * dream_sector is a statement about gameplay: which landmass a tile belongs to, read by placement
- * and by the tests. Rows 60..63 belong to neither — they are always-solid ocean and no entity,
- * river or building can ever occupy them. But they are the gulf the dream islands float in, and
- * painting them in the overworld's sea blue would draw a strip of ordinary sea along the horizon
- * of a violet void.
- *
- * Two macros rather than one widened one, because widening dream_sector would quietly hand four
- * rows of the overworld's own coastline to the dream side in --sector-test's counts and in
- * --land-test's per-sector bounds. RENDER ONLY: nothing outside tile_colour and the prop dispatch
- * may read this. */
-#define dream_palette(ty) ((ty) >= OVERWORLD_H)
+ * Kept as its own macro (not just dream_sector everywhere) so the two questions — gameplay sector
+ * vs. render palette — stay independently named at each call site, even though they currently
+ * agree. RENDER ONLY: nothing outside tile_colour and the prop dispatch may read this. */
+#define dream_palette(ty) ((ty) >= DREAM_Y0)
 
 /* --- The art scale knob ---------------------------------------------------
  *
@@ -2344,6 +2342,34 @@ static void regions_by_sector(const World *w, Uint32 *over, Uint32 *dream)
         }
 }
 
+/* Chebyshev distance, in tiles, from `tile` to the nearest OTHER already-placed entity in
+ * `ents` (skipping index `self` and any entity not yet placed). Chebyshev because that is the
+ * grid the rest of placement already reasons in (near_building, woody_count_around). Used to
+ * keep fragments and Found Souls from landing on top of each other: nothing upstream of this
+ * scores distance between entities, only which region and how close to a building/thicket, so
+ * two collectibles drawn from the same region by pure per-tile RNG could otherwise land within
+ * sight of each other by chance. Returns a large number if there is nothing placed yet to
+ * compare against. */
+#define ENTITY_SPACING 10  /* tiles; soft target, see the retry loops below */
+
+static int entity_min_dist(const Entity *ents, int self, int tile)
+{
+    int tx = tile % WORLD_W, ty = tile / WORLD_W, i, best = WORLD_W + WORLD_H;
+
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        int ox, oy, dx, dy, d;
+        if (i == self || ents[i].tile < 0)
+            continue;
+        ox = ents[i].tile % WORLD_W;
+        oy = ents[i].tile / WORLD_W;
+        dx = tx - ox; if (dx < 0) dx = -dx;
+        dy = ty - oy; if (dy < 0) dy = -dy;
+        d = dx > dy ? dx : dy;
+        if (d < best) best = d;
+    }
+    return best;
+}
+
 /* Place the three ability grants on the advancing frontier — each one inside
  * what is reachable *before* it is granted — then scatter the rest anywhere
  * reachable once everything is held. Placing by frontier rather than at random
@@ -2412,6 +2438,23 @@ static void place_entities(World *w, Rng *rng, Entity *ents, Uint64 seed)
                         }
                     }
                 }
+                tries++;
+            }
+        }
+        /* Keep grants spread from whatever is already placed (each other, so far). Separate
+         * from the building/woody thinning above rather than folded into it — that block
+         * already has its own accept condition and mixing a second, independent criterion into
+         * one boolean just makes both harder to satisfy for no benefit. Same soft-retry shape:
+         * up to 4 tries, keep the best of what turns up rather than leaving it unplaced. */
+        {
+            int tries = 0;
+            while (tries < 4 && ents[i].tile >= 0 &&
+                   entity_min_dist(ents, i, ents[i].tile) < ENTITY_SPACING) {
+                int alt = pick_tile_in_region(w, r, rng, 0);
+                if (alt < 0) alt = pick_tile_in_region(w, r, rng, -1);
+                if (alt < 0) break;
+                if (entity_min_dist(ents, i, alt) > entity_min_dist(ents, i, ents[i].tile))
+                    ents[i].tile = alt;
                 tries++;
             }
         }
@@ -2488,6 +2531,22 @@ static void place_entities(World *w, Rng *rng, Entity *ents, Uint64 seed)
                             }
                         }
                     }
+                    tries++;
+                }
+            }
+            /* Keep collectibles spread out — see entity_min_dist. Independent retry from the
+             * building/woody thinning above, same reasoning as the grant loop's copy of this
+             * block: one soft criterion per loop stays easy to reason about, and 4 tries each
+             * is cheap next to the generate-then-verify retry this all already sits inside. */
+            {
+                int tries = 0;
+                while (tries < 4 && ents[i].tile >= 0 &&
+                       entity_min_dist(ents, i, ents[i].tile) < ENTITY_SPACING) {
+                    int alt = pick_tile_in_region(w, r, rng, sector);
+                    if (alt < 0) alt = pick_tile_in_region(w, r, rng, -1);
+                    if (alt < 0) break;
+                    if (entity_min_dist(ents, i, alt) > entity_min_dist(ents, i, ents[i].tile))
+                        ents[i].tile = alt;
                     tries++;
                 }
             }
@@ -4741,7 +4800,14 @@ static const Uint8 roof_pal[4][3][3] = {
 };
 
 /* A filled 2:1 diamond centred on (cx, cy). Same column geometry as iso_tile,
- * so a roof ring lines up exactly with the tile grid it sits over. */
+ * so a roof ring lines up exactly with the tile grid it sits over.
+ *
+ * Shipping code no longer calls this: it used to draw the prop contact shadow (trees/bushes,
+ * procedural and baked) and that shadow is gone — it read as a stray dark blob at the base of
+ * every tree/bush rather than as ground contact. iso_diamond itself stays, guarded, because
+ * iso_selftest still exercises its bounds-clamping directly (see the #1 fix this canary guards
+ * against in design/Bug Fix Plan.md). */
+#if WAYFARER_SELFTEST
 static void iso_diamond(SDL_Surface *fb, int cx, int cy, int rw, Uint32 c)
 {
     /* Half-open [i0, i1), matching iso_tile exactly. vspan does no x-clipping of
@@ -4758,6 +4824,7 @@ static void iso_diamond(SDL_Surface *fb, int cx, int cy, int rw, Uint32 c)
         vspan(fb, cx + i, cy - half, half * 2 + 1, c);
     }
 }
+#endif
 
 /* The same diamond split down its vertical centre line into a left and a right
  * colour.
@@ -5217,12 +5284,6 @@ static void draw_tree(SDL_Surface *fb, int cx, int by, Uint32 h, float rev, floa
     int top  = by - th - ch;
     int i;
 
-    /* Contact shadow first, flat on the ground plane. Without one a prop floats:
-     * in an isometric projection there is no other cue for where its base
-     * actually meets the tile, and every prop in the world was floating.
-     * design/Art Bible.md §3 — "everything touches the ground". */
-    iso_diamond(fb, cx, by - 1, cw / 3, fog_lerp(fb, 0x24, 0x33, 0x22, rev));
-
     fill_rect(fb, cx - PX(3), by - th, PX(3), th, fog_lerp(fb, tp[0][0], tp[0][1], tp[0][2], rev));
     fill_rect(fb, cx,         by - th, PX(2), th, fog_lerp(fb, tp[1][0], tp[1][1], tp[1][2], rev));
     fill_rect(fb, cx + PX(2), by - th, PX(1), th, fog_lerp(fb, tp[2][0], tp[2][1], tp[2][2], rev));
@@ -5251,7 +5312,6 @@ static void draw_bush(SDL_Surface *fb, int cx, int by, Uint32 h, float rev)
     int bw = PX(13) + (int)((h >> 20) & 3) * PX(2);
     int bh = PX(8) + (int)((h >> 22) & 3) * PX(2);
 
-    iso_diamond(fb, cx, by - 1, bw / 3, fog_lerp(fb, 0x24, 0x33, 0x22, rev));
     fill_ellipse(fb, cx, by - bh / 2, bw / 2, (bh + 1) / 2,
                  fog_lerp(fb, cp[1][0], cp[1][1], cp[1][2], rev));
     fill_ellipse(fb, cx, by - bh - 1, bw / 3, PX(3),
@@ -5545,10 +5605,20 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
          * only visible on screen.
          *
          * Density is not a collision input, so this cannot alter solvability; but it does
-         * change what the reveal mechanic has to show, which is the actual reason to care. */
+         * change what the reveal mechanic has to show, which is the actual reason to care.
+         *
+         * Two rings, not one. `hard` is exactly place_buildings' own footprint+2 skirt — the
+         * ground it already guarantees is open — so no tree or bush ever grows there and a
+         * canopy can never be drawn overlapping a wall or roof. `soft` is a wider, thinned
+         * band (footprint+4) so a house does not sit in a bare dirt lot either: the clearing
+         * stays open right around the building and fills back in with foliage a couple of
+         * tiles further out, matching design/Art Bible.md's "inhabited clearing" read. */
          if (dream_palette(ty)) {
-             int near = near_building(w, tx, ty, 2);
-             if (near)
+             int hard = near_building(w, tx, ty, 2);
+             int soft = !hard && near_building(w, tx, ty, 4);
+             if (hard)
+                 return (roll < 8) ? PROP_CRYSTAL : PROP_NONE;  /* clearing: low glow only */
+             if (soft)
                  return (roll <  3) ? PROP_TREE   /* 9.4% (-25%) */
                       : (roll <  6) ? PROP_BUSH   /* 9.4→6.3% (-33%) */
                       : (roll < 14) ? PROP_CRYSTAL : PROP_NONE;
@@ -5557,8 +5627,12 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
                   : (roll < 15) ? PROP_CRYSTAL : PROP_NONE;
          }
          {
-             int near = near_building(w, tx, ty, 2);
-             if (near)
+             int hard = near_building(w, tx, ty, 2);
+             int soft = !hard && near_building(w, tx, ty, 4);
+             if (hard)
+                 return (roll <  5) ? PROP_FLOWER   /* clearing: low ground cover only */
+                      : (roll <  8) ? PROP_STUMP  : PROP_NONE;
+             if (soft)
                  return (roll <  3) ? PROP_TREE     /* 12.5→9.4 (-25%) trees */
                       : (roll <  6) ? PROP_BUSH     /* 9.4→6.3  (-33%) bushes */
                       : (roll <  9) ? PROP_STUMP    /* unchanged */
@@ -5961,21 +6035,6 @@ static void draw_prop(SDL_Surface *fb, int kind, int cx, int by, Uint32 h, float
                 if (pbox)
                     fade = prop_covers_player(band, pband, x0, y0, x0 + sp->w, y0 + sp->h,
                                               pbox[0], pbox[1], pbox[2], pbox[3]);
-                /* Decision 41's other half. The procedural props have always drawn a contact
-                 * shadow here (see draw_tree) and the baked ones never did — the team's art
-                 * carried its own magenta disc instead, which is the halo now stripped at bake.
-                 * Same call, same colour, same reason: without it a prop floats, because an
-                 * isometric projection gives no other cue for where its base meets the tile. */
-                {
-                    int sr = 0x24, sg = 0x33, sb = 0x22;
-                    /* The shadow is grass-coloured, so it has to follow the grass. Left
-                     * overworld-green it drew a ring of lawn under every violet tree — three
-                     * pixels of the wrong biome at the one place the eye is already looking,
-                     * because a contact shadow is what tells you where the trunk meets the
-                     * ground. Found by screenshot; no test has an opinion on it. */
-                    if (dream) dream_shift(sr, sg, sb, &sr, &sg, &sb);
-                    iso_diamond(fb, cx, by - 1, sp->w / 3, fog_lerp(fb, sr, sg, sb, rev));
-                }
             }
             draw_sprite_fade(fb, id, cx, by, rev, fade);
             return;
@@ -6079,15 +6138,20 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
     if (bi) {
         const Building *bb = &g->w.bld[bi - 1];
         if (building_sprite_id(bb) != ART_NONE) {
-            /* Packed earth, not wall colour. When a sprite is the whole building, world_heights
-             * has flattened this tile, so it is now GROUND the house stands on rather than the
-             * wall's own top face — and leaving it wall-coloured left a pale slab spreading out
-             * from under every cottage.
-             *
-             * Deliberately a worn dirt yard: it is what a footprint bigger than its sprite has
-             * to be, and it starts paying off the "the village reads as buildings-in-a-field,
-             * not as inhabited" note in Handover section 2. */
-            *cr = 0x8f; *cg = 0x7d; *cb = 0x5e;
+            /* Grass, not packed earth. When a sprite is the whole building, world_heights has
+             * flattened this tile, so it is now GROUND the house stands on rather than the wall's
+             * own top face. A dedicated tan "yard" colour used to paint that footprint, and since
+             * the footprint is a plain rectangle while the sprite silhouette is not, the yard
+             * showed past the sprite's edges as a pale halo around every cottage — visible, and
+             * (because the whole footprint is `solid`) exactly the shape of the invisible wall the
+             * player could not cross. Matching ordinary ground here removes the halo and leaves
+             * only the sprite itself reading as "building": collision is untouched, still the
+             * full footprint via `solid`/`bld_at`. */
+            Uint8 reg = g->w.region[ty][tx];
+            terrain_colour(reg == REGION_NONE ? TERRAIN_NORMAL : g->w.regions[reg].terrain,
+                           cr, cg, cb);
+            if (dream_palette(ty))
+                dream_shift(*cr, *cg, *cb, cr, cg, cb);
         } else {
             const Uint8 *p = wall_pal[BV_WALL(bb->variant)];
             *cr = p[0]; *cg = p[1]; *cb = p[2];
