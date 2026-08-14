@@ -87,17 +87,56 @@
 #define CASTLE_Y_SHIFT    (CASTLE_RESERVE_Y0 - 7)
 #define CASTLE_CAUSEWAY_Y 28
 #define CASTLE_CAUSEWAY_X0 82
-#define CASTLE_CAUSEWAY_X1 119
-#define CASTLE_BRIDGE_X   100
-#define CASTLE_BRIDGE_Y   28
+/* EXCLUSIVE, and it stops at the waterline rather than 19 tiles inside the
+ * island. It used to be 119, while castle_left puts the coast at x=100 on this
+ * row — so the causeway span and the island footprint overlapped for tx
+ * 100..118, with two consequences that between them are most of what the design
+ * review saw:
+ *
+ *   - the render dispatch tests castle_island_tile FIRST, so those 19 tiles
+ *     never reached the causeway branch at all. Four of the six sprites in that
+ *     branch were unreachable, and the visible bridge collapsed to fifteen
+ *     copies of one stone-arch sprite in a straight line. "Bridge Piece x6" was
+ *     a description of dead code, not of a design choice.
+ *
+ *   - castle_apply_layout's causeway loop runs AFTER its island loop, so while
+ *     the causeway was closed it re-flooded those 19 tiles to ocean — gouging a
+ *     channel straight through the island the bridge is supposed to reach.
+ *
+ * The causeway now ends in open water at x=99 and lands on CASTLE_BRIDGE_X, the
+ * one break in the coast cliff. */
+#define CASTLE_CAUSEWAY_X1 100
+/* The sea gate: the causeway's landing, the single gap in the cliff ring, and
+ * the tile --aether-test probes for "closed before the key, open after". */
+#define CASTLE_BRIDGE_X   CASTLE_CAUSEWAY_X1
+#define CASTLE_BRIDGE_Y   CASTLE_CAUSEWAY_Y
+/* How many deck tiles before the landing fan out to three, so the bridge
+ * arrives at a gatehouse forecourt instead of stopping dead against a cliff. */
+#define CASTLE_CAUSEWAY_WIDE 5
 #define CASTLE_KEEP_X     129
 #define CASTLE_KEEP_Y     14
-#define CASTLE_FORT_X0    118
-#define CASTLE_FORT_X1    136
-#define CASTLE_FORT_Y0    10
-#define CASTLE_FORT_Y1    30
-#define CASTLE_TOWER_Y0   15
-#define CASTLE_TOWER_Y1   25
+/* The dock, on the water just off the island's south shore — the far side from
+ * the causeway, which is the point: it is how the place was supplied before the
+ * bridge, and it is the one thing in the region that says somebody used to
+ * live here rather than defend it. */
+#define CASTLE_DOCK_X     120
+#define CASTLE_DOCK_Y     44
+/* The x range every Aetherhold sweep has to cover, and the reason it is not
+ * the reserve box. CASTLE_RESERVE_X0 is 110, but castle_left dips to 99 — the
+ * reserve rectangle is a lie about the real footprint, so each loop used to
+ * hand-correct with a bare `CASTLE_RESERVE_X0 - 18`.
+ *
+ * MEASURED, not chosen. This was briefly 83, to close a leak where raw
+ * gen_sector terrain survived in the channel the causeway spans. It closed the
+ * leak and drowned about 250 tiles of legitimate northern mainland with it:
+ * the buffer is 46 rows tall, so moving its left edge nine columns west floods
+ * a 9x46 rectangle, most of which has nothing to do with the causeway.
+ * `--land-test --seeds 500` went from the documented three failing seeds to
+ * eight, all of them "player reaches <50% of open tiles". The leak is real but
+ * it is eighteen tiles on two rows, so it gets an eighteen-tile fix — see the
+ * channel clear in castle_apply_layout. */
+#define CASTLE_SWEEP_X0   (CASTLE_RESERVE_X0 - 18)
+#define CASTLE_SWEEP_X1   (CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2)
 /* The abandoned watchtower on the mainland approach. Named because it is
  * hand-placed and therefore needed by BOTH castle_apply_layout (which builds it)
  * and the render dispatch (which draws its sprite); those two used to carry
@@ -132,6 +171,91 @@ static int castle_island_tile(int tx, int ty)
     return tx >= castle_left[row] && tx <= castle_right[row];
 }
 
+/* --- The fortress's vertical hierarchy, in ONE function --------------------
+ *
+ * Every previous attempt at "the castle has levels" was four hardcoded
+ * rectangles in castle_apply_heights, and that is exactly why the island read
+ * as a square platform: the coastline was hand-authored and irregular, but
+ * every terrace, wall ring and courtyard inside it was axis-aligned. The
+ * silhouette said "island" and everything on it said "graph paper".
+ *
+ * So the tier is derived from the silhouette instead of typed beside it. It is
+ * the MINIMUM of two fields:
+ *
+ *   1. an erosion of the authored coast (castle_inset). Contours of an
+ *      irregular shape are themselves irregular, so every terrace edge is as
+ *      organic as castle_left/castle_right are, for free — and re-authoring
+ *      those two tables re-shapes the whole fortress with them rather than
+ *      leaving four stale rectangles behind.
+ *
+ *   2. the hill the keep stands on, which is deliberately NOT centred on the
+ *      island. That is what makes the causeway landing in the south-west the
+ *      LOW corner and the keep the high one, so the player climbs on the way
+ *      in — the "Mainland -> Causeway -> Gatehouse -> Outer -> Inner -> Upper
+ *      -> Keep" progression the phase spec asks for.
+ *
+ * Both inputs are 1-Lipschitz over orthogonal neighbours (a Chebyshev distance
+ * transform and a Euclidean radius with bands more than one tile apart), and
+ * min() of two 1-Lipschitz functions is 1-Lipschitz. So the tier can never jump
+ * two levels between adjacent tiles, which is what lets castle_apply_layout
+ * place a retaining wall at every step-up and know a single flight of stairs
+ * always spans it. --aether-test asserts that rather than trusting it.
+ *
+ * PURE, and no table. A per-tile castle array would cost ~25 KB against the
+ * ~30 KB the wayfarer_stack_guard has left (see the note there), and the Phase
+ * 13 plan already ruled one out for that reason. */
+enum { CT_SEA = 0, CT_SHORE, CT_OUTER, CT_INNER, CT_UPPER, CT_KEEP, CT_COUNT };
+
+/* Chebyshev distance from (tx,ty) to the nearest tile that is NOT island, in
+ * tiles: 1 on the coast ring itself, saturating at CASTLE_INSET_MAX + 1.
+ *
+ * Chebyshev rather than Manhattan so a tile touching the sea only DIAGONALLY
+ * still counts as coast. That thickens the cliff ring at concave corners by
+ * exactly one tile, which is where a 4-connected ring left a stair-stepped
+ * notch — the rounded corners the review asked for, out of the metric rather
+ * than out of a special case. */
+#define CASTLE_INSET_MAX 9
+
+static int castle_inset(int tx, int ty)
+{
+    int r, k;
+
+    if (!castle_island_tile(tx, ty))
+        return 0;
+    for (r = 1; r <= CASTLE_INSET_MAX; r++)
+        for (k = -r; k <= r; k++)
+            if (!castle_island_tile(tx + k, ty - r) ||
+                !castle_island_tile(tx + k, ty + r) ||
+                !castle_island_tile(tx - r, ty + k) ||
+                !castle_island_tile(tx + r, ty + k))
+                return r;
+    return CASTLE_INSET_MAX + 1;
+}
+
+static int castle_tier(int tx, int ty)
+{
+    int inset, dx, dy, d2, hill, coast;
+
+    if (!castle_island_tile(tx, ty))
+        return CT_SEA;
+
+    inset = castle_inset(tx, ty);
+    coast = (inset <= 2) ? CT_SHORE
+          : (inset <= 3) ? CT_OUTER
+          : (inset <= 5) ? CT_INNER
+          : (inset <= 7) ? CT_UPPER : CT_KEEP;
+
+    dx = tx - CASTLE_KEEP_X;
+    dy = ty - CASTLE_KEEP_Y;
+    d2 = dx * dx + dy * dy;
+    hill = (d2 <=  30) ? CT_KEEP
+         : (d2 <= 110) ? CT_UPPER
+         : (d2 <= 320) ? CT_INNER
+         : (d2 <= 700) ? CT_OUTER : CT_SHORE;
+
+    return hill < coast ? hill : coast;
+}
+
 static int castle_approach_tile(int tx, int ty)
 {
     int path_y;
@@ -163,32 +287,213 @@ static int castle_approach_path_tile(int tx, int ty)
 
 static int castle_causeway_tile(int tx, int ty)
 {
-    return ty == CASTLE_CAUSEWAY_Y && tx >= CASTLE_CAUSEWAY_X0
-        && tx < CASTLE_CAUSEWAY_X1;
+    int dy;
+
+    if (tx < CASTLE_CAUSEWAY_X0 || tx >= CASTLE_CAUSEWAY_X1)
+        return 0;
+    dy = ty - CASTLE_CAUSEWAY_Y;
+    if (dy == 0)
+        return 1;
+    /* The forecourt. Only the last stretch is three tiles wide, so the span
+     * reads as one structure that BROADENS on arrival rather than as a uniform
+     * ribbon — real bridges rarely terminate abruptly, and the widening is what
+     * gives the gatehouse something to stand on. */
+    if (dy < -1 || dy > 1)
+        return 0;
+    return tx >= CASTLE_CAUSEWAY_X1 - CASTLE_CAUSEWAY_WIDE;
 }
 
+/* --- The processional ------------------------------------------------------
+ *
+ * One straight line from the sea gate to the keep door. Everything that has to
+ * agree about "the way in" is derived from it: where each wall ring opens,
+ * where the stairs are, and where the worn path runs. They used to be three
+ * unrelated sets of hardcoded rectangles, and a gate that did not line up with
+ * the path it was supposedly serving is the kind of thing only a screenshot
+ * ever catches.
+ *
+ * Expressed as the signed distance to the line through (BRIDGE_X, BRIDGE_Y) and
+ * (KEEP_X, KEEP_Y), scaled by its own length so no division or sqrt is needed:
+ *
+ *     n = (dy_line * (tx - x0)) - (dx_line * (ty - y0))
+ *
+ * |n| < k * len is then "within k tiles of the line". len is folded into the
+ * thresholds below as CASTLE_PROC_LEN, which is |(29, -14)| rounded up. */
+#define CASTLE_PROC_LEN 33 /* ceil(sqrt(29*29 + 14*14)) */
+/* dot(dir, dir) — the value `along` reaches at the keep end. */
+#define CASTLE_PROC_SPAN 1037
+
+static int castle_proc_dist(int tx, int ty)
+{
+    int dxl = CASTLE_KEEP_X - CASTLE_BRIDGE_X; /*  29 */
+    int dyl = CASTLE_KEEP_Y - CASTLE_BRIDGE_Y; /* -14 */
+    int n = dyl * (tx - CASTLE_BRIDGE_X) - dxl * (ty - CASTLE_BRIDGE_Y);
+    return n < 0 ? -n : n;
+}
+
+/* How far ALONG the route a tile lies, 0 at the sea gate and CASTLE_PROC_SPAN at
+ * the keep. A segment, not the infinite line the distance above measures on its
+ * own: without this the corridor runs straight out the far side of the island,
+ * cutting a second gap in every ring on the north-east coast — a back door
+ * through the entire fortress, and a route the player can never reach because it
+ * ends at a cliff over open sea. */
+static int castle_proc_along(int tx, int ty)
+{
+    int dxl = CASTLE_KEEP_X - CASTLE_BRIDGE_X;
+    int dyl = CASTLE_KEEP_Y - CASTLE_BRIDGE_Y;
+    return dxl * (tx - CASTLE_BRIDGE_X) + dyl * (ty - CASTLE_BRIDGE_Y);
+}
+
+/* Inside the processional corridor: near the line AND between its two ends.
+ * `half` is the half-width in tiles, scaled by the line's own length so no
+ * division is needed. */
+static int castle_proc_tile(int tx, int ty, int half)
+{
+    int along = castle_proc_along(tx, ty);
+
+    return along >= 0 && along <= CASTLE_PROC_SPAN
+        && castle_proc_dist(tx, ty) < half * CASTLE_PROC_LEN;
+}
+
+/* Is this tile on the rim of its own terrace — the step up from the level
+ * below? Rims are where walls, revetments and stairs all live, so all three ask
+ * one question. Since castle_tier is an erosion of the authored coastline, the
+ * contour that falls out is rounded and irregular and hugs the island, which is
+ * what the CASTLE_FORT_* rectangle this replaced could never be however
+ * carefully its four numbers were chosen. */
+static int castle_rim_tile(int tx, int ty)
+{
+    int t = castle_tier(tx, ty), i;
+    static const int dx[4] = { 1, -1, 0, 0 };
+    static const int dy[4] = { 0, 0, 1, -1 };
+
+    if (t < CT_OUTER)
+        return 0;
+    for (i = 0; i < 4; i++)
+        if (castle_tier(tx + dx[i], ty + dy[i]) == t - 1)
+            return 1;
+    return 0;
+}
+
+/* Which rims are FORTIFIED, and this is a composition decision rather than a
+ * mechanical one.
+ *
+ * Every rim being a curtain wall was the first thing tried and it reads as a
+ * maze: four concentric walls two to four tiles apart, with no courtyard big
+ * enough to be a courtyard. Real fortresses have a small number of real walls
+ * and a lot of retained ground between them. So the outer curtain and the
+ * keep's own wall get built; the two rims between them stay bare rock, and the
+ * ordinary terrace extrusion draws them as revetments — a retaining cliff you
+ * climb by the stairs, which is exactly what they are. */
+static int castle_walled_ring(int t)
+{
+    return t == CT_OUTER || t == CT_KEEP;
+}
+
+/* Wall, minus the processional: the corridor cuts exactly one gap per ring, and
+ * because every ring is crossed by the same line the gaps line up into a route
+ * rather than four openings that each have to be checked against the others. */
 static int castle_wall_tile(int tx, int ty)
 {
-    int outer = (tx >= CASTLE_FORT_X0 && tx <= CASTLE_FORT_X1 &&
-                 ty >= CASTLE_FORT_Y0 && ty <= CASTLE_FORT_Y1);
-    int edge = tx == CASTLE_FORT_X0 || tx == CASTLE_FORT_X1 ||
-               ty == CASTLE_FORT_Y0 || ty == CASTLE_FORT_Y1;
-    /* Leave the west gate open. The causeway is the actual lock. */
-    if (!outer || !edge || (tx == CASTLE_FORT_X0 && ty == CASTLE_CAUSEWAY_Y))
+    if (!castle_walled_ring(castle_tier(tx, ty)) || !castle_rim_tile(tx, ty))
         return 0;
-    return 1;
+    return !castle_proc_tile(tx, ty, 2);
 }
 
+/* A flight through a rim. On EVERY rim, walled or not — the two bare revetments
+ * are still a step the player has to climb, and a terrace you can only reach by
+ * walking off the edge of the one above reads as a bug. */
+static int castle_stair_tile(int tx, int ty)
+{
+    return castle_rim_tile(tx, ty) && castle_proc_tile(tx, ty, 2);
+}
+
+/* Does a tile draw a baked sprite that IS the structure standing on it?
+ *
+ * The distinction matters to castle_apply_heights for exactly the reason
+ * world_heights already flattens a building footprint whose building is drawn
+ * as a sprite: if the tile keeps its extrusion, the rasteriser draws a stone
+ * block AND the sprite draws a wall on top of it, and the result is a
+ * three-tile-tall rampart of stacked bricks. The sprite is the wall; the ground
+ * under it stays at its terrace. */
+static int castle_sprite_tile(int tx, int ty);
+
+/* The worn route the player actually walks, laid along the same line the gates
+ * open on. Narrower than the gate corridor so the lane reads as a path through
+ * a gateway rather than as a plaza. */
 static int castle_path_tile(int tx, int ty)
 {
-    int local_y = ty - CASTLE_Y_SHIFT;
-    if (tx >= 104 && tx <= 122 && (local_y == 28 || local_y == 29))
-        return 1;
-    if ((tx == 122 || tx == 123) && local_y >= 16 && local_y <= 29)
-        return 1;
-    if (local_y == 24 && tx >= 122 && tx <= 130)
-        return 1;
+    return castle_island_tile(tx, ty) && castle_proc_tile(tx, ty, 1);
+}
+
+/* --- The fixed buildings ---------------------------------------------------
+ *
+ * ONE table, read by castle_apply_layout (which marks the footprint solid) and
+ * by the render dispatch (which draws the sprite). Two hand-copied lists is
+ * precisely the bug the CASTLE_WATCHTOWER_X/Y constants exist to prevent, and
+ * that pair had already drifted once.
+ *
+ * Anchored on the tile the sprite's bottom-centre stands on. `w`/`h` are the
+ * footprint made solid AROUND that tile, not the sprite's extent: a keep is
+ * eight tiles of drawn stone standing on a three-tile plinth, and collision
+ * should follow the plinth.
+ *
+ * NOTHING may cover (CASTLE_KEEP_X, CASTLE_KEEP_Y). That tile is the probe
+ * --aether-test walks to in order to prove the causeway gate is load-bearing,
+ * so it has to stay standable; the keep proper sits two tiles north of it and
+ * (129,14) is its forecourt. --aether-test asserts that rather than trusting
+ * this comment, because "nothing covers that tile" is exactly the kind of claim
+ * a later edit to the table breaks silently. */
+typedef struct {
+    Uint8  x, y;   /* anchor tile                       */
+    Uint8  w, h;   /* solid footprint, centred on anchor */
+    short  art;
+} CastleBld;
+
+static const CastleBld castle_bld[] = {
+    { CASTLE_KEEP_X,     CASTLE_KEEP_Y - 2, 3, 2, ART_CASTLE_KEEP_01                 },
+    { CASTLE_KEEP_X - 6, CASTLE_KEEP_Y + 3, 2, 2, ART_AETHER_BLD_CHAPEL_STONE        },
+    { CASTLE_KEEP_X + 5, CASTLE_KEEP_Y + 4, 2, 2, ART_AETHER_BLD_KEEP_SMALL          },
+    { CASTLE_KEEP_X - 3, CASTLE_KEEP_Y + 9, 2, 2, ART_AETHER_BLD_RUIN_STONE          },
+    { CASTLE_KEEP_X + 4, CASTLE_KEEP_Y + 9, 2, 2, ART_AETHER_BLD_TOWER_SQUARE_RUINED },
+    { CASTLE_KEEP_X - 9, CASTLE_KEEP_Y + 8, 2, 2, ART_AETHER_BLD_TOWER_ROUND_RUINED  },
+    { 108,               27,                2, 2, ART_AETHER_BLD_RUIN_STONE          }
+};
+#define CASTLE_BLD_N ((int)(sizeof castle_bld / sizeof *castle_bld))
+
+/* The building whose ANCHOR is this tile, or -1. Deliberately not "the building
+ * covering this tile": the sprite is drawn once, at its anchor, exactly the way
+ * draw_building draws a village house once at its front corner — otherwise a
+ * two-by-two footprint would blit the keep four times. */
+static int castle_bld_at(int tx, int ty)
+{
+    int i;
+
+    for (i = 0; i < CASTLE_BLD_N; i++)
+        if (castle_bld[i].x == tx && castle_bld[i].y == ty)
+            return i;
+    return -1;
+}
+
+/* ...and "is this tile anywhere under a building", which is the question the
+ * height pass asks. */
+static int castle_bld_covers(int tx, int ty)
+{
+    int i;
+
+    for (i = 0; i < CASTLE_BLD_N; i++) {
+        int x0 = castle_bld[i].x - castle_bld[i].w / 2;
+        int y0 = castle_bld[i].y - castle_bld[i].h / 2;
+        if (tx >= x0 && tx < x0 + castle_bld[i].w &&
+            ty >= y0 && ty < y0 + castle_bld[i].h)
+            return 1;
+    }
     return 0;
+}
+
+static int castle_sprite_tile(int tx, int ty)
+{
+    return castle_wall_tile(tx, ty) || castle_bld_covers(tx, ty);
 }
 
 static int is_castle_reserved(int tx, int ty)
@@ -1106,11 +1411,7 @@ typedef char wayfarer_stack_guard[
     (sizeof(World) + sizeof(Scratch) < 700 * 1024) ? 1 : -1];
 
 /* Which way the character sprite faces, in SCREEN terms — the same space the input is expressed
- * in (decision 28), so "held D" and "faces right" cannot drift apart. The baked art names its
- * directions n/e/s/w, but the sprites themselves are unambiguous about what they mean: `n` shows
- * the face, `s` shows the back. So FACE_FRONT (moving down-screen, toward the viewer) maps to
- * the `n` set, and FACE_BACK to `s`. */
-enum { FACE_FRONT = 0, FACE_RIGHT, FACE_BACK, FACE_LEFT, FACE_COUNT };
+ * in (decision 28), so "held D" and "faces right" cannot drift apart. */
 enum { FACE6_DOWN = 0, FACE6_RIGHT_DOWN, FACE6_RIGHT_UP, FACE6_UP, FACE6_LEFT_UP, FACE6_LEFT_DOWN, FACE6_COUNT };
 
 /* TASK 01 D1: six-way facing, render-only, derived from SCREEN intent (sx,sy).
@@ -1137,10 +1438,9 @@ static int facing6_from_intent(float sx, float sy)
 typedef struct {
     float x, y;      /* centre, in world pixels */
     Uint8 abilities; /* ABIL_* bitmask; the entire ability system, per Abilities.md */
-    /* Render-only, like `height` and `surf`: the simulation never reads either of these back,
-     * so no trajectory, collision result or playthrough can observe them. Zeroed by game_init's
+    /* Render-only, like `height` and `surf`: the simulation never reads this back, so no
+     * trajectory, collision result or playthrough can observe it. Zeroed by game_init's
      * SDL_zero, which is what makes a fresh world start facing front on frame 0. */
-    Uint8 facing;    /* FACE_* kept for now; facing6 is the new six-way facing */
     Uint8 facing6;   /* FACE6_* render-only; save format unchanged */
     /* Walk-cycle phase in seconds, wrapped to one cycle. Advances only under movement intent and
      * is NEVER reset, which is what holds the standing pose on the frame the stride stopped on -
@@ -1190,6 +1490,8 @@ typedef struct {
 static int game_complete(const Game *g);
 static int near_building(const World *w, int tx, int ty, int r);
 static int woody_count_around(Uint64 seed, int cx, int cy, int rad);
+static void world_heights(World *w);
+static void world_heights_all(World *w);
 
 static int solid_at(const World *w, int tx, int ty)
 {
@@ -1375,12 +1677,27 @@ static void castle_apply_layout(World *w, int unlocked)
 
     /* Clear the island's ocean buffer first. The generated overworld is not
      * allowed to leak through the coastline and make a second accidental land
-     * bridge. The silhouette bulges to x=99 (castle_left min), 11 left of
-     * CASTLE_RESERVE_X0=110, so the buffer must start at X0-18 (=92) to give
-     * a 4-tile ocean gap (95..98) around the true coast — noticeable as water
-     * in the F1 overlay — not just a 1-tile seam. */
+     * bridge. */
     for (y = CASTLE_RESERVE_Y0 - 2; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H + 2; y++)
-        for (x = CASTLE_RESERVE_X0 - 18; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2; x++) {
+        for (x = CASTLE_SWEEP_X0; x < CASTLE_SWEEP_X1; x++) {
+            if (x < 0 || y < 0 || x >= WORLD_W || y >= OVERWORLD_H)
+                continue;
+            w->surf[y][x] = SURF_OCEAN;
+            w->solid[y][x] = 1;
+            w->bridge[y][x] = 0;
+            w->path[y][x] = 0;
+            w->sea_dist[y][x] = 0;
+        }
+
+    /* The channel, and ONLY the channel. The buffer above starts at x=92 while
+     * the causeway starts at 82, so the three rows the span occupies were left
+     * with whatever gen_sector put there between those two — an accidental
+     * stepping stone in the middle of the water the bridge is supposed to
+     * cross. Eighteen tiles on the two shoulder rows (the centre row is laid by
+     * the causeway loop below), rather than widening the whole 46-row buffer
+     * west, which drowns real mainland — see the note on CASTLE_SWEEP_X0. */
+    for (y = CASTLE_CAUSEWAY_Y - 1; y <= CASTLE_CAUSEWAY_Y + 1; y++)
+        for (x = CASTLE_CAUSEWAY_X0; x < CASTLE_SWEEP_X0; x++) {
             if (x < 0 || y < 0 || x >= WORLD_W || y >= OVERWORLD_H)
                 continue;
             w->surf[y][x] = SURF_OCEAN;
@@ -1402,57 +1719,87 @@ static void castle_apply_layout(World *w, int unlocked)
             }
 
     /* Landmass is a fixed, irregular silhouette. Its outer ring is cliff/rock;
-     * the interior is walkable meadow until the courtyard walls are added.
-     * X range must include the bulge to 99 (X0-18) — the reserve box alone
-     * misses 99..109 and leaves generated terrain intact. */
+     * the interior is walkable meadow until the courtyard walls are added. */
     for (y = CASTLE_RESERVE_Y0; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H; y++)
-        for (x = CASTLE_RESERVE_X0 - 18; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2; x++)
+        for (x = CASTLE_SWEEP_X0; x < CASTLE_SWEEP_X1; x++)
             if (castle_island_tile(x, y)) {
-                int edge = !castle_island_tile(x - 1, y) || !castle_island_tile(x + 1, y)
-                         || !castle_island_tile(x, y - 1) || !castle_island_tile(x, y + 1);
-                w->surf[y][x] = edge ? SURF_ROCK : SURF_LAND;
-                w->solid[y][x] = (Uint8)edge;
+                /* A graded coast, not a one-tile kerb. inset 1 is the cliff —
+                 * solid, and the ONLY thing standing between the mainland and
+                 * the keep while the causeway is closed, which is what
+                 * --aether-test's isolation proof rests on. inset 2 is a
+                 * walkable rocky beach, so the shore reads
+                 * grass -> rock -> cliff -> water rather than cutting from
+                 * lawn straight to sea. */
+                int cliff = castle_inset(x, y) == 1;
+                w->surf[y][x] = cliff ? SURF_ROCK : SURF_LAND;
+                w->solid[y][x] = (Uint8)cliff;
                 w->bridge[y][x] = 0;
-                w->path[y][x] = (Uint8)castle_path_tile(x, y);
+                w->path[y][x] = (Uint8)(!cliff && castle_path_tile(x, y));
                 w->sea_dist[y][x] = 0;
             }
 
-    /* Internal castle wall ring. The west gate remains open so the causeway is
-     * the only progression lock, not two overlapping locks. */
-    for (y = 0; y < OVERWORLD_H; y++)
-        for (x = 0; x < WORLD_W; x++)
-            if (castle_wall_tile(x, y)) {
+    /* The wall rings and the flights that pass through them. ONE sweep, and one
+     * pair of predicates that partition every terrace rim between them — the
+     * three separate hardcoded rings this replaces (a fort rectangle, a y=24
+     * divider, a keep foundation box) could each be edited without the others
+     * and had already drifted into overlapping. */
+    for (y = CASTLE_RESERVE_Y0; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H; y++)
+        for (x = CASTLE_SWEEP_X0; x < CASTLE_SWEEP_X1; x++) {
+            /* One rim test, two answers. castle_stair_tile and castle_rim_tile
+             * ask the same five-tier question, and asking it twice per tile
+             * doubled the cost of a sweep that already dominates Aetherhold's
+             * share of world generation. */
+            int rim = castle_rim_tile(x, y);
+            if (rim && castle_proc_tile(x, y, 2)) {
+                /* Open by construction, and tested FIRST so a rim is a flight
+                 * before it is anything else. The causeway is the region's only
+                 * lock; a stair that failed to clear `solid` would be a second
+                 * one, and --aether-test's walk from spawn to the keep is what
+                 * makes that claim a re-run rather than an argument. */
+                w->surf[y][x] = SURF_LAND;
+                w->solid[y][x] = 0;
+                w->bridge[y][x] = 0;
+                w->path[y][x] = 1;
+            } else if (rim) {
+                /* Every other rim tile is solid, whether it carries a curtain
+                 * wall (castle_walled_ring) or is left as bare retained rock.
+                 * One branch rather than two, so a terrace can never end up with
+                 * a rim that is neither wall nor stair nor revetment — a gap
+                 * there would let the player walk up the side of the hill and
+                 * quietly undo the climb the region is built around. */
                 w->surf[y][x] = SURF_ROCK;
                 w->solid[y][x] = 1;
                 w->bridge[y][x] = 0;
-                w->path[y][x] = (Uint8)castle_path_tile(x, y);
+                /* NEVER a path. tile_colour tests `path` BEFORE `solid`, so a
+                 * wall tile that happened to fall inside one of
+                 * castle_path_tile's rectangles rendered as a dirt lane running
+                 * straight through the battlements. The path belongs to the
+                 * ground the wall stands in, not to the wall. */
+                w->path[y][x] = 0;
             }
-
-    /* Hierarchical inner wall at y=24 separating upper and outer courtyards,
-     * with a central stair gate aligned under the keep's south stair. */
-    for (x = 118; x <= 138; x++) {
-        y = 24;
-        if (x == CASTLE_KEEP_X) continue; /* central stair opening (129,24) */
-        if (!castle_island_tile(x, y)) continue;
-        w->surf[y][x] = SURF_ROCK;
-        w->solid[y][x] = 1;
-        w->bridge[y][x] = 0;
-    }
-    /* Keep foundation wall around the hill — rounded corners via missing corners. */
-    for (y = CASTLE_KEEP_Y - 3; y <= CASTLE_KEEP_Y + 6; y++)
-        for (x = CASTLE_KEEP_X - 5; x <= CASTLE_KEEP_X + 5; x++) {
-            int is_edge = x == CASTLE_KEEP_X - 5 || x == CASTLE_KEEP_X + 5 ||
-                          y == CASTLE_KEEP_Y - 3 || y == CASTLE_KEEP_Y + 6;
-            int is_corner = (x == CASTLE_KEEP_X - 5 && y == CASTLE_KEEP_Y - 3) ||
-                            (x == CASTLE_KEEP_X + 5 && y == CASTLE_KEEP_Y - 3) ||
-                            (x == CASTLE_KEEP_X - 5 && y == CASTLE_KEEP_Y + 6) ||
-                            (x == CASTLE_KEEP_X + 5 && y == CASTLE_KEEP_Y + 6);
-            if (!is_edge || is_corner) continue;
-            if (!castle_island_tile(x, y)) continue;
-            if (x == CASTLE_KEEP_X && y == CASTLE_KEEP_Y + 6) continue; /* south stair */
-            w->surf[y][x] = SURF_ROCK;
-            w->solid[y][x] = 1;
         }
+
+    /* The fixed buildings, from the one table the renderer also reads. Solid,
+     * so they occlude and block like any other mass; laid down AFTER the wall
+     * rings so a keep placed across a ring wins rather than being cut in half
+     * by it. */
+    {
+        int i, dx, dy;
+        for (i = 0; i < CASTLE_BLD_N; i++) {
+            for (dy = 0; dy < castle_bld[i].h; dy++)
+                for (dx = 0; dx < castle_bld[i].w; dx++) {
+                    int bx = castle_bld[i].x - castle_bld[i].w / 2 + dx;
+                    int by = castle_bld[i].y - castle_bld[i].h / 2 + dy;
+                    if (bx < 0 || by < 0 || bx >= WORLD_W || by >= OVERWORLD_H)
+                        continue;
+                    if (!castle_island_tile(bx, by))
+                        continue;
+                    w->surf[by][bx] = SURF_ROCK;
+                    w->solid[by][bx] = 1;
+                    w->path[by][bx] = 0;
+                }
+        }
+    }
 
     /* Mainland gate and watchtower — monumental bridge entry. */
     {
@@ -1477,49 +1824,125 @@ static void castle_apply_layout(World *w, int unlocked)
         }
     }
 
-    /* One horizontal causeway connects the mainland approach to the west gate
-     * as a single architectural structure. Widened near the castle (gatehouse
-     * platform 2 tiles wide) and with a defensive tower mid-span — placed
-     * at 90° to the island's west coast for a monumental perpendicular. */
-    for (x = CASTLE_CAUSEWAY_X0; x < CASTLE_CAUSEWAY_X1; x++) {
-        y = CASTLE_CAUSEWAY_Y;
-        w->solid[y][x] = unlocked ? 0 : 1;
-        w->surf[y][x] = unlocked ? SURF_LAND : SURF_OCEAN;
-        w->bridge[y][x] = (Uint8)unlocked;
-        w->path[y][x] = (Uint8)unlocked;
-        w->sea_dist[y][x] = 0;
-        /* Widen platform at castle end (last 3 tiles) for gatehouse */
-        if (x >= CASTLE_CAUSEWAY_X1 - 3 && y+1 < WORLD_H && castle_island_tile(x, y+1)) {
-            w->solid[y+1][x] = unlocked ? 0 : 1;
-            w->surf[y+1][x] = unlocked ? SURF_LAND : SURF_OCEAN;
-            w->bridge[y+1][x] = (Uint8)unlocked;
+    /* The causeway: one structure, laid over open water for its whole length
+     * and broadening into a forecourt at the far end. Driven by
+     * castle_causeway_tile rather than by a bare x loop plus an inline widening
+     * rule, so collision, the prop veto, is_castle_reserved and the render
+     * dispatch all read the same shape. */
+    for (y = CASTLE_CAUSEWAY_Y - 1; y <= CASTLE_CAUSEWAY_Y + 1; y++)
+        for (x = CASTLE_CAUSEWAY_X0; x < CASTLE_CAUSEWAY_X1; x++) {
+            if (y < 0 || y >= WORLD_H || !castle_causeway_tile(x, y))
+                continue;
+            w->solid[y][x] = (Uint8)(unlocked ? 0 : 1);
+            w->surf[y][x] = (Uint8)(unlocked ? SURF_LAND : SURF_OCEAN);
+            w->bridge[y][x] = (Uint8)unlocked;
+            w->path[y][x] = (Uint8)unlocked;
+            w->sea_dist[y][x] = 0;
+        }
+
+    /* The sea gate — the causeway's landing and the ONLY break in the coast
+     * cliff. Carved rather than authored as a coordinate: the loop walks inland
+     * clearing cliff tiles until it reaches ground that was already open, so
+     * re-authoring castle_left/castle_right moves the gate with the coastline
+     * instead of leaving a doorway hanging over water or buried in rock.
+     *
+     * Bounded by the cliff ring's own thickness, not by a magic number: it
+     * stops at the first tile with inset > 1, which by construction is walkable
+     * shore. The 8 is a guard against a pathological silhouette, not a tuning
+     * knob. */
+    if (unlocked) {
+        int gx;
+        y = CASTLE_BRIDGE_Y;
+        for (gx = CASTLE_BRIDGE_X; gx < CASTLE_BRIDGE_X + 8; gx++) {
+            if (gx >= WORLD_W || !castle_island_tile(gx, y))
+                break;
+            if (castle_inset(gx, y) > 1)
+                break;
+            w->surf[y][gx] = SURF_LAND;
+            w->solid[y][gx] = 0;
+            w->bridge[y][gx] = 0;
+            w->path[y][gx] = 1;
         }
     }
 }
+
+/* Draw height of each terrace, indexed by CT_*. CT_SEA is never read — the
+ * loop below only visits island tiles — but it is spelled out so the table is
+ * total and a future off-by-one indexes a defined value.
+ *
+ * The steps are ~PX(10) apart against an 18 px tile, where the four rectangles
+ * this replaced were 16/9/3/0 — at most a 7 px lip across the whole fortress,
+ * which is why "hierarchical elevation, visible as cliffs" was in the comment
+ * and not on the screen. */
+static const short castle_tier_h[CT_COUNT] = {
+    0, 0, PX(12), PX(22), PX(32), PX(42)
+};
+
+/* How far a solid castle tile stands PROUD of the terrace it sits on. This is
+ * the whole of "the walls are walls": iso_tile draws a tile's front faces from
+ * the height difference to its south and east neighbours, so giving a wall its
+ * terrace height plus this makes the rasteriser draw the battlement face for
+ * free — the same mechanism buildings already use through
+ * WALL_BASE + levels * STOREY_H, and the same one the coast cliffs use. */
+#define CASTLE_WALL_RISE PX(20)
 
 static void castle_apply_heights(World *w)
 {
     int x, y;
 
-    /* Hierarchical elevation: keep hill highest, upper courtyard terrace,
-     * outer courtyard at ground, gatehouse at causeway level. Visible as
-     * cliffs/retaining walls between levels. */
     for (y = CASTLE_RESERVE_Y0; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H; y++)
-        for (x = CASTLE_RESERVE_X0 - 18; x < CASTLE_RESERVE_X0 + CASTLE_RESERVE_W + 2; x++)
-            if (castle_island_tile(x, y)) {
-                int h = 0;
-                if (x >= CASTLE_KEEP_X - 5 && x <= CASTLE_KEEP_X + 5 &&
-                    y >= CASTLE_KEEP_Y - 3 && y <= CASTLE_KEEP_Y + 6) {
-                    h = PX(28); /* Keep hill — throne/library/observatory */
-                } else if (x >= 120 && x <= 138 && y >= 16 && y <= 26) {
-                    h = PX(16); /* Upper courtyard terrace */
-                } else if (x >= 118 && x <= 140 && y >= 26 && y <= 38) {
-                    h = PX(6);  /* Outer courtyard slight rise */
-                } else if (x >= 114 && x <= 142 && y >= 38 && y <= 44) {
-                    h = PX(0);  /* Lower courtyard / gatehouse apron */
-                }
-                w->height[y][x] = (Sint8)h;
+        for (x = CASTLE_SWEEP_X0; x < CASTLE_SWEEP_X1; x++) {
+            int h;
+            if (!castle_island_tile(x, y))
+                continue;
+            {
+                int t = castle_tier(x, y);
+                /* A flight sits at the level it descends TO, so the step is at
+                 * the head of the stair where the sprite covers it, rather than
+                 * at its foot where the player would appear to walk into a
+                 * wall. */
+                if (t > CT_SHORE && castle_stair_tile(x, y))
+                    t--;
+                h = castle_tier_h[t];
             }
+            /* THE defect this rewrite exists for. The previous version assigned
+             * a terrace height to every island tile unconditionally, including
+             * the SURF_ROCK walls — erasing the chamfer height world_heights
+             * had just given them. Their neighbours then sat at the same
+             * height, iso_tile computed hl == hr == 0, and every wall on the
+             * island rendered as a flat grey stripe painted on the grass while
+             * still being solid. That single line is most of what "the castle
+             * has no hierarchy" was describing.
+             *
+             * UNLESS a baked sprite is the structure here — the coast cliffs and
+             * the bare terrace revetments are drawn by the rasteriser and need
+             * the rise; a curtain wall or a keep is drawn by its own sprite and
+             * must stand on FLAT ground, or the extrusion and the sprite each
+             * draw a wall and the result is a rampart of stacked bricks three
+             * tiles tall. Exactly the rule world_heights already applies to a
+             * building footprint whose building is a baked sprite. */
+            if (w->solid[y][x] && !castle_sprite_tile(x, y))
+                h += CASTLE_WALL_RISE;
+            w->height[y][x] = (Sint8)h;
+        }
+
+    /* The causeway deck. Not an island tile — the span runs out over open water
+     * — so world_heights owns it through the same `bridge` branch that decks an
+     * ordinary river crossing, and agrees with this loop at 0.
+     *
+     * Kept anyway, and not redundant: apply_restore opens the causeway and calls
+     * this immediately, a tick before sim_step re-runs world_heights. Without
+     * these lines the deck would draw for one frame at the height it had while
+     * it was still ocean — ELEV_WATER minus up to three shelf steps, about 9 px
+     * BELOW the ground plane. A one-frame sunken bridge at the exact moment the
+     * player has just earned it is worth four lines. */
+    for (y = CASTLE_CAUSEWAY_Y - 1; y <= CASTLE_CAUSEWAY_Y + 1; y++)
+        for (x = CASTLE_CAUSEWAY_X0; x < CASTLE_CAUSEWAY_X1; x++) {
+            if (x < 0 || x >= WORLD_W || y < 0 || y >= WORLD_H)
+                continue;
+            if (w->bridge[y][x])
+                w->height[y][x] = 0;
+        }
 }
 
 /* Carve rivers from the interior to the sea, and deck them with bridges.
@@ -2962,6 +3385,14 @@ static void apply_restore(Game *g, int i)
     if (i == WELL_SOUL_IDX) {
         g->has_castle_key = 1;
         castle_apply_layout(&g->w, 1);
+        /* BOTH, always. This used to call layout alone, so the only path that
+         * opens the causeway in real play left its deck at the sea-floor height
+         * world_heights had given it while it was ocean. --dev and game_load
+         * both already called the pair, which is exactly why the sunken deck
+         * never showed up in a scripted capture: every screenshot of an open
+         * causeway had been taken through one of the two paths that were
+         * right. Four call sites now, one behaviour. */
+        castle_apply_heights(&g->w);
     }
     /* When the last entity is restored, queue global clear for any
      * remaining regions so the whole map fades in via the same cluster
@@ -3086,16 +3517,8 @@ static void sim_step(Game *g, const Input *in, float dt)
      * actually thinking in, then map it. Deriving facing from (mx,my) instead would have every
      * key produce a diagonal, because that is what a screen axis becomes in world space.
      *
-     * The dominant axis wins, so eight movement directions collapse to the four the art has.
-     * Ties favour the vertical, which keeps a pure diagonal showing the front/back views where
-     * the character reads best.
-     *
      * Purely visual: nothing below is read by movement, collision or the verifier. */
     if (len > 0.0f) {
-        if (SDL_fabsf(sx) > SDL_fabsf(sy))
-            g->p.facing = (Uint8)(sx > 0.0f ? FACE_RIGHT : FACE_LEFT);
-        else
-            g->p.facing = (Uint8)(sy > 0.0f ? FACE_FRONT : FACE_BACK);
         g->p.facing6 = (Uint8)facing6_from_intent(sx, sy);
 
         /* The walk phase advances ONLY while there is movement intent, and is deliberately NOT
@@ -3201,6 +3624,22 @@ static void sim_step(Game *g, const Input *in, float dt)
             if (any) { g->region_revealing[i] = 1; g->region_reveal_prog[i] = 0.0f; }
         }
     }
+
+    /* Building footprints re-flatten the instant a region crosses into phase 3 (restoration hits
+     * 1.0, building_sprite_id starts returning a real sprite instead of ART_NONE) — world_heights
+     * asks that same function, so it has to be re-run whenever the answer could have changed.
+     * Restoration is eased above (never a single-frame jump outside dev-unlock/load, both of
+     * which also flow back through here), so re-deriving it once per tick is simplest and
+     * provably correct for every path that can move it, rather than hunting down each call site
+     * that sets `restoration` and hoping none are missed — the mistake that caused the
+     * "levitating houses" regression this exact spot already had once. Cheap: two flat passes
+     * over the grid, the same class of cost `region_revealing` above already pays per tick
+     * while a region is mid-reveal.
+     *
+     * world_heights, not world_heights_all: Aetherhold's terraces are authored
+     * and world_heights leaves island tiles alone, so re-deriving them here
+     * would only re-do thousands of ring scans to arrive at the same answer. */
+    world_heights(&g->w);
 }
 
 /* Flood-fill the open region containing (sx,sy). Returns its tile count and,
@@ -3272,12 +3711,40 @@ static const short art_bld_large[] = {
     ART_BLD_LARGE_BUILDING, ART_BLD_WINDMILL
 };
 
-static int building_sprite_id(const Building *b)
+/* Pure predicate: 0 = walls only, 1 = partial roof, 2 = full roof + facade,
+ * 3 = baked sprite. Bands chosen to give a visible sequence as restoration
+ * eases from 0 to 1 — see design/phases/Phase 09 - Placeholder Art.md. */
+static int bld_phase(float r)
+{
+    if (r < 0.0f) r = 0.0f;
+    if (r < 0.4f) return 0;
+    if (r < 0.7f) return 1;
+    if (r < 1.0f) return 2;
+    return 3;
+}
+
+static float building_restoration(const World *w, const Building *b)
+{
+    if (b->region >= REGION_COUNT)
+        return 0.0f;
+    return w->regions[b->region].restoration;
+}
+
+/* building_sprite_id is THE single decision of whether a building is drawn as a baked sprite or
+ * the procedural ruin-to-whole rebuild — every caller (draw_building, world_heights, tile_colour)
+ * asks this one function and agrees with it by construction, rather than each re-deriving the
+ * phase gate and risking disagreement (which is exactly what "levitating houses" was: two
+ * call sites that had drifted apart on the same question). Returns ART_NONE below phase 3 so the
+ * procedural path — walls via the tile pass's own extrusion, roof/facade drawn by draw_building —
+ * takes over, matching every caller's already-written ART_NONE handling. */
+static int building_sprite_id(const World *w, const Building *b)
 {
     /* Bits 12+ of the variant: the low bits already drive the procedural wall/roof choices, and
      * reusing them would tie which sprite appears to a palette that is no longer drawn. */
     Uint32 pick = (b->variant >> 12) & 0xFFu;
 
+    if (bld_phase(building_restoration(w, b)) < 3)
+        return ART_NONE;
     if (b->w * b->h <= 4)
         return art_bld_small[pick % (Uint32)(sizeof art_bld_small / sizeof *art_bld_small)];
     return art_bld_large[pick % (Uint32)(sizeof art_bld_large / sizeof *art_bld_large)];
@@ -3320,9 +3787,46 @@ static void world_heights(World *w)
             dist[y][x] = (Uint8)d;
         }
 
-    for (y = 0; y < WORLD_H; y++)
+    for (y = 0; y < WORLD_H; y++) {
+        /* The island's x span on THIS row, hoisted out of the inner loop.
+         *
+         * castle_island_tile is exactly this span test, so the two are
+         * identical by construction — but this runs once per tick from sim_step
+         * over 25,748 tiles, and at -Os the call did not inline. An empty span
+         * (0..-1) on the other 115 rows makes the test two integer comparisons
+         * that are always false, which is the one place in this file where that
+         * kind of care is worth the loss of a named predicate. */
+        int cl = 0, cr = -1;
+        if (y >= CASTLE_RESERVE_Y0 && y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H) {
+            cl = castle_left[y - CASTLE_RESERVE_Y0];
+            cr = castle_right[y - CASTLE_RESERVE_Y0];
+        }
         for (x = 0; x < WORLD_W; x++) {
             int h;
+            /* Aetherhold's terraces are AUTHORED, by castle_apply_heights, and
+             * this is what lets them survive.
+             *
+             * The alternative was to re-stamp them after every call to this
+             * function, which is how they were lost in the first place: sim_step
+             * re-derives heights once per tick to keep restored building
+             * footprints flat, and it called world_heights alone — so the
+             * terraces existed for exactly one frame per world. Pairing the two
+             * calls fixed the flattening but made the per-tick cost enormous,
+             * because deriving a castle tile's tier walks a ring scan and there
+             * are about fourteen hundred of them.
+             *
+             * Skipping them here fixes both at once, and fixes them
+             * STRUCTURALLY: world_heights can no longer overwrite the castle by
+             * accident from any call site, present or future, so
+             * castle_apply_heights only has to run when the castle itself
+             * changes — generation, the causeway unlock, and save load. Costs
+             * one predicate per tile per tick against thousands of ring scans.
+             *
+             * The causeway deck is deliberately NOT excluded: it is not an
+             * island tile, and the `bridge` branch below already pins it to
+             * ground level, which is exactly what it needs. */
+            if (x >= cl && x <= cr)
+                continue;
             if (w->bld_at[y][x]) {
                 /* Walls, not rock. The tile rasteriser then draws this tile's front faces at
                  * wall height, which IS the wall — no separate wall-drawing code exists
@@ -3345,7 +3849,7 @@ static void world_heights(World *w)
                  * Still render-only: `height` has never been a collision input, and the tiles
                  * remain `solid` either way, so nothing about reachability moves. */
                 const Building *bb = &w->bld[w->bld_at[y][x] - 1];
-                h = (building_sprite_id(bb) == ART_NONE)
+                h = (building_sprite_id(w, bb) == ART_NONE)
                         ? WALL_BASE + bb->levels * STOREY_H
                         : 0;
             } else if (w->surf[y][x] == SURF_OCEAN) {
@@ -3416,6 +3920,25 @@ static void world_heights(World *w)
             }
             w->height[y][x] = (Sint8)h;
         }
+    }
+}
+
+/* Both height passes, for the three places that need the castle (re)stamped as
+ * well as the world derived: generation, the causeway unlock, and save load.
+ *
+ * sim_step deliberately does NOT use this — it calls world_heights alone, once
+ * per tick, and the castle survives because world_heights now skips island
+ * tiles outright (see the note at the top of its loop). That is the cheap half
+ * of the fix; this is the half that puts the terraces there to begin with.
+ *
+ * Kept as its own name rather than inlining the two calls at each site because
+ * the ORDER matters and had already been got wrong: game_load ran
+ * castle_apply_heights first and world_heights second, so a loaded save
+ * flattened a castle that a generated one kept. One name, one order. */
+static void world_heights_all(World *w)
+{
+    world_heights(w);
+    castle_apply_heights(w);
 }
 
 /* Out-of-world reads as ground level, so border tiles draw their full front
@@ -3712,8 +4235,7 @@ static int game_init(Game *g, Rngs *rngs)
     /* Last, and after terrain assignment: purely derived, purely for drawing.
      * The pathological-seed early return above leaves height all zeros courtesy
      * of the SDL_zero at the top, which draws flat and is correct. */
-    world_heights(&g->w);
-    castle_apply_heights(&g->w);
+    world_heights_all(&g->w);
 
     g->seed = rngs->seed;
     g->cam_x = 0;
@@ -3904,12 +4426,20 @@ static int game_load(Game *g, Rngs *rngs, const char *path, Uint64 *seed_out)
     tmp->has_castle_key = has_castle_key;
     if (restored & (1u << WELL_SOUL_IDX)) tmp->has_castle_key = 1;
     castle_apply_layout(&tmp->w, tmp->has_castle_key);
-    castle_apply_heights(&tmp->w);
     /* Snap the eased floats to their targets — mid-ease values are animation,
      * not progress — and rebuild the fog reveal as one instant of standing at
      * the saved position (the same taper reveal_around converges to). */
     for (i = 0; i < tmp->w.region_count; i++)
         tmp->w.regions[i].restoration = tmp->w.regions[i].restore_to;
+    /* game_init's call to world_heights_all ran while every region was still at restoration 0, so
+     * any region snapped straight to phase 3 above needs its building footprints re-flattened
+     * before the first frame renders — sim_step would catch this on the next tick regardless, but
+     * a loaded game should look right on the very first frame, not one tick late.
+     *
+     * This used to be a bare world_heights preceded, twenty lines up, by a bare
+     * castle_apply_heights — the pair in the wrong order, so loading a save flattened Aetherhold
+     * even when generating it had not. Both are now this one call. */
+    world_heights_all(&tmp->w);
     {
         int cx = (int)(px / TILE), cy = (int)(py / TILE);
         int r = REVEAL_TILES, tx, ty;
@@ -4737,6 +5267,29 @@ static const Uint8 stone_ramp[3][3] = {
     {0x36,0x34,0x42}, {0x40,0x3e,0x4a}, {0x4a,0x48,0x55}
 };
 
+/* Aetherhold's ground, one entry per CT_* terrace. Indexed by castle_tier, so
+ * the palette climbs with the architecture instead of needing its own rectangles.
+ *
+ * CONSTANT VALUE, VARYING HUE — and that is a constraint, not a style choice.
+ * Decision 42 says a raised surface must not out-value the ground it stands in,
+ * and the castle's walls are drawn from stone_ramp, which tops out at luminance
+ * 74. Sage grass sits at 78. So every entry here has to land in that 4-point
+ * window or a courtyard wall starts floating out of its own courtyard the way
+ * outcrops used to float out of the meadow. Four points of value is nothing to
+ * read a five-level hierarchy by, so the climb is expressed as a hue walk —
+ * green thinning to grey to a cold keep stone — and the LEVELS are read from
+ * the cliff and retaining-wall faces castle_apply_heights now draws.
+ *
+ * --fog-test asserts the window rather than trusting this comment. */
+static const Uint8 castle_ground[CT_COUNT][3] = {
+    {0x3e,0x5c,0x35}, /* CT_SEA   — never drawn; sage, so a bug reads as ground */
+    {0x4a,0x52,0x38}, /* CT_SHORE — grass thinning into rock                    */
+    {0x4c,0x50,0x42}, /* CT_OUTER — overgrown outer courtyard                   */
+    {0x50,0x4e,0x46}, /* CT_INNER — moss over old paving                        */
+    {0x50,0x4d,0x4a}, /* CT_UPPER — swept paving                               */
+    {0x52,0x4c,0x4e}  /* CT_KEEP  — the keep's own cold stone                   */
+};
+
 /* ---- the dream realm's colour, in one function ---------------------------- Phase 12 task 6.
  *
  * THE definition of what the dream biome looks like. tools/bake.ps1 carries the identical formula
@@ -5012,7 +5565,8 @@ static int prop_covers_player(int band, int pband,
  * `fade` non-zero draws the sprite at half weight against what is already in the framebuffer,
  * which is how decision 40's prop ghosting is expressed. The player is drawn in an earlier band,
  * so "what is already there" IS her — no second pass and no z-buffer. */
-static void draw_sprite_fade(SDL_Surface *fb, int id, int cx, int by, float rev, int fade)
+static void draw_sprite_ex(SDL_Surface *fb, int id, int cx, int by, float rev,
+                           int fade, int flip)
 {
     const ArtSprite *sp;
     Uint32 pal[ART_PAL_MAX];
@@ -5057,7 +5611,12 @@ static void draw_sprite_fade(SDL_Surface *fb, int id, int cx, int by, float rev,
         for (k = 0; k < count && y < sp->h; k++) {
             unsigned char v = literal ? ART_DATA[i + k] : idx;
             if (v) {
-                int px = x0 + x, py = y0 + y;
+                /* Mirrored about the sprite's own box, so the anchor — which is
+                 * its bottom CENTRE by the bake's contract — lands on the same
+                 * ground point either way and a flipped module still stands
+                 * where it was placed. */
+                int px = flip ? (x0 + (int)sp->w - 1 - x) : (x0 + x);
+                int py = y0 + y;
                 if (px >= 0 && py >= 0 && px < fb->w && py < fb->h) {
                     Uint32 *d = (Uint32 *)((Uint8 *)fb->pixels + py * fb->pitch + px * 4);
                     if (fade) {
@@ -5086,7 +5645,28 @@ static void draw_sprite_fade(SDL_Surface *fb, int id, int cx, int by, float rev,
 /* The opaque spelling, which is what almost every caller wants. */
 static void draw_sprite(SDL_Surface *fb, int id, int cx, int by, float rev)
 {
-    draw_sprite_fade(fb, id, cx, by, rev, 0);
+    draw_sprite_ex(fb, id, cx, by, rev, 0, 0);
+}
+
+static void draw_sprite_fade(SDL_Surface *fb, int id, int cx, int by, float rev, int fade)
+{
+    draw_sprite_ex(fb, id, cx, by, rev, fade, 0);
+}
+
+/* Mirrored about the vertical axis.
+ *
+ * Aetherhold's wall modules were authored running along ONE isometric axis —
+ * the +x diagonal, down-and-right on screen — but a wall RING necessarily runs
+ * along both. Without a mirror, half of every ring would have to fall back to
+ * the omnidirectional pieces (towers, rubble), which is how a fortress ends up
+ * looking like a pile of towers.
+ *
+ * A blit-time flip rather than a second baked sprite per module: mirroring is
+ * exact and free, where baking the other hand of eleven wall pieces would cost
+ * about 20 KB of shipped data to say something the RLE stream already says. */
+static void draw_sprite_flip(SDL_Surface *fb, int id, int cx, int by, float rev)
+{
+    draw_sprite_ex(fb, id, cx, by, rev, 0, 1);
 }
 
 
@@ -5656,25 +6236,6 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, Uint32 *hout)
  * is the seam bug class this project already decided to avoid once. Roof shape
  * varies by how many steps it takes and how fast it narrows. */
 
-/* Pure predicate: 0 = walls only, 1 = partial roof, 2 = full roof + facade,
- * 3 = baked sprite. Bands chosen to give a visible sequence as restoration
- * eases from 0 to 1 — see design/phases/Phase 09 - Placeholder Art.md. */
-static int bld_phase(float r)
-{
-    if (r < 0.0f) r = 0.0f;
-    if (r < 0.4f) return 0;
-    if (r < 0.7f) return 1;
-    if (r < 1.0f) return 2;
-    return 3;
-}
-
-static float building_restoration(const World *w, const Building *b)
-{
-    if (b->region >= REGION_COUNT)
-        return 0.0f;
-    return w->regions[b->region].restoration;
-}
-
 /* Phase 10 task 4: chimney smoke. A few small puffs that rise, drift sideways
  * and thin, all a pure function of (building hash, clock) — never the RNG
  * stream, decision 14. The count against restoration:
@@ -5712,8 +6273,7 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
     const Uint8 *wp = wall_pal[BV_WALL(v)];
     int cx, cy, wall = WALL_BASE + b->levels * STOREY_H;
     int rw, steps, k, pitch;
-    float rst = building_restoration(w, b);
-    int phase = bld_phase(rst);
+    int phase = bld_phase(building_restoration(w, b));
 
     /* Centre of the footprint in world px, projected.
      *
@@ -5743,10 +6303,11 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
      * no correction. Anything that adds one here is wrong — that is exactly the +ISO_HH mistake
      * described above, which put every roof half a tile off its own walls for four sessions.
      *
-     * Phase 09 restoration rebuild: the baked sprite only appears at full restoration (phase 3).
-     * Below that, the procedural path below draws the ruin state with parts suppressed. */
+     * Phase 09 restoration rebuild: the baked sprite only appears at full restoration (phase 3) —
+     * building_sprite_id returns ART_NONE below that, so this branch cannot be taken early. Below
+     * phase 3, the procedural path below draws the ruin state with parts suppressed. */
     {
-        int art = building_sprite_id(b);
+        int art = building_sprite_id(w, b);
         if (art != ART_NONE) {
             const ArtSprite *sp = &ART_SPRITES[art];
             /* Ground centre, with NO correction. world_heights flattens this footprint (it asks
@@ -5754,9 +6315,9 @@ static void draw_building(SDL_Surface *fb, const World *w, const Building *b,
              * ground-contact point draw_sprite wants. Subtracting `wall` here is what put every
              * cottage on a visible packed-earth plinth. */
             draw_sprite(fb, art, cx, cy, rev);
-            /* Smoke over the sprite's roof ridge, counted against restoration. */
-            draw_smoke(fb, cx + (int)(v & 3) - 1, cy - sp->anchor_y,
-                       v, t, rev, (phase >= 3) ? 2 : 0);
+            /* Smoke over the sprite's roof ridge: this branch only draws at phase 3, so the
+             * chimney is always working full-time here — two puffs, unconditionally. */
+            draw_smoke(fb, cx + (int)(v & 3) - 1, cy - sp->anchor_y, v, t, rev, 2);
             return;
         }
     }
@@ -5994,6 +6555,320 @@ static const PropArt prop_art_dream[] = {
     { NULL,              0 }                                         /* PROP_STUMP   */
 };
 
+/* --- Aetherhold, as architecture ------------------------------------------
+ *
+ * Everything below turns the tier/wall/stair predicates into modules. The rule
+ * throughout: GEOMETRY decides what a piece IS, and only then does the hash
+ * decide which variant of it stands there. A corner is a corner on every seed;
+ * whether a straight run is intact, cracked or half-collapsed is not. Getting
+ * that backwards is how the previous pass ended up scattering keeps and chapels
+ * by hash roll, and why it was replaced with a single monolithic sprite.
+ *
+ * Sprite ids only — no drawing — so the render dispatch stays a flat sequence
+ * of "ask, then blit" and these can be exercised without a framebuffer.
+ */
+
+/* The module standing on a wall tile. `*flip` is set for runs along +y, so the
+ * mirrored half of every ring gets the mirrored module — the pieces were
+ * authored along the world +x diagonal (down-and-right on screen).
+ *
+ * The four neighbours are classified ONCE, into the three answers this function
+ * needs, rather than by calling castle_wall_tile and castle_stair_tile
+ * separately for each. Those two share a rim test that walks five tiers, and
+ * each tier walks a ring scan — asking them independently evaluated the tier
+ * about seventy times per wall tile per frame, where twenty-four is enough.
+ * The shape of the code is also honest about what is going on: wall and stair
+ * PARTITION the rim, so they are one classification and not two questions. */
+static int castle_wall_art(Uint64 seed, int tx, int ty, int *flip)
+{
+    static const int ndx[4] = { -1, 1,  0, 0 };
+    static const int ndy[4] = {  0, 0, -1, 1 };
+    Uint32 h = tile_hash(seed, tx, ty);
+    int t = castle_tier(tx, ty);
+    int nx = 0, ny = 0, gate = 0, i, roll;
+
+    for (i = 0; i < 4; i++) {
+        int ax = tx + ndx[i], ay = ty + ndy[i];
+        if (!castle_rim_tile(ax, ay))
+            continue;
+        if (castle_proc_tile(ax, ay, 2)) {
+            gate = 1;                                  /* a flight next door */
+        } else if (castle_walled_ring(castle_tier(ax, ay))) {
+            if (ndy[i] == 0) nx = 1;                   /* the run continues in x */
+            else             ny = 1;                   /* ...or in y */
+        }
+    }
+
+    *flip = ny && !nx;
+
+    /* Flanking a flight: the gatehouse, so a stair always arrives at a doorway
+     * rather than at a gap in a fence. Never mirrored — the piece is
+     * symmetrical enough that a flip reads as a second, different gatehouse. */
+    if (gate) {
+        *flip = 0;
+        return ART_CASTLE_WALL_GATEHOUSE;
+    }
+
+    /* The ring turns here. Towers go on corners because that is where they went
+     * — a bastion covers the angle — and it also spaces them naturally instead
+     * of needing a "every Nth tile" rule that would march out of step with an
+     * irregular contour. */
+    if (nx && ny) {
+        *flip = 0;
+        if ((h & 3) == 0)
+            return (t >= CT_UPPER) ? ART_CASTLE_WALL_SQUARE_TOWER
+                                   : ART_CASTLE_WALL_GUARD_TOWER;
+        return (t >= CT_INNER) ? ART_CASTLE_WALL_TALL_CORNER
+                               : ART_CASTLE_WALL_CORNER;
+    }
+
+    /* A straight run, and the one place the hash is allowed an opinion.
+     * Ruination falls off as you climb: the outer defences went first, and the
+     * keep's own wall is the last thing still standing. That is environmental
+     * storytelling for the price of adding the tier to the roll. */
+    roll = (int)((h >> 6) & 15) + (t - CT_OUTER) * 3;
+    return (roll < 2) ? ART_CASTLE_WALL_RUBBLE
+         : (roll < 5) ? ART_CASTLE_WALL_RUINED
+         : (roll < 7) ? ART_CASTLE_WALL_MEDIUM  /* the arched postern; rare on purpose */
+                      : ART_CASTLE_WALL_STRAIGHT;
+}
+
+/* The flight itself. Four authored stairs, picked by how big a step this one
+ * spans rather than at random, so a tall terrace gets the tall flight. */
+static int castle_stair_art(int tx, int ty)
+{
+    int t = castle_tier(tx, ty);
+
+    return (t >= CT_UPPER) ? ART_CASTLE_STAIR_03
+         : (t == CT_INNER) ? ART_CASTLE_WALL_STAIRS
+         : (t == CT_OUTER) ? ART_CASTLE_STAIR_02
+                           : ART_CASTLE_STAIR_06;
+}
+
+/* --- The causeway ----------------------------------------------------------
+ *
+ * The deck itself is NOT a sprite. It is the plank colour tile_colour already
+ * gives every `bridge` tile, which is what makes the span continuous at any
+ * length; the modules below are landmarks placed ON it.
+ *
+ * That is the whole correction. The delivered causeway art is a set of complete
+ * little bridge SCENES — each with its own abutments and its own water — not
+ * tileable segments, and each is about four tile-diamonds wide. Repeating one
+ * per tile is what produced fifteen overlapping copies of a stone arch in a row
+ * and the "disconnected modules" the review describes. Placed as landmarks at
+ * intentional points along a continuous deck, the same art reads as one
+ * structure with incident along it.
+ *
+ * Returns ART_NONE for the ordinary run of the deck, which is most of it. */
+static int causeway_art(int tx, int ty)
+{
+    int i = tx - CASTLE_CAUSEWAY_X0;
+    int n = CASTLE_CAUSEWAY_X1 - CASTLE_CAUSEWAY_X0;
+
+    if (ty != CASTLE_CAUSEWAY_Y)
+        return ART_NONE;                     /* the forecourt shoulders stay clear */
+    if (i == 1)
+        return ART_CASTLE_STAIR_03;          /* the ramp up off the mainland gate */
+    if (i == n / 2)
+        return ART_CASTLE_BRIDGES_CAUSEWAY_3; /* the great arch, mid-channel      */
+    if (i == n - 3)
+        return ART_CASTLE_BRIDGE_01;         /* the near tower, before the gate   */
+    /* Parapet posts, spaced so they read as a rhythm rather than as a fence.
+     * Offset off the arch so a post never lands inside it. */
+    if (i > 2 && i < n - 4 && i % 4 == 3 && i != n / 2)
+        return ART_CASTLE_WALL_NARROW_PILLAR;
+    return ART_NONE;
+}
+
+/* --- Aetherhold's dressing -------------------------------------------------
+ *
+ * Called ONLY from the render dispatch, never from prop_at, and that is a
+ * deliberate constraint rather than a convenience.
+ *
+ * prop_at feeds entity_min_dist, which scores candidate fragment and Soul
+ * placements — so changing what it returns can move entities, which moves what
+ * the 50-seed playthrough proof is proving. Aetherhold's decoration has no
+ * business perturbing that. Leaving prop_at's blanket veto on island tiles in
+ * place and adding a second, render-only source of props keeps every seeded
+ * result in the suite bit-identical to before this region was dressed.
+ *
+ * Everything here is a pure function of (seed, tx, ty) through tile_hash — the
+ * stateless finisher, never an RNG stream — for the same reason all the other
+ * decoration is: it can then never shift generation, and every seeded proof
+ * stays valid by construction rather than by re-running and hoping.
+ *
+ * Returns ART_NONE for most tiles. The brief was "reduce empty grass, increase
+ * environmental density", and the first attempt took that literally at
+ * 22/6/9 percent — which carpeted every courtyard wall to wall. The rates below
+ * are what survived looking at it. See the note on the courtyard branch. */
+/* Barrels, crates, rubble and fallen masonry. prop_04, _06 and _09 are
+ * deliberately absent and dropped from the bake with them: all three have a LIT
+ * fire authored into the sprite, and a castle the phase spec describes as
+ * abandoned cannot have forty campfires burning in its courtyards. */
+static const short castle_decor_ruin[] = {
+    ART_CASTLE_PROP_02, ART_CASTLE_PROP_03, ART_CASTLE_PROP_05,
+    ART_CASTLE_PROP_07, ART_CASTLE_PROP_10, ART_CASTLE_PROP_11,
+    ART_CASTLE_PROP_12
+};
+static const short castle_decor_shore[] = {
+    ART_CASTLE_ROCK_03, ART_CASTLE_ROCK_04, ART_CASTLE_ROCK_05,
+    ART_CASTLE_ROCK_MOSSY, ART_BUSH_SMALL_01, ART_GRASS_TUFT_01
+};
+static const short castle_decor_dead[] = {
+    ART_AETHER_TREE_DEAD_02, ART_AETHER_TREE_DEAD_05, ART_AETHER_TREE_DEAD_07
+};
+
+static int castle_decor_at(const World *w, Uint64 seed, int tx, int ty)
+{
+    Uint32 h = tile_hash(seed, tx, ty);
+    int roll = (int)((h >> 8) & 31);
+    int t;
+
+    /* Never on anything with its own job: a wall, a flight, a building, or the
+     * lane the player walks. A barrel in a doorway is not storytelling. */
+    if (w->solid[ty][tx] || w->path[ty][tx] || castle_stair_tile(tx, ty))
+        return ART_NONE;
+
+    t = castle_tier(tx, ty);
+
+    /* Lanterns and banners line the ROUTE, not the courtyards. Both pieces are
+     * free-standing posts rather than wall segments, so putting them in a wall
+     * run would punch a hole in it; beside the road they do the job the review
+     * asks of them — the approach to the keep reads as processional, and a
+     * player who has just crossed the causeway has something to follow. */
+    if (t >= CT_OUTER && !castle_proc_tile(tx, ty, 1)
+        && castle_proc_tile(tx, ty, 2) && (roll & 3) == 0)
+        return ((h >> 17) & 1) ? ART_CASTLE_WALL_LANTERN_POST
+                               : ART_CASTLE_WALL_BANNER;
+
+    if (t >= CT_OUTER) {
+        /* Inside the walls: stone, rubble, the leavings of people who left in a
+         * hurry. A dead tree every so often, because the one thing a courtyard
+         * has that a corridor does not is something that used to be a garden.
+         *
+         * RETUNED DOWN, hard, after looking at it. The first pass ran these at
+         * 22/6/9 percent and carpeted every courtyard wall-to-wall — the same
+         * mistake, and the same cause, as the tree rate when props first became
+         * baked sprites in Phase 07: a rate that reads as "scattered" for a
+         * 20 px procedural blob reads as "solid" once the art is real and two
+         * tiles wide. Density had to follow the art then too. */
+        if (roll < 2)
+            return castle_decor_ruin[(h >> 3) % (Uint32)(sizeof castle_decor_ruin
+                                                         / sizeof *castle_decor_ruin)];
+        /* Dead trees only in the OUTER courtyard, and rarely. They are the
+         * largest and darkest thing in the dressing set, so a few of them read
+         * as an overgrown outer ward while the same rate on the upper terraces
+         * turned the keep's own courtyard into a wood. */
+        if (t == CT_OUTER && roll < 3)
+            return castle_decor_dead[(h >> 13) % (Uint32)(sizeof castle_decor_dead
+                                                          / sizeof *castle_decor_dead)];
+        if (roll < 5)
+            return ART_GRASS_TUFT_01;   /* weeds through the paving */
+        return ART_NONE;
+    }
+    /* Outside them: the island's own rock and scrub, thickening toward the
+     * waterline where castle_apply_layout leaves a walkable rocky beach. */
+    if (roll < (castle_inset(tx, ty) <= 2 ? 5 : 3))
+        return castle_decor_shore[(h >> 3) % (Uint32)(sizeof castle_decor_shore
+                                                      / sizeof *castle_decor_shore)];
+    return ART_NONE;
+}
+
+/* The abandoned camp on the mainland approach — the review's "the bridge should
+ * feel earned".
+ *
+ * Hand-placed rather than scattered, because this is a vignette and not a
+ * texture: somebody waited here, in sight of the causeway, and did not go
+ * across. Four props is enough to say that; a procedural sprinkle of the same
+ * four says nothing.
+ *
+ * Offsets from the watchtower, so the camp moves with it rather than needing a
+ * second set of coordinates kept in step by hand — the whole reason
+ * CASTLE_WATCHTOWER_X/Y are named constants in the first place. */
+static const struct { signed char dx, dy; short art; } castle_camp[] = {
+    { -2,  1, ART_CASTLE_PROP_03 },   /* barrels, tipped over          */
+    {  2,  2, ART_CASTLE_PROP_07 },   /* a crate, still stacked        */
+    {  3, -1, ART_AETHER_TREE_DEAD_05 },
+    { -3, -2, ART_CASTLE_ROCK_04 }
+};
+#define CASTLE_CAMP_N ((int)(sizeof castle_camp / sizeof *castle_camp))
+
+static int castle_camp_at(int tx, int ty)
+{
+    int i;
+
+    for (i = 0; i < CASTLE_CAMP_N; i++)
+        if (tx == CASTLE_WATCHTOWER_X + castle_camp[i].dx &&
+            ty == CASTLE_WATCHTOWER_Y + castle_camp[i].dy)
+            return castle_camp[i].art;
+    return ART_NONE;
+}
+
+/* The sea around Aetherhold, which was four thousand tiles of flat blue with an
+ * occasional village bush floating in it.
+ *
+ * Two bands. At the waterline — the ring of ocean actually touching the cliff —
+ * the delivered shore and foam pieces, so the coast has a surf line instead of a
+ * hard edge between rock and blue. Further out, sparse rock stacks and islets,
+ * which is what gives a large body of water any sense of scale at all.
+ *
+ * RENDER-ONLY, and that matters: none of this writes `solid`, so no islet can
+ * accidentally become a stepping stone across the channel and quietly undo the
+ * water-lock --aether-test exists to prove. */
+static int castle_sea_at(const World *w, Uint64 seed, int tx, int ty, int *fade)
+{
+    Uint32 h = tile_hash(seed, tx, ty);
+    int roll = (int)((h >> 8) & 63);
+    int touch = castle_island_tile(tx + 1, ty) || castle_island_tile(tx - 1, ty)
+             || castle_island_tile(tx, ty + 1) || castle_island_tile(tx, ty - 1);
+    int near = touch
+            || castle_island_tile(tx + 2, ty) || castle_island_tile(tx - 2, ty)
+            || castle_island_tile(tx, ty + 2) || castle_island_tile(tx, ty - 2);
+    int dx = tx - CASTLE_KEEP_X, dy = ty - CASTLE_KEEP_Y;
+
+    *fade = 0;
+    if (w->bridge[ty][tx])
+        return ART_NONE;              /* never on the deck */
+
+    /* The dock, on the sheltered south shore, away from the causeway. One
+     * hand-placed landmark rather than a scattered chance: a boat is a story
+     * about somebody who left, and two of them on one coast tells it worse.
+     * ART_BLD_DOCK_ROWBOAT has been in the bake since Phase 07 with no caller. */
+    if (tx == CASTLE_DOCK_X && ty == CASTLE_DOCK_Y)
+        return ART_BLD_DOCK_ROWBOAT;
+
+    /* NO shore or foam TILES here, and that is a considered omission rather
+     * than an oversight. The pack ships shore_transition, shore_corner and a
+     * set of water_cube_* foam pieces, and they are exactly what the review
+     * asks for by name — but they are 64x64 isometric CUBES authored to BE a
+     * ground tile, against a renderer that rasterises its ground procedurally
+     * into a 36x18 diamond. Drawn as props at ocean height they stand in the
+     * water as half-sunk grass-topped blocks, and at ~1.8 tiles wide they merge
+     * into an unbroken green band that reads as a second cliff. Looked at, and
+     * rejected; they are not in the bake either.
+     *
+     * The grass -> rock -> cliff -> water transition the review wanted is real,
+     * but it is TERRAIN — the graded coast band in castle_apply_layout and the
+     * stepped sea floor in world_heights — not a sprite laid over the seam.
+     * What survives here is the part the pack's art is genuinely good at: rocks
+     * standing in water. */
+    if (touch)
+        return (roll < 4) ? ART_CASTLE_ROCK_MOSSY : ART_NONE;
+    if (near) {
+        if (roll < 3) return ART_CASTLE_ROCK_CLUSTER;
+        if (roll < 5) return ART_CASTLE_ROCK_MOSSY;
+        return ART_NONE;
+    }
+    /* Open water within sight of the island: sea stacks, drawn ghosted so they
+     * read as distance rather than as another obstacle. These are what give a
+     * large body of water any sense of scale at all. */
+    if (dx * dx + dy * dy < 1400 && roll < 3) {
+        *fade = 1;
+        return (roll & 1) ? ART_CASTLE_ROCK_TALL : ART_CASTLE_ROCK_01;
+    }
+    return ART_NONE;
+}
+
 /* Phase 10 task 2: the whole-tree sway offset, one formula shared by the draw
  * path and --motion-test so the bound is tested, not copied. Phase from hash
  * bits 27-31, which tile_hash's bit map reserved for exactly this; amplitude is
@@ -6137,7 +7012,7 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
 
     if (bi) {
         const Building *bb = &g->w.bld[bi - 1];
-        if (building_sprite_id(bb) != ART_NONE) {
+        if (building_sprite_id(&g->w, bb) != ART_NONE) {
             /* Grass, not packed earth. When a sprite is the whole building, world_heights has
              * flattened this tile, so it is now GROUND the house stands on rather than the wall's
              * own top face. A dedicated tan "yard" colour used to paint that footprint, and since
@@ -6196,6 +7071,16 @@ static void tile_colour(const Game *g, int tx, int ty, int overlay,
         else {
             *cr = p[0]; *cg = p[1]; *cb = p[2];
         }
+    } else if (castle_island_tile(tx, ty)) {
+        /* Open ground inside Aetherhold. Placed AFTER the `solid` branch on
+         * purpose: the island's cliffs and walls are stone like every other
+         * raised mass in the world and keep reading through stone_ramp, so this
+         * branch only ever colours the courtyards and the shore between them.
+         *
+         * No dream_shift — Aetherhold is in the overworld sector by
+         * construction (rows 2..43, and dream_palette starts at 97). */
+        const Uint8 *p = castle_ground[castle_tier(tx, ty)];
+        *cr = p[0]; *cg = p[1]; *cb = p[2];
     } else {
         Uint8 reg = g->w.region[ty][tx];
         terrain_colour(reg == REGION_NONE ? TERRAIN_NORMAL
@@ -6490,57 +7375,59 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                     }
                     continue;
                 }
-                if (castle_island_tile(tx, ty) || castle_causeway_tile(tx, ty)) {
+                /* The camp around the watchtower. Drawn before the ordinary prop
+                 * dispatch so a camped tile never also grows a tree. */
+                {
+                    int cid = castle_camp_at(tx, ty);
+                    if (cid != ART_NONE && !g->w.solid[ty][tx]) {
+                        float rev2 = tile_reveal(g, tx, ty, overlay);
+                        if (overlay || rev2 >= 0.06f) {
+                            int ay2 = band * ISO_HH + ISO_OY - g->cam_y;
+                            draw_sprite(fb, cid, ax,
+                                        ay2 + ISO_HH - g->w.height[ty][tx], rev2);
+                        }
+                        continue;
+                    }
+                }
+                /* Aetherhold, composed. Tested BEFORE the causeway so a tile
+                 * cannot be claimed twice — the previous version had the two
+                 * overlapping for nineteen tiles and let the island branch win,
+                 * which left most of the causeway's own sprite table dead. They
+                 * are now disjoint by construction (CASTLE_CAUSEWAY_X1 stops at
+                 * the waterline), and the order is kept explicit anyway. */
+                if (castle_island_tile(tx, ty)) {
                     int ax2 = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
                     int ay2 = band * ISO_HH + ISO_OY - g->cam_y;
                     int by2 = ay2 + ISO_HH - g->w.height[ty][tx];
                     float rev2 = tile_reveal(g, tx, ty, overlay);
+                    int bi = castle_bld_at(tx, ty);
                     if (overlay || rev2 >= 0.06f) {
-                        if (castle_island_tile(tx, ty)) {
-                            /* Single non-randomized castle asset — replaces all
-                             * previous modular wall/keep/chapel/tower scattering
-                             * which used h2 hash and hm variations. Only this
-                             * rect is not randomized (per your spec); approach
-                             * and causeway remain as before. Draw once at the
-                             * keep centre so its bottom aligns to the hill top
-                             * height. Other island tiles draw no additional
-                             * sprites — just the ground already rendered in the
-                             * first pass — so the asset is the whole castle. */
-                            if (tx == CASTLE_KEEP_X && ty == CASTLE_KEEP_Y) {
-                                draw_sprite(fb, ART_CASTLE_CASTLE_FULL_MULTITIER_V2, ax2, by2, rev2);
-                            }
-                        } else if (castle_causeway_tile(tx, ty)) {
-                            /* Stone causeway over water: deterministic (no h2)
-                             * per your "only castle not randomized" — fixed
-                             * sequence, no hash rolls. */
-                            if (g->has_castle_key) {
-                                int id;
-                                int mid = (CASTLE_CAUSEWAY_X0 + CASTLE_CAUSEWAY_X1) / 2;
-                                int row = CASTLE_CAUSEWAY_Y - CASTLE_RESERVE_Y0;
-                                int isWater = 0;
-                                if (row >= 0 && row < 42)
-                                    isWater = tx < castle_left[row];
-                                else
-                                    isWater = tx < 100;
-                                if (tx == CASTLE_CAUSEWAY_X0)
-                                    id = ART_CASTLE_STAIR_01;
-                                else if (tx == CASTLE_CAUSEWAY_X0 + 1)
-                                    id = ART_CASTLE_STAIRS_PLATFORMS_1;
-                                else if (tx == mid - 1 || tx == mid + 1)
-                                    id = ART_AETHER_BLD_TOWER_ROUND_RUINED;
-                                else if (tx == mid)
-                                    id = ART_CASTLE_BRIDGE_01;
-                                else if (tx == CASTLE_CAUSEWAY_X1 - 1)
-                                    id = ART_AETHER_BLD_GATEHOUSE_LARGE;
-                                else if (tx == CASTLE_CAUSEWAY_X1 - 2)
-                                    id = ART_CASTLE_WALL_STAIRS;
-                                else if (isWater)
-                                    id = ART_BLD_BRIDGE_STONE;
-                                else
-                                    id = ART_CASTLE_STAIRS_PLATFORMS_1;
+                        if (bi >= 0) {
+                            draw_sprite(fb, castle_bld[bi].art, ax2, by2, rev2);
+                        } else if (castle_wall_tile(tx, ty)) {
+                            int flip = 0;
+                            int id = castle_wall_art(g->seed, tx, ty, &flip);
+                            if (flip) draw_sprite_flip(fb, id, ax2, by2, rev2);
+                            else      draw_sprite(fb, id, ax2, by2, rev2);
+                        } else if (castle_stair_tile(tx, ty)) {
+                            draw_sprite(fb, castle_stair_art(tx, ty), ax2, by2, rev2);
+                        } else {
+                            int id = castle_decor_at(&g->w, g->seed, tx, ty);
+                            if (id != ART_NONE)
                                 draw_sprite(fb, id, ax2, by2, rev2);
-                            }
                         }
+                    }
+                    continue;
+                }
+                if (castle_causeway_tile(tx, ty)) {
+                    int ax2 = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
+                    int ay2 = band * ISO_HH + ISO_OY - g->cam_y;
+                    int by2 = ay2 + ISO_HH - g->w.height[ty][tx];
+                    float rev2 = tile_reveal(g, tx, ty, overlay);
+                    if (g->has_castle_key && (overlay || rev2 >= 0.06f)) {
+                        int id = causeway_art(tx, ty);
+                        if (id != ART_NONE)
+                            draw_sprite(fb, id, ax2, by2, rev2);
                     }
                     continue;
                 }
@@ -6548,27 +7435,19 @@ static void render(SDL_Surface *fb, Game *g, int overlay)
                  * in prop_at, so the shoreline enrichment does not mask it. */
                 if (g->w.bridge[ty][tx])
                     continue;
-                /* Water and shoreline enrichment: rocks, shallow, reeds, foam, docks */
+                /* The sea around Aetherhold — surf at the waterline, stacks and
+                 * islets further out. See castle_sea_at for why none of it is
+                 * allowed to touch `solid`. */
                 if (g->w.surf[ty][tx] == SURF_OCEAN) {
-                    int near_island = castle_island_tile(tx+1, ty) || castle_island_tile(tx-1, ty) ||
-                                      castle_island_tile(tx, ty+1) || castle_island_tile(tx, ty-1) ||
-                                      castle_island_tile(tx+2, ty) || castle_island_tile(tx-2, ty) ||
-                                      castle_island_tile(tx, ty+2) || castle_island_tile(tx, ty-2);
-                    int dist2 = (tx - CASTLE_KEEP_X)*(tx - CASTLE_KEEP_X) + (ty - CASTLE_KEEP_Y)*(ty - CASTLE_KEEP_Y);
                     float rev2 = tile_reveal(g, tx, ty, overlay);
-                    int ax2 = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
-                    int ay2 = band * ISO_HH + ISO_OY - g->cam_y;
-                    int by2 = ay2 + ISO_HH - g->w.height[ty][tx];
-                    Uint32 wh = tile_hash(g->seed, tx, ty);
                     if (overlay || rev2 >= 0.04f) {
-                        if (near_island) {
-                            /* Small shoreline props only — avoid large rectangular
-                             * shore tiles. Use existing small nature props. */
-                            if ((wh & 31) == 0) draw_sprite(fb, ART_ROCK_SMALL_01, ax2, by2, rev2);
-                            else if ((wh & 31) == 1) draw_sprite(fb, ART_BUSH_SMALL_01, ax2, by2, rev2);
-                        } else if (dist2 < 900 && (wh & 127) == 0) {
-                            int id = (wh & 1) ? ART_ROCK_SMALL_01 : ART_BUSH_SMALL_01;
-                            draw_sprite(fb, id, ax2, by2, rev2 * 0.8f);
+                        int fade2 = 0;
+                        int id = castle_sea_at(&g->w, g->seed, tx, ty, &fade2);
+                        if (id != ART_NONE) {
+                            int ax2 = (tx - ty) * ISO_HW + ISO_OX - g->cam_x;
+                            int ay2 = band * ISO_HH + ISO_OY - g->cam_y;
+                            int by2 = ay2 + ISO_HH - g->w.height[ty][tx];
+                            draw_sprite_ex(fb, id, ax2, by2, rev2, fade2, 0);
                         }
                     }
                     /* Ocean tiles have no ground props — skip typical prop */
@@ -9144,13 +10023,12 @@ static int fade_selftest(void)
             }
 
             /* 3. facing6 and anim are the ONLY inputs. Anything else moving the frame - a global,
-             *    a reintroduced clock, the dead four-way facing - is caught here. */
+             *    a reintroduced clock - is caught here. */
             pp.anim = 3.5f / WALK_FPS;
             a = player_sprite_id(&pp);
             pp.x = 1234.0f;
             pp.y = -99.0f;
             pp.abilities = 0xFFu;
-            pp.facing = (Uint8)FACE_LEFT;
             b = player_sprite_id(&pp);
             if (a != b) {
                 printf("FAIL  walk purity: sprite id %d -> %d with only unrelated Player fields changed\n",
@@ -9786,9 +10664,223 @@ static int shard_selftest(Uint64 seed, int nseeds)
     return fails ? 1 : 0;
 }
 
+/* The four hardcoded rectangles castle_tier replaced, expressed as tier indices
+ * so the two can be measured by the same yardstick. Kept ONLY as the negative
+ * control below — an unusually honest one, in the same spirit as --fog-test's
+ * old_ramp: the rejected case is the scheme this project actually shipped, not
+ * an invented bad number. */
+static int castle_tier_legacy_rects(int tx, int ty)
+{
+    if (!castle_island_tile(tx, ty))
+        return CT_SEA;
+    if (tx >= CASTLE_KEEP_X - 5 && tx <= CASTLE_KEEP_X + 5 &&
+        ty >= CASTLE_KEEP_Y - 3 && ty <= CASTLE_KEEP_Y + 6)
+        return CT_KEEP;                                  /* was PX(28) */
+    if (tx >= 120 && tx <= 138 && ty >= 16 && ty <= 26)
+        return CT_UPPER;                                 /* was PX(16) */
+    if (tx >= 118 && tx <= 140 && ty >= 26 && ty <= 38)
+        return CT_INNER;                                 /* was PX(6)  */
+    return CT_SHORE;                                     /* was PX(0)  */
+}
+
+/* The fortress's SHAPE, asserted rather than screenshotted.
+ *
+ * castle_tier is a pure function of (tx,ty), so this needs no Game and no seed —
+ * which is the point: the terraces, the wall rings and the stairs are all
+ * derived from it, and if it collapses to one level (or steps two at once) the
+ * whole hierarchy is wrong in a way that a passing causeway test would never
+ * notice. That is exactly what happened to the four rectangles this replaced:
+ * they were "hierarchical elevation" in a comment for weeks.
+ *
+ * Two claims, both load-bearing:
+ *
+ *   1. ORTHOGONAL 1-LIPSCHITZ. Adjacent tiles never differ by more than one
+ *      tier. castle_apply_layout puts a retaining wall at every step-up and one
+ *      flight of stairs through it; a two-level jump would need a flight that
+ *      does not exist, and would strand a courtyard.
+ *
+ *   2. EVERY TIER IS INHABITED, with room to stand. A ladder whose rungs are
+ *      three tiles wide is not a courtyard, and a tier with zero tiles means the
+ *      thresholds have drifted off the island.
+ *
+ * Prints the census either way — the numbers are the useful part when tuning
+ * the thresholds, and a silent PASS would hide a tier down to its last tile. */
+static int castle_shape_check(void)
+{
+    int count[CT_COUNT];
+    int x, y, t, i, fails = 0, worst_jump = 0, jumps = 0;
+    static const char *name[CT_COUNT] = {
+        "sea", "shore", "outer", "inner", "upper", "keep"
+    };
+
+    for (i = 0; i < CT_COUNT; i++)
+        count[i] = 0;
+
+    for (y = CASTLE_RESERVE_Y0 - 1; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H + 1; y++)
+        for (x = CASTLE_SWEEP_X0; x < CASTLE_SWEEP_X1; x++) {
+            t = castle_tier(x, y);
+            count[t]++;
+            for (i = 0; i < 2; i++) {
+                int nx = x + (i == 0), ny = y + (i == 1);
+                int d = castle_tier(nx, ny) - t;
+                if (d < 0) d = -d;
+                if (d > 1) {
+                    if (d > worst_jump) worst_jump = d;
+                    jumps++;
+                }
+            }
+        }
+
+    printf("castle tiers  :");
+    for (i = CT_SHORE; i < CT_COUNT; i++)
+        printf("  %s %d", name[i], count[i]);
+    printf("\n");
+
+    for (i = CT_SHORE; i < CT_COUNT; i++)
+        if (count[i] < 12) {
+            printf("FAIL  tier %s has %d tiles - too thin to stand a courtyard on\n",
+                   name[i], count[i]);
+            fails++;
+        }
+    if (jumps) {
+        printf("FAIL  castle_tier jumps %d levels at %d edges - a stair cannot span that\n",
+               worst_jump, jumps);
+        fails++;
+    } else {
+        printf("castle tiers  : PASS  no orthogonal edge steps more than one level\n");
+    }
+
+    /* Negative control: the four hardcoded rectangles this replaced, evaluated
+     * the same way. They are not merely coarser — they step from the keep hill
+     * straight to open ground, which is the two-level jump the checker above
+     * must be able to see. If it cannot reject the thing that actually shipped,
+     * it is not testing anything. */
+    {
+        int bad = 0;
+        for (y = CASTLE_RESERVE_Y0; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H; y++)
+            for (x = CASTLE_SWEEP_X0; x < CASTLE_SWEEP_X1; x++) {
+                int a, b;
+                if (!castle_island_tile(x, y) || !castle_island_tile(x + 1, y))
+                    continue;
+                a = castle_tier_legacy_rects(x, y);
+                b = castle_tier_legacy_rects(x + 1, y);
+                if (a - b > 1 || b - a > 1) bad++;
+            }
+        printf("castle tiers control: %s  [legacy rectangles jump at %d edges]\n",
+               bad ? "PASS" : "FAIL", bad);
+        if (!bad) fails++;
+    }
+
+    /* The castle's own ground must sit in the same window decision 42 pins the
+     * rest of the world to: above the stone its walls are drawn from, so a
+     * courtyard wall does not float out of its courtyard, and no brighter than
+     * the meadow, so Aetherhold reads colder than the village rather than
+     * hotter. --fog-test owns that rule for the world; this is the castle's
+     * half of it, checked here because castle_ground is indexed by CT_*. */
+    {
+        int gr, gg, gb, gl, smax = 0, lo = 999, hi = 0, bad = 0;
+
+        terrain_colour(TERRAIN_NORMAL, &gr, &gg, &gb);
+        gl = (299 * gr + 587 * gg + 114 * gb) / 1000;
+        for (i = 0; i < 3; i++) {
+            int l = (299 * stone_ramp[i][0] + 587 * stone_ramp[i][1]
+                     + 114 * stone_ramp[i][2]) / 1000;
+            if (l > smax) smax = l;
+        }
+        for (i = CT_SHORE; i < CT_COUNT; i++) {
+            int l = (299 * castle_ground[i][0] + 587 * castle_ground[i][1]
+                     + 114 * castle_ground[i][2]) / 1000;
+            if (l < lo) lo = l;
+            if (l > hi) hi = l;
+        }
+        if (lo <= smax || hi > gl) bad++;
+        printf("castle palette: %s  [ground %d..%d, stone tops at %d, grass %d]\n",
+               bad ? "FAIL" : "PASS", lo, hi, smax, gl);
+        fails += bad;
+    }
+
+    return fails;
+}
+
+/* THE hybrid-generation claim, which Phase 13's definition of done asks for in
+ * exactly these words: "the same seed produces different rubble/vegetation
+ * placement but identical walls/paths — proven by a determinism check".
+ *
+ * Two worlds on two different seeds. Across Aetherhold's footprint they must
+ * agree tile-for-tile on everything AUTHORED — collision and elevation — and
+ * must disagree somewhere on everything DECORATED. Both halves matter:
+ *
+ *   - if the layout drifted with the seed, the region would stop being a
+ *     handcrafted level and the screenshots taken on seed 1 would say nothing
+ *     about seed 2;
+ *   - if the decoration did NOT drift, the check on the layout would be
+ *     vacuous — two identical worlds agree about everything. That second
+ *     assertion IS the negative control, and it is a real one rather than an
+ *     injected fault, which is the strongest kind this project has.
+ *
+ * Seeds a thousand apart rather than adjacent, so a shared low bit in the
+ * stream cannot make them accidentally similar. */
+static int castle_seed_invariance(Uint64 seed)
+{
+    Game *a = (Game *)SDL_malloc(sizeof(Game));
+    Game *b = (Game *)SDL_malloc(sizeof(Game));
+    Rngs ra, rb;
+    int x, y, layout_diff = 0, decor_diff = 0, tiles = 0, fails = 0;
+
+    if (!a || !b) {
+        printf("FAIL  castle seed invariance: out of memory\n");
+        SDL_free(a); SDL_free(b);
+        return 1;
+    }
+    rngs_init(&ra, seed);
+    rngs_init(&rb, seed + 1000u);
+    game_init(a, &ra);
+    game_init(b, &rb);
+
+    for (y = CASTLE_RESERVE_Y0; y < CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H; y++)
+        for (x = CASTLE_SWEEP_X0; x < CASTLE_SWEEP_X1; x++) {
+            int fa, fb;
+            if (!castle_island_tile(x, y) && !castle_causeway_tile(x, y))
+                continue;
+            tiles++;
+            if (a->w.solid[y][x]  != b->w.solid[y][x] ||
+                a->w.surf[y][x]   != b->w.surf[y][x]  ||
+                a->w.height[y][x] != b->w.height[y][x])
+                layout_diff++;
+            if (castle_decor_at(&a->w, a->seed, x, y) !=
+                castle_decor_at(&b->w, b->seed, x, y))
+                decor_diff++;
+            if (castle_wall_tile(x, y) &&
+                castle_wall_art(a->seed, x, y, &fa) !=
+                castle_wall_art(b->seed, x, y, &fb))
+                decor_diff++;
+        }
+
+    if (layout_diff) {
+        printf("FAIL  castle layout moved with the seed: %d of %d tiles differ\n",
+               layout_diff, tiles);
+        fails++;
+    }
+    if (!decor_diff) {
+        printf("FAIL  castle decoration is seed-INDEPENDENT - the layout check above "
+               "proves nothing\n");
+        fails++;
+    }
+    if (!fails)
+        printf("castle hybrid : PASS  %d tiles identical across seeds, %d decorated "
+               "differently\n", tiles, decor_diff);
+
+    SDL_free(a);
+    SDL_free(b);
+    return fails;
+}
+
 static int aether_selftest(Uint64 seed, int nseeds)
 {
     int fails = 0, s;
+
+    fails += castle_shape_check();
+    fails += castle_seed_invariance(seed);
 
     for (s = 0; s < nseeds; s++) {
         Game *g = (Game *)SDL_malloc(sizeof(Game));
@@ -11137,6 +12229,69 @@ static int rebuild_selftest(void)
                bad ? "PASS" : "FAIL");
         if (!bad) fails++;
     }
+
+    /* bld_phase alone cannot catch a caller that never asks it anything: building_sprite_id
+     * used to return a real sprite unconditionally, regardless of phase, which made
+     * draw_building's whole ruin-to-whole rebuild (~160 lines of roof/facade code) permanently
+     * unreachable and stood every building fully finished from the moment it existed. This
+     * drives a real generated World and checks the actual render-path decision, not just the
+     * float-to-band mapping above. */
+    {
+        Game g;
+        Rngs rngs;
+        Building *b = NULL;
+
+        rngs_init(&rngs, 1);
+        (void)game_init(&g, &rngs);
+        for (i = 0; i < g.w.bld_count; i++)
+            if (g.w.bld[i].region < (Uint8)g.w.region_count) { b = &g.w.bld[i]; break; }
+
+        if (!b) {
+            printf("FAIL  render path: no building with a valid region on seed 1\n");
+            fails++;
+        } else {
+            int h_ruin, h_done, art_ruin, art_done;
+
+            g.w.regions[b->region].restoration = 0.0f;
+            art_ruin = building_sprite_id(&g.w, b);
+            world_heights(&g.w);
+            h_ruin = g.w.height[b->y][b->x];
+
+            g.w.regions[b->region].restoration = 1.0f;
+            art_done = building_sprite_id(&g.w, b);
+            world_heights(&g.w);
+            h_done = g.w.height[b->y][b->x];
+
+            if (art_ruin != ART_NONE) {
+                printf("FAIL  building_sprite_id draws a baked sprite at phase 0 (restoration 0.0)\n");
+                fails++;
+            }
+            if (art_done == ART_NONE) {
+                printf("FAIL  building_sprite_id is still ART_NONE at phase 3 (restoration 1.0)\n");
+                fails++;
+            }
+            if (h_ruin == h_done) {
+                printf("FAIL  world_heights did not re-flatten between phase 0 (h=%d) and phase 3 (h=%d)\n",
+                       h_ruin, h_done);
+                fails++;
+            }
+            if (art_ruin == ART_NONE && art_done != ART_NONE && h_ruin != h_done)
+                printf("render path: PASS  ART_NONE below phase 3, a real sprite at phase 3, "
+                       "footprint height %d (walled) -> %d (flat)\n", h_ruin, h_done);
+
+            /* Negative control: the bug exactly as it shipped is "ignore phase, always draw the
+             * finished sprite" — equivalent to `art_ruin` never being ART_NONE. A checker unable
+             * to fail on that identity is not testing the rebuild; assert the mutant IS wrong. */
+            {
+                int mutant_would_pass = (art_bld_small[0] != ART_NONE ||
+                                          art_bld_large[0] != ART_NONE);
+                printf("negative control (phase-blind render path rejected): %s\n",
+                       mutant_would_pass ? "PASS" : "FAIL");
+                if (!mutant_would_pass) fails++;
+            }
+        }
+    }
+
     printf("rebuild phase: %s (%d fails)\n", fails ? "FAIL" : "PASS", fails);
     return fails;
 }
@@ -12591,10 +13746,30 @@ int main(int argc, char **argv)
             game.cam_ready = 0;
         }
     }
+    /* --castle [N]: stand at one of Aetherhold's landmarks, so the region can be
+     * photographed from a script.
+     *
+     * Takes an optional index for the same reason --dream does: the camera
+     * follows the player, the island is about forty tiles across, and the two
+     * things most worth looking at — the causeway from the mainland, and the
+     * courtyards — cannot both be in one frame. A bare --castle keeps its old
+     * meaning (the courtyard), so existing capture scripts are unchanged.
+     *
+     *   0  outer courtyard, the default        2  the sea gate / landing
+     *   1  mainland end of the causeway        3  the keep terrace           */
     {
         if (arg_flag(argc, argv, "--castle")) {
-            game.p.x = (float)(CASTLE_RESERVE_X0 + CASTLE_RESERVE_W / 2) * TILE + TILE * 0.5f;
-            game.p.y = (float)(CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H / 2) * TILE + TILE * 0.5f;
+            /* arg_int falls back to 0 when --castle is last on the line or is
+             * followed by another flag (SDL_atoi("--dev") is 0), so the bare
+             * spelling keeps its old meaning without a special case. */
+            int which = arg_int(argc, argv, "--castle", 0);
+            int cx = CASTLE_RESERVE_X0 + CASTLE_RESERVE_W / 2;
+            int cy = CASTLE_RESERVE_Y0 + CASTLE_RESERVE_H / 2;
+            if (which == 1)      { cx = CASTLE_CAUSEWAY_X0 + 2; cy = CASTLE_CAUSEWAY_Y; }
+            else if (which == 2) { cx = CASTLE_BRIDGE_X;        cy = CASTLE_BRIDGE_Y;   }
+            else if (which == 3) { cx = CASTLE_KEEP_X;          cy = CASTLE_KEEP_Y + 3; }
+            game.p.x = (float)cx * TILE + TILE * 0.5f;
+            game.p.y = (float)cy * TILE + TILE * 0.5f;
             game.cam_ready = 0;
         }
     }

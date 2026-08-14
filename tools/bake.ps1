@@ -60,6 +60,9 @@ Add-Type -AssemblyName System.Drawing
 $script:KeyMagenta = [System.Collections.Generic.HashSet[string]]::new(
     [string[]]@("116,48,94", "148,65,113", "94,39,81", "105,42,90"))
 $script:TotalStripped = 0
+# Counted so the run ends with one line saying whether any source looked like a
+# multi-object contact sheet - see the guard in ConvertTo-Sprite.
+$script:SheetWarnings = 0
 
 # Phase 12 task 6. Which categories get a second, dream-realm palette emitted alongside the
 # original. `nature` only: the dream sector has no buildings (place_buildings never samples those
@@ -82,49 +85,95 @@ $script:FxFrames = @("fx_portal_0",  "fx_portal_2",  "fx_portal_4",  "fx_portal_
 # Phase 13: bake only what has a caller; dungeon/interior sets stay source-only.
 # Curated from the supplied packs â€” 13 dark-fantasy files actually referenced in
 # src/main.c (AETHER_*), no castle placeholders.
+# Trimmed again to exactly what castle_bld[] and the mainland approach draw.
+# wall_piece_06/07/08 and wall_arch_01 went because Aetherhold's walls are built
+# from the castle pack's modules, which are authored on a consistent grid pitch;
+# props/prop_04..07 went because they had no caller AND the contact-sheet guard
+# below flags three of the four as two objects on one canvas (prop_04 is a stump
+# and a bush), so they were never usable as single props anyway.
 $script:DarkFantasyFiles = @(
-    "walls/wall_piece_06.png", "walls/wall_piece_07.png", "walls/wall_piece_08.png",
-    "walls/wall_arch_01.png",
     "buildings/bld_gatehouse_large.png", "buildings/bld_keep_small.png",
     "buildings/bld_tower_round_ruined.png", "buildings/bld_tower_square_ruined.png",
     "buildings/bld_ruin_stone.png", "buildings/bld_chapel_stone.png",
-    "props/prop_04.png", "props/prop_05.png", "props/prop_06.png", "props/prop_07.png")
+    "environment/tree_dead_02.png", "environment/tree_dead_05.png",
+    "environment/tree_dead_07.png")
 
-# Phase 13 Aetherhold â€” full castle set for 90-degree causeway composition.
-# Reverted per user request: all castle modules baked as pier/deck set.
+# Phase 13 Aetherhold - the modules the castle is COMPOSED from.
+#
+# Curated against one rule, the same one that keeps the bitmap font at +0 shipped
+# bytes: bake only what a caller in src/main.c actually draws. That rule had
+# quietly stopped being enforced here - 39 of the 46 castle/aether records had no
+# caller at all, about 210 KB of a 1.44 MB budget spent on sprites nothing ever
+# blitted - so this list is now the composition, not the delivery.
+#
+# DROPPED, and why, so none of them come back by accident:
+#
+#   castle_full_multitier_v2 (49.5 KB)  the whole fortress as ONE 284x304 sprite,
+#   keep_complete_4story     (44.4 KB)  about eight tile-diamonds wide. Replaced
+#                                       by the wall/tower/stair modules below,
+#                                       which is what "the castle has hierarchy"
+#                                       actually requires. keep_01 is the keep.
+#   stairs_platforms_1 / _2             contact sheets - three and two separate
+#                                       objects on one canvas. _1 was the default
+#                                       causeway deck tile. See the guard in
+#                                       ConvertTo-Sprite.
+#   wall_01, rocks_cliffs_1             same problem: a whole walled compound and
+#                                       a nine-up grid of rocks, not modules.
+#   bridges_causeway_1 / _2 / _4        _4 is byte-identical to bridge_01 (same
+#                                       134x111 box, same 37-entry palette, same
+#                                       8,954-byte stream). _1 and _2 are
+#                                       complete standalone bridge scenes with no
+#                                       placement that reads as one causeway.
+#   terrain_tiles/terrain_01            a 64x64 ground tile, and this renderer
+#                                       rasterises ground procedurally.
 $script:CastleFiles = @(
+    # --- the causeway: landmarks on a procedurally-decked span, not a tiling set
     "bridges_causeway/bridge_01.png",
-    "bridges_causeway/bridges_causeway_1.png",
-    "bridges_causeway/bridges_causeway_2.png",
     "bridges_causeway/bridges_causeway_3.png",
-    "bridges_causeway/bridges_causeway_4.png",
-    "stairs_platforms/stair_01.png",
+    # --- flights
     "stairs_platforms/stair_02.png",
     "stairs_platforms/stair_03.png",
     "stairs_platforms/stair_06.png",
-    "stairs_platforms/stairs_platforms_1.png",
-    "stairs_platforms/stairs_platforms_2.png",
-    "walls_modules/wall_01.png",
+    "walls_modules/wall_stairs.png",
+    # --- the wall rings
     "walls_modules/wall_straight.png",
-    "walls_modules/wall_tall_corner.png",
     "walls_modules/wall_medium.png",
     "walls_modules/wall_ruined.png",
     "walls_modules/wall_rubble.png",
     "walls_modules/wall_corner.png",
+    "walls_modules/wall_tall_corner.png",
     "walls_modules/wall_gatehouse.png",
     "walls_modules/wall_square_tower.png",
     "walls_modules/wall_guard_tower.png",
-    "walls_modules/wall_stairs.png",
+    "walls_modules/wall_narrow_pillar.png",
+    "walls_modules/wall_banner.png",
+    "walls_modules/wall_lantern_post.png",
+    # --- the keep
+    "keep_structures/keep_01.png",
+    # --- the sea. shore_transition, shore_corner and the water_cube_* foam set
+    # are NOT here: they are 64x64 isometric ground CUBES, and this renderer
+    # rasterises its ground into a 36x18 diamond procedurally. Laid over the
+    # waterline as props they stand in the sea as half-sunk blocks and merge into
+    # a continuous green band. See the note in castle_sea_at. The coast
+    # transition is done in terrain instead.
     "water_shore/rock_cluster.png",
     "water_shore/rock_mossy.png",
-    "water_shore/shore_transition.png",
-    "water_shore/water_shore_1.png",
+    "water_shore/rock_tall.png",
     "rocks_cliffs/rock_01.png",
-    "rocks_cliffs/rocks_cliffs_1.png",
-    "keep_structures/keep_01.png",
-    "keep_structures/keep_complete_4story.png",
-    "keep_structures/castle_full_multitier_v2.png",
-    "terrain_tiles/terrain_01.png")
+    "rocks_cliffs/rock_03.png",
+    "rocks_cliffs/rock_04.png",
+    "rocks_cliffs/rock_05.png",
+    # --- courtyard dressing: barrels, crates, a campfire, rubble, lanterns
+    # prop_04, _06 and _09 are NOT here: each has a lit fire authored into it,
+    # and Aetherhold is abandoned. Scattered as courtyard dressing they put
+    # dozens of campfires burning in an empty castle - looked at, rejected.
+    "props_details/prop_02.png",
+    "props_details/prop_03.png",
+    "props_details/prop_05.png",
+    "props_details/prop_07.png",
+    "props_details/prop_10.png",
+    "props_details/prop_11.png",
+    "props_details/prop_12.png")
 
 # Six-way WALK sheets, 8 frames at pitch 48, full cycle 0-7.
 #
@@ -265,6 +314,43 @@ function ConvertTo-Sprite {
 
     $tw = $maxX - $minX + 1
     $th = $maxY - $minY + 1
+
+    # ---- contact-sheet guard -------------------------------------------------
+    #
+    # Several files in the delivered packs are CONTACT SHEETS: four, nine, a
+    # dozen separate objects laid out on one canvas for review. Baked, they trim
+    # to a single box spanning all of them, and the renderer then blits the whole
+    # sheet as if it were one prop. stairs_platforms_1.png shipped that way and
+    # was the default causeway deck tile - three stone platforms merged into one
+    # 109 px blob on a 36 px tile diamond, in the region a design review later
+    # described as "disconnected modules".
+    #
+    # Nothing checked, because nothing could: the bake is happy, the sprite test
+    # is happy (the data round-trips perfectly), and the only symptom is on
+    # screen. So the check is here, at the one place that has the pixels.
+    #
+    # Fully-empty COLUMNS are the signal. Objects laid out on a sheet are
+    # separated by transparent gutters; a single object of any shape almost never
+    # has a wide empty column through its middle, because its own base or shadow
+    # spans it. A 4 px threshold ignores the one-pixel gaps inside, say, an
+    # archway. WARNS rather than throws - a legitimately gappy sprite should not
+    # break the build, and the whole point is that a human looks.
+    $gutter = 0; $groups = 1; $run = 0
+    for ($x = $minX; $x -le $maxX; $x++) {
+        $any = $false
+        for ($y = $minY; $y -le $maxY; $y++) {
+            if ($b[$y * $stride + $x * 4 + 3] -ge 128) { $any = $true; break }
+        }
+        if ($any) {
+            if ($run -ge 4) { $groups++; $gutter++ }
+            $run = 0
+        } else { $run++ }
+    }
+    if ($groups -gt 1) {
+        Write-Host ("  CONTACT SHEET? {0}: {1} objects separated by {2} empty gutter(s) - baking as ONE {3}x{4} sprite" `
+                    -f $Name, $groups, $gutter, $tw, $th) -ForegroundColor Yellow
+        $script:SheetWarnings++
+    }
 
     # Palette (index 0 reserved for transparent) + index stream over the trimmed box.
     $palMap = @{}
@@ -512,3 +598,7 @@ foreach ($s in $sprites) { $rawPx += $s.W * $s.H }
 "rle data   $($dataBytes.Count) bytes  (from $rawPx trimmed px = {0:N1}x)" -f ($rawPx / [double]$dataBytes.Count)
 "records    $($records.Count * 16) bytes"
 "total      $($palBytes.Count + $dataBytes.Count + $records.Count * 16) bytes of const data"
+# Printed unconditionally, including the zero. A quiet nothing is the failure
+# mode this line exists to prevent - the same reasoning as the key-colour strip
+# count above it.
+"sheets     $($script:SheetWarnings) source file(s) looked like multi-object contact sheets"
