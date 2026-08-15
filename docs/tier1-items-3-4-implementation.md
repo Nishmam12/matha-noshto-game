@@ -1120,6 +1120,165 @@ meaningless.
 
 ---
 
+---
+
+# Part E — Execution status (2026-08-15, branch `castle-fixed`)
+
+All source edits applied, built and verified. One substantive correction to §A.1.2 was required —
+see [§E.6](#e6-correction-to-a12--the-forcing-hook-was-in-the-wrong-place).
+
+## E.1 Toolchain interruption (resolved)
+
+Midway through, `G:\tools` — the `$TOOLS` root holding `w64devkit` and `SDL2-min` — **vanished**.
+The drive stayed mounted and healthy but held only game installs; no `w64devkit`, `SDL2-min`,
+`libSDL2.a` or `SDL.h` existed on any mounted volume, and `gcc` was not on `PATH`. It had built
+cleanly at `bbbc94a` an hour earlier. The Recycle Bin was empty.
+
+Rebuilt from scratch **inside the project root**, which `.gitignore` already excluded defensively
+(`w64devkit/`, `SDL2*/`, `sdl2-src/`, `sdl2-build/`) — so `$env:WAYFARER_TOOLS` is now the project
+root itself and none of it can be committed by accident:
+
+| Component | Version | Note |
+|---|---|---|
+| w64devkit | 2.9.1 (GCC **16.2.0**) | previous version unknown |
+| CMake | **3.31.12** | *not* 4.x — SDL2 2.32 declares `cmake_minimum_required(3.0.0...3.10)` and CMake 4 removed compatibility below 3.5, so 4.x cannot configure it |
+| Ninja | 1.13.2 | w64devkit ships neither cmake nor ninja; both are merged into its `bin\` because `build-sdl2.ps1` hardcodes `$DEVKIT\bin\cmake.exe` and configures with `-G Ninja` |
+| SDL2 source | 2.32.10 | the version `build-sdl2.ps1` pins |
+
+Rebuilt `libSDL2.a` is 2,007,674 B (stock is 15,679,488).
+
+**The compiler change moved the byte count**, so the old 924,672 B figure is not a valid baseline:
+GCC 16.2.0 builds the *identical* commit `bbbc94a` at **923,648 B**, 1,024 bytes smaller — one PE
+alignment block. Every measurement below is therefore against a fresh same-toolchain baseline.
+
+**Render output is unaffected**: `--castle 3 --dev --frames 2` captured from `bbbc94a` on the *old*
+toolchain and on the *new* one hashes identically (`DAA163CD…4E9994B0`). That also means the
+`keep_before.bmp` baseline captured before any of this work remained valid.
+
+## E.2 Checklist outcome
+
+| Checklist step | Status |
+|---|---|
+| 1 — commit items 1–2 | ✅ `bbbc94a` |
+| 2 — `keep_before.bmp` baseline | ✅ SHA-256 `DAA163CD…4E9994B0`, 1,555,254 B |
+| 3–4 — verify anchors + gate | ✅ every count exactly as specified |
+| 5–8 — Part A edits | ✅ applied |
+| 9 — build + run §A.7 | ✅ zero warnings; `--genfail-test` green **after §E.6's fix** |
+| 10 — verify Part B anchors | ✅ every count exactly as specified |
+| 11–15 — Part B edits | ✅ applied |
+| 16 — build + §B.7 + hash compare | ✅ **`keep_before` == `keep_after`, byte-identical** |
+| 17 — runner rows + full suite | ✅ 28 checks |
+| 18 — Part C doc updates | ✅ applied |
+
+## E.2.1 Measured cost
+
+| | Bytes |
+|---|---|
+| Baseline, `bbbc94a`, this toolchain | 923,648 |
+| With items 3 + 4 | **924,160** |
+| **Delta** | **+512** |
+| Budget (§A.6 ≤150 + §B.6 ≤80) | ≤230 |
+| Headroom remaining under the 1,440,000 target | 515,840 |
+
++512 B is **exactly one PE file-alignment block**, so the true code growth is anywhere in
+(0, 512] and cannot be resolved more finely without `-Map`. It is consistent with the ≤230 B
+estimate. Items 3 and 4 could not be measured separately — both were already in the tree when the
+toolchain came back — so this is the combined figure, obtained by stashing both and rebuilding.
+
+Self-test binary: 1,002,496 B → 1,006,080 B (not budget-tracked).
+
+## E.3 Anchor verification (steps 3, 4, 10)
+
+Every anchor matched its specified count exactly — no drift:
+
+| Anchor | Expected | Found |
+|---|---|---|
+| `biggest_first < 0` | 1 | 1 (4159) |
+| `int x, y, biggest = 0, biggest_first = -1;` | 1 | 1 (4113) |
+| `g->w.spawn_region = -1;` | 1 | 1 (4166) |
+| `static int g_suppress_paths = 0;` | 1 | 1 (1986) |
+| `case SDLK_r: /* regenerate with the next seed */` | 1 | 1 (13908) |
+| `(void)game_init(&game, &rngs);` | 2 | 2 (13724, 13911) |
+| self-test gate block 1977–1991 | 3 flags | ✅ exactly `g_suppress_bridges`, `g_suppress_paths`, `g_suppress_marks` |
+| `idx = ART_DATA[i++];` | 1 | 1 (5686) |
+| `unsigned char v = literal ? ART_DATA[i + k] : idx;` | 1 | 1 (5690) |
+| `static void draw_sprite_ex(SDL_Surface *fb, int id, …` | 1 | 1 (5646) |
+| `i = sp->data_off;` | 2 | 2 (5572 validator, 5671 decoder) — **edited the second only** |
+| `n = sp->data_off + sp->data_len;` | 2 | 2 (5573, 5672) — **edited the second only** |
+| `ART_PAL_MAX` | 256 | ✅ 256, confirming §B.0 Correction 1 |
+| `ART_DATA_BYTES` | 190377 | ✅ 190377 (in `art_data.h`, not `main.c`) |
+
+## E.4 Static verification performed while the toolchain was missing
+
+These were stand-ins, not substitutes — recorded because they turned out to be accurate: the code
+compiled with **zero warnings on the first attempt** once a compiler was available, and the only
+defect they could not have caught was a semantic one (§E.6).
+
+- **Delimiter balance** over the whole 14,462-line file, after stripping comments and string/char
+  literals: balanced, and every top-level function begins at brace depth 0.
+- **`git diff -w`** over the `game_init` restructure confirms the re-indented block is otherwise
+  byte-identical — the only changes are the `for`, the two resets, the `#if WAYFARER_SELFTEST`
+  forcing hook, the `break` and the `rngs_init` step, exactly as §A.1.2 requires.
+- **No dangling `id`** inside `draw_sprite_sp`'s body; the identifier survives only in the comment
+  and in the new wrapper.
+- **Gate placement**: `decode_selftest` (11152), `genfail_selftest` (11259) and `sprite_selftest`
+  (11360) all fall inside the harness block (8073–13732); `art_stream_ok_sp`, which
+  `decode_selftest` calls, is inside its own gate at 5559–5607.
+- **Field widths checked by hand** because the compiler cannot: `ArtSprite.data_len` is
+  `unsigned int`, so `bad[0].data_len = ART_DATA_BYTES` (190,377) does not truncate; `pal_n` is
+  `unsigned short`, so `bad[2].pal_n = 1` is fine. Clamp 3's `v > sp->pal_n` compares
+  `unsigned char` against `unsigned short`, both promoted to `int` — the same shape as the existing
+  line 5582 in `art_stream_ok_sp`, which already compiles warning-free under `-Wextra`.
+- **`tools/run-tests.ps1`** parses clean via the PowerShell AST parser; 27 self-test rows + the size
+  gate.
+
+## E.5 Verification results
+
+| Check | Result |
+|---|---|
+| `-Wall -Wextra`, both builds | **zero warnings, zero errors** |
+| `--decode-test` | **PASS** — 0 px escaped on all 3 malformed records; validator rejected 3 of 3; valid sprite still drew 844 px |
+| `--genfail-test` | **PASS** *(after §E.6)* — normal seed 1→1 with 16 regions; 1 forced failure → seed **2**; 8 exhausted → seed **8**, 0 regions, 0 phantom placements |
+| `keep_before.bmp` vs `keep_after.bmp` | **byte-identical** — no clamp fires on well-formed art |
+| Full suite | **28 passed, 0 failed, 0 skipped in 346.0 s**, `$LASTEXITCODE` 0 |
+
+`--genfail-test`'s degraded line reading `seed 8` is the arithmetic working: attempt 0 uses seed 1
+and steps to 2, …, attempt 7 uses seed 8, and the final `attempt + 1 < GEN_RETRY_MAX` guard
+correctly declines to step past it.
+
+## E.6 Correction to §A.1.2 — the forcing hook was in the wrong place
+
+**§A.1.2 places the `g_force_pathological` hook immediately after `world_gen`. That does not work,
+and it fails silently in the worst possible way — as a green test.**
+
+`castle_apply_layout`, `place_rivers` and `place_portal` all run *after* `world_gen` and all carve
+open tiles. An all-solid grid written next to `world_gen` is therefore partly undone before the
+flood scan ever sees it, so the scan finds a healthy component and the retry never fires. Measured:
+with the hook where §A.1.2 puts it, all three cases ran to completion against a normal 16-region
+world —
+
+```
+normal:    seed 1 -> 1, 16 regions, 0 entities at tile 0
+FAIL  genfail: one forced failure landed on 1, expected 2
+FAIL  genfail: exhausted retries did not take the degenerate path
+degraded:  8 attempts exhausted -> 16 regions, 0 phantom placements, seed 1
+```
+
+The condition being simulated is "**the flood scan finds no open overworld component**", so the hook
+has to make that true *at the scan*, not at generation. Moved to sit immediately after
+`SDL_memset(seen, 0, sizeof(sc.seen))` and immediately before the Pass 1 comment — the last point
+before the scan, where `solid[][]` is final for the attempt.
+
+It is worth noting *why* this is worth this much prose: the misplaced hook produced a test that
+printed `PASS` on its negative control and exercised none of the code it existed to cover. Had the
+three positive assertions been any weaker, it would have shipped as coverage that proved nothing —
+the exact failure mode invariant 6 exists to prevent.
+
+The move is inside `#if WAYFARER_SELFTEST`, so it costs zero shipped bytes: the shipping binary
+measured 924,160 B before and after it.
+
+---
+
 *Sources: [production-gap-analysis.md](production-gap-analysis.md) §1 SEC-1, §2 ERR-1, §2 ERR-3,
 §4 QA-3, §4 QA-4, §6 Tier 1 items 3–4;
 [architecture-summary.md](architecture-summary.md) §4.4, §4.5, §4.6, §5.3, §6.1, §7, §8.2, §9;

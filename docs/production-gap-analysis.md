@@ -72,9 +72,53 @@ way to ship a patch, and one bad first launch is the whole result.
 
 ---
 
-### 🔴 SEC-1 — The baked-art RLE decoder is unvalidated in the shipping build
+### 🟢 SEC-1 — RESOLVED — The baked-art RLE decoder is unvalidated in the shipping build
 
-**Files**: [main.c:5486-5528](../src/main.c#L5486-L5528) (validator), [main.c:5568-5643](../src/main.c#L5568-L5643) (decoder)
+> **Resolved** on branch `castle-fixed`. The decoder is now self-limiting, which is what this entry
+> recommended — but it took **four** clamps, not three, and two claims below are wrong. Both
+> corrections are recorded here rather than quietly fixed, because a security note that overstates
+> its own severity gets discounted the next time it is read.
+>
+> **Correction 1 — `pal[v]` was never an out-of-bounds read.** This entry calls it "a stack read
+> overflow" against "the 64-entry stack array". `ART_PAL_MAX` is **256**, not 64
+> ([art_data.h](../src/art_data.h)), and `v` is declared `unsigned char`, so `v` cannot exceed 255
+> and `pal[255]` is the last valid element. `pal[v]` is **always in bounds**. The real defect is
+> narrower: `art_palette` fills only `pal[1 .. pal_n]`, so a larger index reads an **indeterminate**
+> stack value and paints a colour nobody chose — a sprite with random pixels whose cause is
+> invisible. Worth fixing; not a memory-safety violation.
+>
+> **Correction 2 — there is a fourth clamp, and it is the load-bearing one.** All three clamps
+> sketched below are expressed relative to `n = sp->data_off + sp->data_len`, and `n` itself was
+> never checked in the decoder. `art_stream_ok_sp` has checked it since it was written
+> (`if (n > ART_DATA_BYTES) return 0;`) — it just never shipped. A bad bake emitting a descriptor
+> whose slice runs past the end of the 190,377-byte `ART_DATA` array would make all three clamps
+> measure against a bogus bound and read out of bounds anyway. **Clamp 0 is the one that closes the
+> real hole.** It is also the only genuinely out-of-bounds read on this path: cases (a) and (b) below
+> read past `n`, but `n` is normally an offset *inside* `ART_DATA`, so those reads land in the next
+> sprite's data — wrong pixels, not a fault — except for the sprite whose slice ends at
+> `ART_DATA_BYTES`.
+>
+> The four clamps, in the order they must appear: **0** bound `n` against `ART_DATA_BYTES` (with a
+> second test catching unsigned wraparound); **1** a RUN control byte as the slice's final byte;
+> **2** a LITERAL whose count runs past the slice; **3** a palette index above `pal_n`, folded to 0
+> — the bake's guaranteed-transparent entry, so malformed data draws a **hole**: visible, harmless
+> and reportable, rather than confetti. None of them is gated; they ship.
+>
+> `draw_sprite_ex` was split into `draw_sprite_sp` (takes the record by pointer) plus a thin
+> id-taking wrapper, the same move `art_stream_ok_sp` already made and for the same reason: a
+> negative control has to hand the decoder a record that lies about its own stream, and `ART_SPRITES`
+> is `const` in `.rodata`. `draw_sprite`, `draw_sprite_fade` and `draw_sprite_flip` are unchanged.
+>
+> Covered by `--decode-test`: three malformed records, each shaped like a real bake failure, checked
+> for escaped writes outside the sprite's box; a negative control asserting all three are genuinely
+> rejected by `art_stream_ok_sp`; and a positive control that a valid sprite still draws, so a
+> decoder clamped into drawing nothing cannot pass. Closes the QA-3 row.
+>
+> **What this does not prove**: the absence of out-of-bounds *reads*. No pure-C test can — an
+> out-of-bounds read of a const array has no observable effect. That is QA-4's job, and
+> `--decode-test` is its natural first target.
+
+**Files** (original): [main.c:5486-5528](../src/main.c#L5486-L5528) (validator), [main.c:5568-5643](../src/main.c#L5568-L5643) (decoder)
 
 `art_stream_ok()` and `art_stream_ok_sp()` — which fully validate every RLE stream against its
 declared length, palette size and frame area — are inside `#if WAYFARER_SELFTEST`. They are called
@@ -102,6 +146,8 @@ truncated final record: (a) a RUN control byte as the last byte reads `ART_DATA[
 whose declared count runs past `n` reads up to 127 bytes beyond. Palette indices are likewise
 unchecked against `sp->pal_n`, so `pal[v]` can read past the 64-entry stack array `Uint32 pal[ART_PAL_MAX]`
 — **a stack read overflow**, not merely a `.rdata` over-read.
+*(Struck: `ART_PAL_MAX` is 256 and `v` is `unsigned char`, so this was never out of bounds. See
+Correction 1 above.)*
 
 **Failure scenario**: `bake.ps1` is re-run after an art change, hits an encoding edge case (an
 oversized sprite, a `System.Drawing` decode quirk, a truncated write), and emits a header that
@@ -302,9 +348,38 @@ as blocker #3. Not a code issue, but it is a submission-blocking item that belon
 
 ---
 
-### 🔴 ERR-1 — The pathological-seed path silently produces an unwinnable game
+### 🟢 ERR-1 — RESOLVED — The pathological-seed path silently produces an unwinnable game
 
-**File**: [main.c:4159-4168](../src/main.c#L4159-L4168)
+> **Resolved** on branch `castle-fixed`. `game_init` now wraps its generation block in a
+> `for (attempt = 0; attempt < GEN_RETRY_MAX; attempt++)` retry that walks to `seed + 1` and
+> regenerates whenever the seed yields no open overworld component. A **loop, not recursion**:
+> `Scratch sc` is a ~360 KB stack local, and a recursive `game_init` would put a second `Scratch`
+> beside the caller's `World` — the exact term `wayfarer_stack_guard` exists to bound. The loop
+> reuses the one frame.
+>
+> **This entry named two of four defects on this path. All four are fixed:**
+>
+> | # | Defect | Fix |
+> |---|---|---|
+> | 1 | `ents[i].tile == 0`, not `-1` — 19 phantom entities at the world's top-left corner | explicit `-1` fill |
+> | 2 | `shards[i] == 0`, not `-1` — **not in this entry**; 8 phantom shards, drawn on the minimap and collectable | explicit `-1` fill |
+> | 3 | `g->seed` never set — **not in this entry**; the early return sat *above* `g->seed = rngs->seed`, so a degenerate world claimed seed 0, `tile_hash` decorated with seed 0, and a save recorded seed 0 | `g->seed = rngs->seed` on the fallback path |
+> | 4 | The world is unwinnable and nothing says so | the retry loop |
+>
+> Defects 1–3 are the *degenerate fallback made honest*; defect 4 is what the retry removes. The
+> fallback still ships a carved world after `GEN_RETRY_MAX` (8) consecutive failures — the
+> reachability guarantee says ship the degraded world, but do not let it lie about its own state.
+>
+> **Determinism is preserved**: `seed → world` remains a pure function. Seed *S* deterministically
+> yields *S*'s world, or deterministically yields *S+1*'s if *S* is pathological. `main` resyncs
+> `seed = rngs.seed` at both call sites (startup and the `R` handler) so the HUD and title bar never
+> show a seed that fails to reproduce the world on screen — strength O1, which this fix would
+> otherwise have quietly broken.
+>
+> Covered by `--genfail-test`, which is three-sided (normal seed undisturbed / one forced failure
+> recovered / past the bound degraded honestly) with a discrimination control. Closes the QA-3 row.
+
+**File** (original): [main.c:4159-4168](../src/main.c#L4159-L4168)
 
 ```c
 if (biggest_first < 0) { /* pathological seed: carve rather than trap */
@@ -442,7 +517,19 @@ convert a resilience feature into a launch-blocking popup:
 
 ---
 
-### 🟠 ERR-3 — `game_init`'s return value is meaningful and universally discarded
+### 🟠 ERR-3 — PARTIALLY CLOSED — `game_init`'s return value is meaningful and universally discarded
+
+> **Partially closed by ERR-1's retry loop.** The return value is still discarded at all 34 call
+> sites — no signature changed and no caller reads it. What changed is that the *degenerate* case
+> the check was most needed for can no longer occur without `GEN_RETRY_MAX` (8) consecutive
+> pathological seeds, and when it does occur the world now labels itself honestly (`region_count`
+> 0, `spawn_region` -1, every entity and shard at -1) instead of returning `1` beside 19 phantom
+> placements at tile 0.
+>
+> **The other half is untouched and stays open**: a world with, say, 40 reachable tiles is
+> technically completable, unplayable, and still returns a healthy-looking count that nobody reads.
+> `biggest_first >= 0` is the only condition the retry tests — a *low* reach count does not trigger
+> it. That is the same gap QA-2's seeds 85/417/430 sit in.
 
 Covered under ERR-1, but worth stating separately: `game_init` returns the count of open tiles
 reachable from spawn — a genuinely useful health signal — and all four call sites cast it to `void`.
@@ -777,15 +864,17 @@ count of failures is *asserted* rather than remembered.
 
 ### 🟠 QA-3 — Uncovered critical paths
 
+> Two rows removed: **`game_init`'s pathological-seed branch** now has `--genfail-test` (three-sided,
+> ERR-1) and **`draw_sprite_ex` against a malformed stream** now has `--decode-test` (three malformed
+> records plus a validator negative control and a draws-something positive control, SEC-1).
+
 | Path | Site | Why it matters |
 |---|---|---|
-| `game_init` pathological-seed early return | [main.c:4159-4168](../src/main.c#L4159-L4168) | **Entire failure branch, zero coverage.** Produces a silently unwinnable game (ERR-1) |
 | `world_place_and_verify` total-ungate (`return -100`) | [main.c:3097-3101](../src/main.c#L3097-L3101) | Returns without verifying solvability (ERR-4); no test asserts what this world looks like |
 | `arg_val` / `arg_int` / `arg_flag` | [main.c:1143-1167](../src/main.c#L1143-L1167) | No test at all. SEC-2, SEC-5 and SEC-6 are all in untested code that every launch runs |
 | `blit_scale` at non-integer window ratios; F11 fullscreen | [main.c:4931](../src/main.c#L4931), [main.c:7870](../src/main.c#L7870) | `--font-test`/`--hud-test` render at logical size; the *upscale and present* path is exercised only by hand |
 | `backbuffer_new` returning NULL (degraded mode) | [main.c:7848](../src/main.c#L7848) | A documented degraded mode that no test forces |
 | `mm_draw` surface-format mismatch | [main.c:4787](../src/main.c#L4787) | ERR-7; untested |
-| `draw_sprite_ex` against a malformed stream | [main.c:5568](../src/main.c#L5568) | `art_stream_ok` validates the *data*; nothing tests that the *decoder* survives bad data (SEC-1) |
 | Save/load across a generation change | [main.c:4351](../src/main.c#L4351) | OBS-6: a v2 save from an older generator loads silently into a different world |
 | v1→v2 save upgrade with `has_castle_key` implied by the restored mask | [main.c:4392, 4427](../src/main.c#L4392) | The upgrade path exists (`if (restored & (1u << WELL_SOUL_IDX)) has_castle_key = 1`) and has no dedicated control |
 
@@ -805,6 +894,13 @@ under it. This build is never shipped, so it costs zero submission bytes.
 
 *Note*: MinGW-w64's ASan support is limited; if it does not link, UBSan alone (`-fsanitize=undefined`)
 still catches the integer overflow in SEC-2 and any out-of-bounds array indexing UB.
+
+> **Start with `--decode-test`.** It is the one test that deliberately feeds malformed data to a
+> pointer-dense decode loop, so it is the natural first target for the `-Sanitize` build. SEC-1's
+> clamps close the hole and `--decode-test` proves the surrounding behaviour — confined writes and
+> termination — but **no pure-C test can prove the absence of out-of-bounds reads**, because an
+> out-of-bounds read of a `const` array has no observable effect. Sanitising this one test is what
+> would actually prove the clamps themselves. Noting the dependency here so the gap is not forgotten.
 
 ### 🟠 QA-5 — Several substantial features are tested by construction but have never been observed
 
@@ -1125,9 +1221,9 @@ Ordered by (risk to the submission) ÷ (effort), not by category.
 | # | Item | Effort | Why |
 |---|---|---|---|
 | ~~1~~ | ✅ **ERR-2** — *done*: `fatal()` with `SDL_ShowSimpleMessageBox` + `SDL_GetError()` on the four fatal paths | **measured +1,024 B** | Converts an undiagnosable silent failure into a bug report. Directly de-risks README blocker #2 (never smoke-tested on a second machine). Also closed ERR-12, partially closed OBS-1 |
-| ~~2~~ | ✅ **QA-1** — *done*: `tools/run-tests.ps1` runs all 25 tests + a size assertion under one exit code | **0 B**, 388.5 s/run | Makes "25/25 green" a checkable property. Verified 26/26 green. CI *service* still absent |
-| 3 | **ERR-1**: set `ents[i].tile = -1` in the pathological-seed path; retry with `seed+1` instead of returning a degenerate world | ~20 min, ~40 B | Removes a silently unwinnable game state |
-| 4 | **SEC-1**: three bounds clamps inside `draw_sprite_ex` | ~15 min, ~30 B | Makes the decoder self-limiting so the correctness proof no longer lives only in the unshipped binary |
+| ~~2~~ | ✅ **QA-1** — *done*: `tools/run-tests.ps1` runs all 27 tests + a size assertion under one exit code | **0 B**, 346.0 s/run | Makes "green" a checkable property. Verified 28/28. CI *service* still absent |
+| ~~3~~ | ✅ **ERR-1** — *done*: `GEN_RETRY_MAX` retry loop in `game_init`, plus `-1` fills for entities **and shards**, `g->seed` on the fallback path, and two `seed = rngs.seed` resyncs in `main` | **+512 B for items 3+4 combined** (one PE alignment block; budget was ≤230) | Removes a silently unwinnable game state. Fixed 4 defects, not the 2 this document named. `--genfail-test` green |
+| ~~4~~ | ✅ **SEC-1** — *done*: **four** bounds clamps (not three) plus the `draw_sprite_sp` split | *(included in the +512 above — the two were measured together)* | Makes the decoder self-limiting so the correctness proof no longer lives only in the unshipped binary. `--decode-test` green; render output byte-identical on well-formed art |
 | 5 | **SEC-2 / SEC-6**: clamp `--scale` to `WIN_SCALE_MAX`, clamp `--frames` to ≥ 0 | ~5 min, ~20 B | Removes signed-overflow UB on a shipping flag |
 | 6 | **PERF-1**: `revealed_count` per region; delete both full-grid scans and the ring walk | ~1–2 h, ~0 B net | Removes ~24.7 M wasted tile reads/second in the steady state |
 

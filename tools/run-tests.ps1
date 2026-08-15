@@ -1,13 +1,13 @@
 # Wayfarer self-test runner. Closes QA-1 in docs/production-gap-analysis.md.
 #
 # Runs every self-test entry point in one pass and returns the number of failing
-# tests as the process exit code, so "25/25 green" becomes a checked property of
+# tests as the process exit code, so "27/27 green" becomes a checked property of
 # the current commit rather than a hand-recorded claim about a past moment.
 #
 # Every test already returns a correct exit code, so this needs no change to
-# src/main.c. Test 26 asserts the shipping binary's size budget (QA-13).
+# src/main.c. Test 28 asserts the shipping binary's size budget (QA-13).
 #
-# Usage:  .\tools\run-tests.ps1                build if stale, run all 26
+# Usage:  .\tools\run-tests.ps1                build if stale, run all 28
 #         .\tools\run-tests.ps1 -NoBuild       run whatever binaries exist
 #         .\tools\run-tests.ps1 -Quick         skip the two long batch tests
 #         .\tools\run-tests.ps1 -Filter land   run only tests matching a name
@@ -57,6 +57,8 @@ $tests = @(
     @{ n = 'font';     a = @('--font-test') }
     @{ n = 'fog';      a = @('--fog-test') }
     @{ n = 'sprite';   a = @('--sprite-test') }
+    @{ n = 'genfail';  a = @('--genfail-test', '--seed', '1') }
+    @{ n = 'decode';   a = @('--decode-test') }
     @{ n = 'fade';     a = @('--fade-test') }
     @{ n = 'rebuild';  a = @('--rebuild-test') }
     @{ n = 'ground';   a = @('--ground-test') }
@@ -163,7 +165,7 @@ finally {
 }
 
 # ---------------------------------------------------------------------------
-# Test 26 - the size budget (QA-13). build.ps1 gates this, but nothing asserted
+# Test 28 - the size budget (QA-13). build.ps1 gates this, but nothing asserted
 # it, so a green suite could still describe an unshippable binary.
 # ---------------------------------------------------------------------------
 if ($names.Count -eq 0 -or ($names | Where-Object { 'size' -like "*$_*" })) {

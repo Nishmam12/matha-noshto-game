@@ -209,7 +209,7 @@ SDL surface used by the game, in full:
 | Audio synthesis | 5-layer deterministic softsynth + 3 parametric SFX voices | `synth_step`, `wave_sample`, `audio_cb` |
 | RNG | PCG32 with independent stream selectors | `rng_next`, `rng_seed`, `rngs_init` |
 | Serialisation | Hand-written little-endian byte packing | `save_put32/64`, `save_get32/64` |
-| Test harness | 25 self-test entry points with negative controls, in the same file | `#if WAYFARER_SELFTEST` block, lines 7955–13394 |
+| Test harness | 27 self-test entry points with negative controls, in the same file | `#if WAYFARER_SELFTEST` block, lines 8073–13732 |
 
 ### 2.4 Build & tooling scripts
 
@@ -218,7 +218,7 @@ SDL surface used by the game, in full:
 | [build.ps1](../build.ps1) | Release/self-test build, size measurement, **budget gate** (exits 2 over hard limit, 3 over ship target) |
 | [build-sdl2.ps1](../build-sdl2.ps1) | Builds the cut-down static SDL2 into `$TOOLS\SDL2-min` |
 | [tools/bake.ps1](../tools/bake.ps1) | PNG → `src/art_data.h`. Key-magenta stripping, opaque-box trim, per-sprite palette, RLE, dream-realm recolour, contact-sheet warning |
-| [tools/run-tests.ps1](../tools/run-tests.ps1) | Runs all 25 self-tests plus a size-budget assertion in one pass. Auto-builds stale binaries, times each test, exits with the **number of failures** (`99` = build failed). `-NoBuild`, `-Quick`, `-Filter` |
+| [tools/run-tests.ps1](../tools/run-tests.ps1) | Runs all 27 self-tests plus a size-budget assertion in one pass. Auto-builds stale binaries, times each test, exits with the **number of failures** (`99` = build failed). `-NoBuild`, `-Quick`, `-Filter` |
 | [Wayfarer-DEV.bat](../Wayfarer-DEV.bat) | Launches `wayfarer.exe --dev` |
 | [compile_commands.json](../compile_commands.json) | clangd/IntelliSense database (single entry) |
 | [.vscode/c_cpp_properties.json](../.vscode/c_cpp_properties.json) | VS Code C/C++ config, hardcoded `G:/tools` paths |
@@ -603,7 +603,11 @@ flowchart TD
     BLD --> PTH["place_paths()<br/>RNG-FREE worn lanes between houses"]
     PTH --> POR["place_portal()<br/>+ the Dream Well beside its dream end"]
     POR --> FF["flood_open() × 2<br/>find largest OVERWORLD component,<br/>spawn nearest its centroid"]
-    FF --> RB["regions_build()<br/>multi-source BFS → ≤16 connected components"]
+    FF --> RETRY{"any open<br/>overworld component?"}
+    RETRY -->|"no, attempt &lt; GEN_RETRY_MAX"| NEXT["rngs_init(seed + 1)<br/>regenerate from the top"]
+    NEXT --> WG
+    RETRY -->|"no, 8 attempts exhausted"| DEG["degenerate fallback:<br/>carve one tile, region_count = 0,<br/>spawn_region / every entity / every shard = -1,<br/>g-&gt;seed = rngs-&gt;seed"]
+    RETRY -->|yes| RB["regions_build()<br/>multi-source BFS → ≤16 connected components"]
     RB --> RD["regions_depth()"]
     RD --> WPV{"world_place_and_verify()"}
 
@@ -629,6 +633,15 @@ terminates at water.
 guarantee is the one thing that must never be traded. A world with a thin dream realm still ships;
 an unwinnable one does not. The fallback deliberately does *not* re-check `entities_split_ok` or
 `shards_sufficient`.
+
+**Why the seed retry is a loop and not recursion** (ERR-1): `Scratch sc` is a ~360 KB stack local.
+A recursive `game_init` would put a second `Scratch` *and* the caller's `World` on one frame —
+roughly 1.03 MB against MinGW's 2 MB default, which is the exact term invariant 2 exists to bound.
+The `for` loop reuses the one frame and costs 4 bytes of `int`. The step is `seed + 1`, deliberately
+the same step the `R` key takes, so a player walking past a pathological seed and `game_init`
+stepping past it internally land on the same world — one rule, not two. `main` resyncs its own
+`seed` from `rngs.seed` afterwards, because that variable is what the HUD and title bar display and
+its whole value is that `--seed N` reproduces what is on screen.
 
 ### 6.2 The core game loop — explore → restore → awaken → remember
 
@@ -831,7 +844,7 @@ the current commit.
 | 26 | **Upscale** | 4921–4987 | `blit_scale` |
 | 27 | **Isometric rasteriser** | 4989–5292 | `tile_hash`, `world_to_iso`, `vspan`, **`iso_tile`**, **`fog_lerp`**, `iso_ring`, `tile_detail/tuft/mortar/pebbles` |
 | 28 | **Dream colour** | 5293–5446 | **`dream_shift`**, `iso_diamond`, `terrain_colour`, `fill_ellipse` |
-| 29 | **Sprites** | 5447–5769 | `art_stream_ok*` *(selftest only)*, `art_palette`, `prop_covers_player`, **`draw_sprite_ex`**, `draw_sprite`, `draw_sprite_fade`, `draw_sprite_flip`, `well_stage`, `well_frame`, `player_sprite_id` |
+| 29 | **Sprites** | 5447–5769 | `art_stream_ok*` *(selftest only)*, `art_palette`, `prop_covers_player`, **`draw_sprite_sp`** (the decoder; takes the record by pointer so `--decode-test` can hand it a malformed one), **`draw_sprite_ex`** (thin id-taking wrapper), `draw_sprite`, `draw_sprite_fade`, `draw_sprite_flip`, `well_stage`, `well_frame`, `player_sprite_id` |
 | 30 | **Procedural props** | 5770–6248 | `draw_tree/bush/rock/reed/flower/crystal/shard/stump`, `prompt_bob`, `draw_prompt`, `near_building`, `woody_count_around`, **`prop_at`** |
 | 31 | **Buildings** | 6249–6556 | `draw_smoke`, **`draw_building`** |
 | 32 | **Aetherhold art** | 6558–6875 | `castle_wall_art`, `castle_stair_art`, `causeway_art`, `castle_decor_at`, `castle_camp_at`, `castle_sea_at` |
@@ -893,6 +906,8 @@ base seed; `--seeds N` sets the batch size.
 | `--hud-test` | `[--shot]` | — | HUD pixel probes |
 | `--fog-test` | — | — | Value hierarchy + shade separability |
 | `--sprite-test` | — | — | RLE round-trip, baked data integrity, anchors, key-colour absence, `dream_shift` C-vs-PowerShell parity |
+| `--decode-test` | — | — | SEC-1: the **shipping decoder** survives 3 malformed records (slice past `ART_DATA_BYTES`, slice ending on a RUN control byte, indices past `pal_n`) with zero writes outside the sprite's box. Negative control: all 3 rejected by `art_stream_ok_sp`. Positive control: a valid sprite still draws |
+| `--genfail-test` | `--seed` | — | ERR-1: a normal seed is undisturbed; one forced generation failure is recovered at `seed + 1`; failure past `GEN_RETRY_MAX` degrades honestly (`region_count` 0, every entity and shard `-1`, seed still reported). Negative control: the probe distinguishes healthy from degenerate |
 | `--fade-test` | — | — | Prop-fade truth table + exact blend, facing6, walk cycle |
 | `--rebuild-test` | — | — | Ruin→whole rebuild gate, **via the actual render path** |
 | `--ground-test` | — | — | Worn-path / ground-mark determinism |
@@ -1012,7 +1027,11 @@ proofs are cheap to re-run:
    sprite identity are all render-only. Every completability proof is a *re-run*, never a
    *re-argument*.
 2. **Every generator is seeded and replayable.** `--seed N` reproduces any output exactly, which is
-   what makes a bad result debuggable rather than anecdotal.
+   what makes a bad result debuggable rather than anecdotal. Since ERR-1's retry loop, `--seed N`
+   yields *N*'s world, or **deterministically** yields *N+1*'s (or *N+2*'s…, up to `GEN_RETRY_MAX`)
+   where *N* is pathological — the mapping is still a pure function of the seed, with no wall clock
+   and no state carried between calls. `main` resyncs its displayed seed to whichever one actually
+   produced the world, so the number on screen always reproduces what is on screen.
 3. **Three independent PCG32 streams** (`STREAM_TERRAIN = 1`, `STREAM_ENTITIES = 2`,
    `STREAM_AUDIO = 3`). Stream ids are append-only — renumbering would reshuffle every existing
    seed. PCG's `inc` is a *sequence selector*, so the streams are independent by construction rather
