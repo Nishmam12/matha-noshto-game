@@ -13393,6 +13393,60 @@ static int save_selftest(Uint64 base)
 }
 #endif /* WAYFARER_SELFTEST */
 
+/* ---------------------------------------------------------------------------
+ * ERR-2 — the only diagnostic channel the shipping binary has.
+ *
+ * wayfarer.exe is linked -mwindows: no console, no stdout, no stderr, no log.
+ * Before this, every fatal startup path returned a number that nobody could
+ * ever see. On a judge's machine the failure mode was "I double-clicked it and
+ * nothing happened" — undiagnosable by them, and undiagnosable by us from their
+ * report.
+ *
+ * SDL_ShowSimpleMessageBox accepts a NULL parent window and may be called
+ * before SDL_Init, so it works on all four paths including the one where video
+ * never came up — but it is NOT sufficient on its own. SDL routes it through
+ * the video subsystem, initialising one on demand, so when video is what failed
+ * the call returns -1 and shows nothing. Measured: with SDL_VIDEODRIVER set to
+ * a bogus name it returns -1 and the process vanishes silently — exactly the
+ * failure ERR-2 exists to prevent, on the path most likely to hit a judge's
+ * machine. MessageBoxA is the fallback: it is pure user32 and depends on no
+ * part of SDL, so it survives the case SDL cannot.
+ *
+ * `code` is returned unchanged so the exit-code contract is untouched:
+ *   1 SDL_Init   2 SDL_CreateWindow   3 NULL surface   4 surface not 32bpp
+ *
+ * The self-test build writes to stderr instead. It is -mconsole and is run
+ * unattended by tools/run-tests.ps1 and by the capture scripts; a modal dialog
+ * there would not fail the run, it would hang it.
+ * ------------------------------------------------------------------------- */
+#if !WAYFARER_SELFTEST
+/* Declared by hand instead of #include <windows.h>: that header drops several
+ * hundred macros (min, max, near, far, ...) into a 14,000-line translation
+ * unit, and exactly one function is wanted from it. user32 is already linked
+ * (build.ps1). The A variant, not W, because `msg` below is a char buffer. */
+__declspec(dllimport) int __stdcall MessageBoxA(void *hWnd, const char *text,
+                                                const char *caption, unsigned int type);
+#define WF_MB_OK        0x00000000u
+#define WF_MB_ICONERROR 0x00000010u
+#endif
+
+static int fatal(const char *what, int code)
+{
+    const char *err = SDL_GetError();
+    if (!err || !err[0]) err = "(SDL reported no further detail)";
+#if WAYFARER_SELFTEST
+    fprintf(stderr, "FATAL %d: %s\n  SDL: %s\n", code, what, err);
+#else
+    {
+        char msg[256];
+        SDL_snprintf(msg, sizeof(msg), "%s\n\nSDL reported:\n%s", what, err);
+        if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Wayfarer", msg, NULL) != 0)
+            MessageBoxA(NULL, msg, "Wayfarer Fatal Error", WF_MB_OK | WF_MB_ICONERROR);
+    }
+#endif
+    return code;
+}
+
 /* ----------------------------------------------------------------- main -- */
 
 int main(int argc, char **argv)
@@ -13621,7 +13675,8 @@ int main(int argc, char **argv)
      * device. Verified: with SDL_AUDIODRIVER set to a bogus value the combined
      * call returned -1 and the game exited. */
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
-        return 1;
+        return fatal("Wayfarer could not start SDL's video subsystem.\n"
+                     "The game cannot open a window on this machine.", 1);
 
     scale = arg_int(argc, argv, "--scale", 0);
     if (scale < 1)
@@ -13629,8 +13684,11 @@ int main(int argc, char **argv)
     win = SDL_CreateWindow("Wayfarer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                            LOGICAL_W * scale, LOGICAL_H * scale, SDL_WINDOW_SHOWN);
     if (!win) {
+        /* fatal() first: SDL_Quit can clear the error string we want to report. */
+        int rc = fatal("Wayfarer could not create its game window.\n"
+                       "Try running with a smaller scale, e.g.  wayfarer.exe --scale 1", 2);
         SDL_Quit();
-        return 2;
+        return rc;
     }
 
     /* Needs the window's pixel format, so it cannot be built before this point.
@@ -13910,11 +13968,18 @@ int main(int argc, char **argv)
         /* Re-fetch every frame: the surface is invalidated on resize. */
         fb = SDL_GetWindowSurface(win);
         if (!fb || fb->format->BytesPerPixel != 4) {
+            /* Capture the diagnostic before the cleanup below: SDL_CloseAudioDevice
+               and SDL_Quit can both overwrite the error string. */
+            int rc = fb
+                ? fatal("Wayfarer needs a 32-bit colour display mode.\n"
+                        "This window's surface is not 32 bits per pixel.", 4)
+                : fatal("Wayfarer lost its drawing surface.\n"
+                        "This can happen after a display, resolution or GPU-driver change.", 3);
             if (dev)
                 SDL_CloseAudioDevice(dev);
             SDL_DestroyWindow(win);
             SDL_Quit();
-            return fb ? 4 : 3;
+            return rc;
         }
 
         draw = back ? back : fb;
