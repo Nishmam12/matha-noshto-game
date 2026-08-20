@@ -1,89 +1,47 @@
-# Wayfarer self-test runner. Closes QA-1 in docs/production-gap-analysis.md.
+# Wayfarer (top-down) - run every self-test, plus the shipping size assertion.
 #
-# Runs every self-test entry point in one pass and returns the number of failing
-# tests as the process exit code, so "27/27 green" becomes a checked property of
-# the current commit rather than a hand-recorded claim about a past moment.
+# Usage:  .\tools\run-tests.ps1              build what is stale, run everything
+#         .\tools\run-tests.ps1 -Quick       skip the tests marked slow
+#         .\tools\run-tests.ps1 -Filter a,b  run only tests whose name matches
+#         .\tools\run-tests.ps1 -NoBuild     run whatever binaries already exist
 #
-# Every test already returns a correct exit code, so this needs no change to
-# src/main.c. Test 28 asserts the shipping binary's size budget (QA-13).
-#
-# Usage:  .\tools\run-tests.ps1                build if stale, run all 28
-#         .\tools\run-tests.ps1 -NoBuild       run whatever binaries exist
-#         .\tools\run-tests.ps1 -Quick         skip the two long batch tests
-#         .\tools\run-tests.ps1 -Filter land   run only tests matching a name
-#         .\tools\run-tests.ps1 -Filter 'land,reach,play'
-#
-# Exit code: 0 = all green. N > 0 = N tests failed.
-
-param(
-    [switch]$NoBuild,
-    [switch]$Quick,
-    [string]$Filter
-)
+# Exit code: 0 = all green. N > 0 = N tests failed. 99 = the build failed, so
+# nothing ran - deliberately distinct from "some tests failed".
+param([switch]$NoBuild, [switch]$Quick, [string]$Filter)
 
 $ErrorActionPreference = 'Stop'
 
-$ROOT   = Split-Path -Parent $PSScriptRoot
-$TESTX  = Join-Path $ROOT 'build\wayfarer-selftest.exe'
-$SHIPX  = Join-Path $ROOT 'build\wayfarer.exe'
-$BUILD  = Join-Path $ROOT 'build.ps1'
-$SRC    = @(
-    (Join-Path $ROOT 'src\main.c'),
-    (Join-Path $ROOT 'src\art_data.h')
-)
+$ROOT  = Split-Path -Parent $PSScriptRoot
+$TESTX = Join-Path $ROOT 'build\wayfarer-selftest.exe'
+$SHIPX = Join-Path $ROOT 'build\wayfarer.exe'
+$BUILD = Join-Path $ROOT 'build.ps1'
+# Staleness is checked against the generated art header too, so a re-bake counts.
+$SRC   = @((Join-Path $ROOT 'src\main.c'), (Join-Path $ROOT 'src\art_data.h'))
 
-# Must match build.ps1. The floppy standard ($HARD) is 1474560; we ship under
-# $TARGET so there is always slack for a last-minute fix.
-$TARGET = 1440000
+$TARGET = 1440000   # Must match build.ps1.
 
-# ---------------------------------------------------------------------------
-# The suite.
-#
-# Batch sizes are the documented invocations from README.md, deliberately
-# unchanged so this script measures the same thing the project has always
-# claimed. Two known gaps, both tracked, neither silently papered over here:
-#
-#   QA-2  --land-test fails seeds 85, 417 and 430 (22-23% reach against a 50%
-#         bar). All three are past the default --seeds 30 window, so this suite
-#         is green while a known generation-quality defect exists. Fix the
-#         generator or promote those seeds to explicit regression cases; do not
-#         widen --seeds here without deciding which.
-#
-#   --input-test and --autoplay are excluded: both open a window and depend on
-#         wall-clock duration, so they are not unattended-safe.
-# ---------------------------------------------------------------------------
+# Each row: n = test name (also the --flag), a = argv. slow = skipped by -Quick.
 $tests = @(
-    @{ n = 'iso';      a = @('--iso-test') }
-    @{ n = 'font';     a = @('--font-test') }
-    @{ n = 'fog';      a = @('--fog-test') }
-    @{ n = 'sprite';   a = @('--sprite-test') }
-    @{ n = 'genfail';  a = @('--genfail-test', '--seed', '1') }
-    @{ n = 'decode';   a = @('--decode-test') }
-    @{ n = 'fade';     a = @('--fade-test') }
-    @{ n = 'rebuild';  a = @('--rebuild-test') }
-    @{ n = 'ground';   a = @('--ground-test') }
-    @{ n = 'motion';   a = @('--motion-test') }
-    @{ n = 'hud';      a = @('--hud-test') }
-    @{ n = 'rng';      a = @('--rng-test', '--seed', '1') }
-    @{ n = 'save';     a = @('--save-test') }
-    @{ n = 'land';     a = @('--land-test',    '--seeds', '30',  '--seed', '1') }
-    @{ n = 'village';  a = @('--village-test', '--seeds', '30',  '--seed', '1') }
-    @{ n = 'path';     a = @('--path-test',    '--seeds', '20') }
-    @{ n = 'move';     a = @('--move-test',    '--seeds', '20',  '--seed', '1') }
-    @{ n = 'region';   a = @('--region-test',  '--seeds', '30',  '--seed', '1') }
-    @{ n = 'reach';    a = @('--reach-test',   '--seeds', '50',  '--seed', '1') }
-    @{ n = 'bridge';   a = @('--bridge-test',  '--seeds', '200', '--seed', '1'); slow = $true }
-    @{ n = 'sector';   a = @('--sector-test',  '--seeds', '30',  '--seed', '1') }
-    @{ n = 'portal';   a = @('--portal-test',  '--seeds', '30',  '--seed', '1') }
-    @{ n = 'shard';    a = @('--shard-test',   '--seeds', '30',  '--seed', '1') }
-    @{ n = 'gating';   a = @('--gating-test',  '--seeds', '30',  '--seed', '1') }
-    @{ n = 'aether';   a = @('--aether-test',  '--seeds', '20') }
-    @{ n = 'play';     a = @('--play-test',    '--seeds', '50',  '--seed', '1'); slow = $true }
-    @{ n = 'audio';    a = @('--audio-test', '3000', '--sfx') }
+    @{ n = 'sprite';   a = @('--sprite-test')   } # RLE round-trip, records, anchors
+    @{ n = 'decode';   a = @('--decode-test')   } # shipping decoder vs malformed streams
+    @{ n = 'fog';      a = @('--fog-test')      } # LUT vs fog_lerp, value hierarchy
+    @{ n = 'autotile'; a = @('--autotile-test') } # blob slicing truth table, tile tables
+    @{ n = 'tile';     a = @('--tile-test')     } # ground-pass coverage, base opacity
+    @{ n = 'sort';     a = @('--sort-test')     } # y-sort order/stability, prop ghosting
+    @{ n = 'mockup';   a = @('--mockup-test')   } # rendered-pixel census vs the mockups
+    @{ n = 'font';     a = @('--font-test')     } # glyph coverage, exact pixel count
+    @{ n = 'hud';      a = @('--hud-test', '--seed', '1') }      # toast/banner ticks, minimap rule
+    @{ n = 'save';     a = @('--save-test', '--seed', '1') }     # round trip + 10 rejection controls
+    # Both audio rows need a real output device. On a machine with none they
+    # fail loudly rather than skipping, which is the honest outcome: silence is
+    # exactly what this suite exists to catch.
+    @{ n = 'audio';    a = @('--audio-test', '600') }            # tone path, deadline, rate handling
+    @{ n = 'audiomix'; a = @('--audio-test', '1200', '--layers') } # 5 layers + SFX under contention
+    @{ n = 'move';     a = @('--move-test', '--seeds', '20', '--seed', '1') }
+    @{ n = 'gating';   a = @('--gating-test', '--seeds', '20', '--seed', '1') }
+    @{ n = 'reach';    a = @('--reach-test', '--seeds', '30', '--seed', '1') }
+    @{ n = 'play';     a = @('--play-test', '--seeds', '20', '--seed', '1'); slow = $true }
 )
-
-$names = @()
-if ($Filter) { $names = $Filter -split '[,\s]+' | Where-Object { $_ } }
 
 function Test-Stale([string]$exe) {
     if (-not (Test-Path $exe)) { return $true }
@@ -94,136 +52,86 @@ function Test-Stale([string]$exe) {
     return $false
 }
 
-function Invoke-Build([string]$label, [string[]]$buildArgs) {
-    Write-Host ("building   {0} ({1})" -f $label, ($buildArgs -join ' ')) -ForegroundColor Cyan
-    & $BUILD @buildArgs | Out-Host
+function Invoke-Build([string[]]$buildArgs) {
+    & powershell -ExecutionPolicy Bypass -File $BUILD @buildArgs | Out-Host
     if ($LASTEXITCODE -ne 0) {
-        Write-Host ("BUILD FAILED for {0} (exit {1}) - cannot run the suite" -f $label, $LASTEXITCODE) -ForegroundColor Red
+        Write-Host "BUILD FAILED - no tests run" -ForegroundColor Red
         exit 99
     }
 }
 
-# ---------------------------------------------------------------------------
-# Build if needed. QA-12: build\ is never cleaned and has held a stale
-# wayfarer-selftest.old.exe, so running a binary older than src\ is a real
-# failure mode, not a theoretical one.
-# ---------------------------------------------------------------------------
+# build\ is never cleaned, so running a binary older than src\ is a real failure
+# mode rather than a theoretical one.
 if (-not $NoBuild) {
-    if (Test-Stale $TESTX) { Invoke-Build 'self-test' @('-SelfTest') }
-    else { Write-Host "self-test binary is current" -ForegroundColor DarkGray }
-
-    if (Test-Stale $SHIPX) { Invoke-Build 'shipping' @() }
-    else { Write-Host "shipping binary is current" -ForegroundColor DarkGray }
-    Write-Host ""
+    if (Test-Stale $SHIPX) { Invoke-Build @() }
+    if (Test-Stale $TESTX) { Invoke-Build @('-SelfTest') }
 }
-
 if (-not (Test-Path $TESTX)) {
-    Write-Host "self-test binary not found at $TESTX - run .\build.ps1 -SelfTest" -ForegroundColor Red
+    Write-Host "self-test binary missing at $TESTX" -ForegroundColor Red
     exit 99
 }
 
-# ---------------------------------------------------------------------------
-# Run. CWD is the repo root on purpose: SAVE_FILENAME is the bare relative path
-# "wayfarer.sav" resolved against the process CWD (SEC-4), so --save-test must
-# run from a predictable, writable directory.
-# ---------------------------------------------------------------------------
 $results = @()
-$suite = [Diagnostics.Stopwatch]::StartNew()
+$failed  = 0
+$skipped = 0
 
+# SAVE_FILENAME is a bare relative path resolved against the process CWD, so the
+# save test needs a predictable writable directory.
 Push-Location $ROOT
 try {
     foreach ($t in $tests) {
-        if ($names.Count -gt 0 -and -not ($names | Where-Object { $t.n -like "*$_*" })) { continue }
+        if ($Filter -and -not (($Filter -split '[,\s]+') | Where-Object { $t.n -like "*$_*" })) { continue }
         if ($Quick -and $t.slow) {
-            Write-Host ("SKIP  {0,-9} (-Quick)" -f $t.n) -ForegroundColor DarkGray
-            $results += [pscustomobject]@{ Name = $t.n; Status = 'SKIP'; Code = 0; Seconds = 0.0 }
+            Write-Host ("SKIP  {0}" -f $t.n) -ForegroundColor DarkGray
+            $skipped++
             continue
         }
-
-        $a = @($t.a)
-        Write-Host ""
-        Write-Host ("--- {0}  [{1}]" -f $t.n, ($a -join ' ')) -ForegroundColor Cyan
-
+        Write-Host ("RUN   {0}" -f $t.n) -ForegroundColor Cyan
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        & $TESTX @a | Out-Host
-        $rc = $LASTEXITCODE
+        & $TESTX @($t.a) | Out-Host
+        $code = $LASTEXITCODE
         $sw.Stop()
-
-        $status = if ($rc -eq 0) { 'PASS' } else { 'FAIL' }
-        $colour = if ($rc -eq 0) { 'Green' } else { 'Red' }
-        Write-Host ("{0}  {1,-9} {2,7:N1}s" -f $status, $t.n, $sw.Elapsed.TotalSeconds) -ForegroundColor $colour
+        if ($code -ne 0) { $failed += $code }
         $results += [pscustomobject]@{
-            Name    = $t.n
-            Status  = $status
-            Code    = $rc
-            Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+            Name = $t.n; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+            Status = if ($code -eq 0) { 'PASS' } else { "FAIL($code)" }
         }
     }
-}
-finally {
-    Pop-Location
-}
 
-# ---------------------------------------------------------------------------
-# Test 28 - the size budget (QA-13). build.ps1 gates this, but nothing asserted
-# it, so a green suite could still describe an unshippable binary.
-# ---------------------------------------------------------------------------
-if ($names.Count -eq 0 -or ($names | Where-Object { 'size' -like "*$_*" })) {
-    Write-Host ""
-    Write-Host "--- size  [build\wayfarer.exe <= $('{0:N0}' -f $TARGET) bytes]" -ForegroundColor Cyan
-    if (-not (Test-Path $SHIPX)) {
-        Write-Host "FAIL  size      shipping binary not found - run .\build.ps1" -ForegroundColor Red
-        $results += [pscustomobject]@{ Name = 'size'; Status = 'FAIL'; Code = 1; Seconds = 0.0 }
-    }
-    else {
-        $size = (Get-Item $SHIPX).Length
-        if ($size -le $TARGET) {
-            Write-Host ("PASS  size      {0:N0} bytes, {1:N0} under target" -f $size, ($TARGET - $size)) -ForegroundColor Green
-            $results += [pscustomobject]@{ Name = 'size'; Status = 'PASS'; Code = 0; Seconds = 0.0 }
-        }
-        else {
-            Write-Host ("FAIL  size      {0:N0} bytes, {1:N0} OVER target" -f $size, ($size - $TARGET)) -ForegroundColor Red
-            $results += [pscustomobject]@{ Name = 'size'; Status = 'FAIL'; Code = 1; Seconds = 0.0 }
-        }
+    # build.ps1 gates this, but nothing asserted it, so a green suite could still
+    # describe an unshippable binary.
+    Write-Host "RUN   size" -ForegroundColor Cyan
+    $size = (Get-Item $SHIPX).Length
+    if ($size -le $TARGET) {
+        Write-Host ("size    : {0:N0} bytes, {1:N0} under the {2:N0} target" -f $size, ($TARGET - $size), $TARGET)
+        $results += [pscustomobject]@{ Name = 'size'; Seconds = 0.0; Status = 'PASS' }
+    } else {
+        Write-Host ("size    : {0:N0} bytes - OVER the {1:N0} target" -f $size, $TARGET) -ForegroundColor Red
+        $results += [pscustomobject]@{ Name = 'size'; Seconds = 0.0; Status = 'FAIL(1)' }
+        $failed += 1
     }
 }
+finally { Pop-Location }
 
-$suite.Stop()
-
-# ---------------------------------------------------------------------------
-# Summary. QA-7: suite runtime is significant (~5 min) and was untracked, so a
-# generation change that doubles it went unnoticed until someone waited.
-# ---------------------------------------------------------------------------
-$pass = @($results | Where-Object { $_.Status -eq 'PASS' }).Count
-$fail = @($results | Where-Object { $_.Status -eq 'FAIL' }).Count
-$skip = @($results | Where-Object { $_.Status -eq 'SKIP' }).Count
-
-# Rows are formatted by hand rather than with Format-Table: Format-Table emits
-# nothing when the host has no console width, which is exactly the case when
-# this script is redirected to a file or run by a CI agent - i.e. the two
-# situations where the summary matters most.
+# Formatted by hand, not with Format-Table: Format-Table emits nothing when the
+# host has no console width, which is exactly the case when this is redirected to
+# a file or run by an agent - the two situations where the summary matters most.
 Write-Host ""
-Write-Host "==================== SUMMARY ====================" -ForegroundColor White
-Write-Host ("{0,-10} {1,-6} {2,4} {3,8}" -f 'test', 'result', 'exit', 'sec')
+Write-Host "---- summary (slowest first) ----"
 foreach ($r in ($results | Sort-Object -Property Seconds -Descending)) {
-    $colour = switch ($r.Status) { 'PASS' { 'Green' } 'FAIL' { 'Red' } default { 'DarkGray' } }
-    Write-Host ("{0,-10} {1,-6} {2,4} {3,8:N1}" -f $r.Name, $r.Status, $r.Code, $r.Seconds) -ForegroundColor $colour
+    $colour = if ($r.Status -eq 'PASS') { 'Green' } else { 'Red' }
+    Write-Host ("  {0,-14} {1,7:N1}s  {2}" -f $r.Name, $r.Seconds, $r.Status) -ForegroundColor $colour
 }
-Write-Host "------------------------------------------------"
-Write-Host ("{0} passed, {1} failed, {2} skipped in {3:N1}s" -f $pass, $fail, $skip, $suite.Elapsed.TotalSeconds)
 
-if ($fail -gt 0) {
+if ($failed -gt 0) {
     Write-Host ""
-    foreach ($r in $results | Where-Object { $_.Status -eq 'FAIL' }) {
-        Write-Host ("FAILED: {0} (exit {1})" -f $r.Name, $r.Code) -ForegroundColor Red
-    }
-    exit $fail
+    Write-Host ("{0} FAILING TEST(S)" -f $failed) -ForegroundColor Red
+    exit $failed
 }
-
-if ($skip -gt 0) {
+Write-Host ""
+if ($skipped -gt 0) {
     Write-Host "ALL GREEN (with skips - not a full pass)" -ForegroundColor Yellow
-    exit 0
+} else {
+    Write-Host "ALL GREEN" -ForegroundColor Green
 }
-
-Write-Host "ALL GREEN" -ForegroundColor Green
 exit 0

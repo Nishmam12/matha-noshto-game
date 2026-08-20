@@ -1,7 +1,0 @@
-[
-  {
-    "directory": "c:/Users/afnan/Desktop/Projects/Wayfarer",
-    "command": "c:/Users/afnan/Desktop/Projects/Wayfarer/w64devkit/bin/gcc.exe -std=c99 -Os -Wall -Wextra -Ic:/Users/afnan/Desktop/Projects/Wayfarer/SDL2-min/include -Ic:/Users/afnan/Desktop/Projects/Wayfarer/SDL2-min/include/SDL2 -c src/main.c -o build/wayfarer.o",
-    "file": "src/main.c"
-  }
-]

@@ -1,0 +1,35 @@
+# Build output. Binaries are rebuilt from source in under a second; keeping a
+# 670 KB executable that changes on every build out of git history matters when
+# the whole project is a size-discipline exercise.
+build/
+
+# Obsidian workspace state. The vault's *content* (notes and their links) is
+# tracked; the editor's UI layout and installed plugins are not.
+.obsidian/
+
+# Toolchain and dependencies live outside the repo entirely — see README.md.
+# Listed defensively in case anyone relocates them under the project root.
+#
+# `/tools/*` rather than `tools/`, so OUR OWN build scripts can be re-included below. Git cannot
+# re-include a file whose parent DIRECTORY is excluded, so excluding the directory itself silently
+# swallowed tools/bake.ps1 — which meant src/art_data.h was committed while the script that
+# generates it was not, leaving the art pipeline one-way on a fresh clone.
+/tools/*
+!/tools/*.ps1
+w64devkit/
+SDL2*/
+sdl2-src/
+sdl2-build/
+
+# Scratch
+*.map
+*.f32
+*.o
+*.obj
+*.exe
+
+# A coding-agent tool's own config, with live API keys in plaintext. Found on 2026-08-06 sitting
+# untracked at the vault root — a separate agent ("opencode"/qwen) was run against this same
+# working tree. Never committed and must never be: this entry exists so a future `git add -A`
+# cannot catch it by accident.
+opencode.json

@@ -1,10 +1,10 @@
-# Wayfarer release build. Toolchain paths and rationale: design/Toolchain Setup.md
-# Usage:  .\build.ps1          release build + size check
-#         .\build.ps1 -Map     also emit build\wayfarer.map for size forensics
-
+# Wayfarer (top-down) release build. Toolchain notes and rationale: README.md.
+# Usage:  .\build.ps1            release build + size check
+#         .\build.ps1 -Map       also emit build\wayfarer.map for size forensics
+#
 # -SelfTest builds a SEPARATE binary (build\wayfarer-selftest.exe) with the
 # verification scaffolding and a console attached. The shipping wayfarer.exe
-# never contains it — that is the point of keeping them separate.
+# never contains it - that is the point of keeping them separate.
 param([switch]$Map, [switch]$SelfTest)
 
 $ErrorActionPreference = 'Stop'
@@ -34,12 +34,17 @@ $OUT  = Join-Path $ROOT ($(if ($SelfTest) { 'build\wayfarer-selftest.exe' } else
 # Contest budget. "1.44MB" has three definitions; HARD is the floppy standard.
 $HARD   = 1474560   # absolute ceiling
 $TARGET = 1440000   # what we ship under
-$WARN   = 1200000   # stop-and-raise threshold per the engineering brief
+$WARN   = 1200000   # stop-and-raise threshold
 
 if (-not (Test-Path (Split-Path $OUT))) { New-Item -ItemType Directory -Force (Split-Path $OUT) | Out-Null }
 
+# -Werror because "zero warnings" was a rule nothing enforced: an ungated
+# self-test-only helper warned in the SHIPPING build for several phases without
+# failing anything, because the rule lived in CLAUDE.md and not in the compiler.
+# An uncalled static is a warning AND dead shipped bytes, so it is worth an
+# error. The self-test build gets it too - a warning there is the same bug.
 $cflags = @(
-    '-std=c99', '-Os', '-Wall', '-Wextra',
+    '-std=c99', '-Os', '-Wall', '-Wextra', '-Werror',
     '-ffunction-sections', '-fdata-sections',
     '-fno-ident', '-fno-asynchronous-unwind-tables'
 )
@@ -47,7 +52,7 @@ $cflags = @(
 # not been enabled in this configuration"). Costs us little: we are one
 # translation unit, and libSDL2.a is prebuilt without GCC IR so LTO could not
 # reach into it regardless. If we outgrow one .c, use a unity build rather than
-# adding -flto. See design/Toolchain Setup.md.
+# adding -flto.
 $includes = @("-I$SDL\include", "-I$SDL\include\SDL2")
 $ldflags = @(
     '-static', '-s',
@@ -66,7 +71,7 @@ $libs = @(
     '-lsetupapi', '-lshell32'
 )
 # The map is ~1.5 MB of linker diagnostics. Useful, but it must never sit in the
-# vault unnoticed, so a normal build deletes any stale one. Regenerate with -Map.
+# tree unnoticed, so a normal build deletes any stale one. Regenerate with -Map.
 $mapFile = "$ROOT\build\wayfarer.map"
 if ($Map) { $ldflags += "-Wl,-Map=$mapFile" }
 elseif (Test-Path $mapFile) { Remove-Item $mapFile -Force }
