@@ -144,6 +144,33 @@ static void fill_rect(SDL_Surface *s, int x, int y, int w, int h, Uint32 colour)
 #define FOG_TINT_B 86.0f
 #define FOG_KEEP   0.50f   /* fraction of luminance contrast surviving at reveal 0 */
 
+/* The ramp is EASED rather than run linearly into the true colour.
+ *
+ * Reveal is linear in the thing that produces it - sight is a quadratic taper
+ * over distance and restoration is a constant rate - but a linear ramp in the
+ * BLEND spends its whole second half within touching distance of full chroma.
+ * Ground is what that lands on hardest: this palette's grass is a saturated
+ * chartreuse, and at half reveal a linear blend already reads as fully lit
+ * grass, so the last fifteen levels have nothing left to give and arriving at a
+ * restored region is a saturation pop rather than colour coming back.
+ *
+ * Weighted toward the quadratic, so early reveal stays hazy and the approach to
+ * true colour is gradual. BOTH ENDPOINTS ARE FIXED BY CONSTRUCTION - 0 maps to
+ * 0 and 1 maps to 1 - which is what keeps full reveal reproducing the palette
+ * exactly, the invariant --fog-test asserts outright. Monotonic on [0,1]: the
+ * derivative is FOG_EASE + 2(1-FOG_EASE)r, positive throughout.
+ *
+ * It lives INSIDE fog_lerp, not in fogpal_build, so the LUT and every direct
+ * call agree by construction rather than by being kept in step. */
+#define FOG_EASE   0.70f   /* linear share; 1 - this is the quadratic share */
+
+static float fog_ease(float reveal)
+{
+    if (reveal < 0.0f) reveal = 0.0f;
+    if (reveal > 1.0f) reveal = 1.0f;
+    return reveal * (FOG_EASE + reveal * (1.0f - FOG_EASE));
+}
+
 static Uint32 fog_lerp(SDL_Surface *s, int r, int gr, int b, float reveal)
 {
     float lum = 0.299f * (float)r + 0.587f * (float)gr + 0.114f * (float)b;
@@ -151,13 +178,24 @@ static Uint32 fog_lerp(SDL_Surface *s, int r, int gr, int b, float reveal)
     float fg = FOG_TINT_G + (lum - FOG_TINT_G) * FOG_KEEP;
     float fb = FOG_TINT_B + (lum - FOG_TINT_B) * FOG_KEEP;
 
-    if (reveal < 0.0f) reveal = 0.0f;
-    if (reveal > 1.0f) reveal = 1.0f;
+    reveal = fog_ease(reveal);
 
+    /* ROUNDED, not truncated. A cast to Uint8 throws away up to a full 8-bit
+     * step, and it throws it away in one direction - always downward - so the
+     * error is a bias rather than noise. That is precisely what pulls two
+     * near-equal luminances across an integer boundary in opposite directions
+     * and inverts their order, which is the failure --fog-test exists to catch:
+     * with truncation the worst inverting gap sat at 1.01, one step above where
+     * the check calls a pair separable. Rounding halves the worst-case error
+     * and removes the bias with it.
+     *
+     * Full reveal still reproduces the palette exactly - the blend already
+     * lands within half a step of the true value there, so +0.5 truncates back
+     * onto it rather than past it. --fog-test asserts that outright. */
     return SDL_MapRGB(s->format,
-                      (Uint8)(fr + ((float)r  - fr) * reveal),
-                      (Uint8)(fg + ((float)gr - fg) * reveal),
-                      (Uint8)(fb + ((float)b  - fb) * reveal));
+                      (Uint8)(fr + ((float)r  - fr) * reveal + 0.5f),
+                      (Uint8)(fg + ((float)gr - fg) * reveal + 0.5f),
+                      (Uint8)(fb + ((float)b  - fb) * reveal + 0.5f));
 }
 
 /* The whole point of a single global palette: with a fixed palette, the fogged
@@ -1155,6 +1193,19 @@ static const short tile_rock_ring[9] = {
     ART_TILE_C3_R4, ART_NONE,       ART_TILE_C5_R4,
     ART_TILE_C3_R5, ART_TILE_C4_R5, ART_TILE_C5_R5
 };
+/* ...and what to lay under that hollow. Row 7 cols 6-7 are the only fully
+ * OPAQUE cells in the sheet's rock block - stone rubble, no transparency - so
+ * they are the only two that can serve as a base. Everything else in the block
+ * is rim art with a transparent land side.
+ *
+ * It has to be stone rather than any ground tile. Grass under a permanently
+ * solid cell reads as a clearing she should be able to walk into, and dirt -
+ * tried first - reads worse still: an outcrop's interior is a hard-edged brown
+ * RECTANGLE against green, because the rim art covers a rim cell only partly
+ * and the fill's straight edge shows through the rest. Stone under stone is the
+ * only fill whose seam with the rim art is invisible. --tile-test asserts the
+ * opacity, alongside the other three base tables. */
+static const short tile_rock_fill[2] = { ART_TILE_C6_R7, ART_TILE_C7_R7 };
 
 static int terr_at(const World *w, int tx, int ty)
 {
@@ -1178,6 +1229,19 @@ static int blob_slice(int n_same, int s_same, int e_same, int w_same)
  * grass, not a different substrate, so a grass/olive boundary must NOT draw a
  * dirt edge. This predicate is the one place that decision lives. */
 static int gt_leafy(int t) { return t == GT_GRASS || t == GT_OLIVE || t == GT_ROCK; }
+
+/* Is this cell surrounded on all four axes by its own material?
+ *
+ * That is exactly blob_slice's CENTRE index, and the centre is the one slice
+ * where both the pond rim and the rock ring draw nothing - so it is also the
+ * one slice whose cell is still showing whatever base was laid under it. Both
+ * the ground pass and prop placement need that distinction, and asking it here
+ * keeps them from drifting into two different definitions of "interior". */
+static int blob_interior(const World *w, int tx, int ty, int t)
+{
+    return terr_at(w, tx - 1, ty) == t && terr_at(w, tx + 1, ty) == t &&
+           terr_at(w, tx, ty - 1) == t && terr_at(w, tx, ty + 1) == t;
+}
 
 /* ---- Collision ----------------------------------------------------------
  *
@@ -1376,6 +1440,49 @@ static void bfs_open(const World *w, const int *sources, int nsrc,
     }
 }
 
+/* Derive each region's tile count and the adjacency graph from region[][].
+ *
+ * Split out of regions_build because the gate ridges below cut tiles OUT of the
+ * partition after it is built, and the graph has to be re-derived from what is
+ * left. Two copies of this loop would be two definitions of "which regions
+ * touch", and the whole gating proof rests on that answer being one thing. */
+static void regions_relink(World *w)
+{
+    int x, y, i;
+
+    for (i = 0; i < REGION_COUNT; i++) {
+        w->regions[i].tiles = 0;
+        w->regions[i].adj = 0;
+    }
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            Uint8 o = w->region[y][x];
+            if (o != REGION_NONE) w->regions[o].tiles++;
+        }
+    /* Adjacency, recorded BOTH ways so the graph is symmetric by construction
+     * rather than by remembering to add the reverse edge. */
+    for (y = 0; y < WORLD_H; y++) {
+        for (x = 0; x < WORLD_W; x++) {
+            Uint8 a = w->region[y][x];
+            if (a == REGION_NONE) continue;
+            if (x + 1 < WORLD_W) {
+                Uint8 b = w->region[y][x + 1];
+                if (b != REGION_NONE && b != a) {
+                    w->regions[a].adj |= 1u << b;
+                    w->regions[b].adj |= 1u << a;
+                }
+            }
+            if (y + 1 < WORLD_H) {
+                Uint8 b = w->region[y + 1][x];
+                if (b != REGION_NONE && b != a) {
+                    w->regions[a].adj |= 1u << b;
+                    w->regions[b].adj |= 1u << a;
+                }
+            }
+        }
+    }
+}
+
 /* Farthest-point sampling on PATH distance, not straight-line distance: the
  * next region seed is the open tile hardest to reach from every seed so far.
  * On a map whose walkable space winds between ponds and outcrops, straight-line
@@ -1414,35 +1521,10 @@ static void regions_build(World *w, Scratch *sc)
     w->region_count = nsrc;
     for (i = 0; i < nsrc; i++)
         w->regions[i].seed_tile = sources[i];
-    for (y = 0; y < WORLD_H; y++) {
-        for (x = 0; x < WORLD_W; x++) {
-            Uint8 o = sc->owner[y * WORLD_W + x];
-            w->region[y][x] = o;
-            if (o != REGION_NONE) w->regions[o].tiles++;
-        }
-    }
-    /* Adjacency, recorded BOTH ways so the graph is symmetric by construction
-     * rather than by remembering to add the reverse edge. */
-    for (y = 0; y < WORLD_H; y++) {
-        for (x = 0; x < WORLD_W; x++) {
-            Uint8 a = w->region[y][x];
-            if (a == REGION_NONE) continue;
-            if (x + 1 < WORLD_W) {
-                Uint8 b = w->region[y][x + 1];
-                if (b != REGION_NONE && b != a) {
-                    w->regions[a].adj |= 1u << b;
-                    w->regions[b].adj |= 1u << a;
-                }
-            }
-            if (y + 1 < WORLD_H) {
-                Uint8 b = w->region[y + 1][x];
-                if (b != REGION_NONE && b != a) {
-                    w->regions[a].adj |= 1u << b;
-                    w->regions[b].adj |= 1u << a;
-                }
-            }
-        }
-    }
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            w->region[y][x] = sc->owner[y * WORLD_W + x];
+    regions_relink(w);
     w->spawn_region = w->region[w->spawn_tile / WORLD_W][w->spawn_tile % WORLD_W];
 }
 
@@ -1488,6 +1570,317 @@ static void regions_assign_terrain(World *w, Rng *rng, const int *depth)
                     (Uint8)(TERRAIN_WATER + (int)(rng_float(rng) * 3.0f) % 3);
         }
     }
+}
+
+/* ---- Gate ridges --------------------------------------------------------
+ *
+ * THE BUG THIS EXISTS TO FIX. A terrain tag gates a WHOLE REGION, and the
+ * partition is a multi-source BFS Voronoi over open ground - so the line where
+ * a gate begins is a Voronoi cell edge, which is to say an arbitrary line
+ * through whatever happened to be there. Walking across a flat green clearing
+ * she stopped dead against nothing at all, and the game said "too steep to
+ * climb". Nothing was drawn there because nothing WAS there: `terr` knew about
+ * grass and `regions[].terrain` knew about a ledge, and the two had never been
+ * introduced.
+ *
+ * The fix is to give that line a body. Rock is laid along the frontier wherever
+ * the requirement changes, leaving one pass open where the two regions meet, so
+ * the gate stops being a line on flat ground and becomes a cliff with a way up
+ * it. She can then SEE the boundary before she reaches it, and the refusal
+ * arrives at a narrow rocky pass where "too steep to climb" is a sentence about
+ * something visible.
+ *
+ * This is generation, not rendering: it writes `terr` and `solid`, which is
+ * what makes it show up on screen at all. tile_blocked still reads only
+ * solid[][], regions[].terrain and the ability mask - the collision invariant
+ * is untouched, and every reachability proof stays a re-run rather than a
+ * re-argument. What DOES change is that carving can sever things, so nothing
+ * here is trusted: the caller verifies and rolls back.
+ */
+/* How far from its anchor the pass stays open, in tiles.
+ *
+ * ONE, giving a gap about three tiles across where the frontier runs straight -
+ * 48 px against a 10 px foot box, comfortable to walk and readable as a way
+ * through rather than a slot. The figure is measured, not chosen: carving down
+ * to a single tile of gap took so much of each frontier that it severed
+ * regions, and the verifier below rolled the ridges back often enough to cost
+ * two seeds in twenty their gating entirely. */
+#define GATE_PASS_R 1
+
+/* How far she can be expected to look for the reason she was stopped. Two tiles
+ * is 32 px on a 480 px frame, against a view thirty tiles wide - a barrier
+ * further off than that is not what is in front of her. Both the repair below
+ * and --gating-test's measurement are written against this one number, so the
+ * bar the generator meets and the bar the test checks cannot drift apart. */
+#define GATE_LOOK 2
+
+/* Repair sweeps. Walling a crossing removes it, and cannot create a new one -
+ * carving only ever takes open tiles away - so this converges immediately in
+ * practice. Bounded anyway: an unbounded loop in world generation is a hang, and
+ * a hang is worse than a wall in the wrong place. */
+#define GATE_REPAIR_SWEEPS 4
+
+static Uint8 region_requires(const World *w, Uint8 r)
+{
+    if (r == REGION_NONE || (int)r >= w->region_count)
+        return 0;
+    return terrain_requires[w->regions[r].terrain];
+}
+
+/* Which side of an a|b boundary the rock belongs on, or -1 if the two regions
+ * gate identically and there is no boundary to draw.
+ *
+ * The LARGER side, which is a robustness choice and not an aesthetic one - on
+ * screen the ridge sits on the line either way and there is nothing to tell
+ * apart. Carving peels a region's outer ring away along the boundary, and a
+ * region only a tile or two thick there comes apart when it loses it; the
+ * verifier then rejects the attempt and the whole world is generated again.
+ * Taking the bigger of the two puts that strain on whichever region can best
+ * absorb it. Measured over fifty seeds: carving the gated side regardless of
+ * size cost eight of them their gating and drove the worst seed into all 64
+ * attempts, where this holds the same worlds at one relaxed seed.
+ *
+ * Ties go to the higher index - arbitrary, but it has to be decided the same
+ * way every time, or the counting pass and the carving pass below would
+ * disagree about which tiles belong to which frontier. */
+static int gate_carve_side(const World *w, Uint8 a, Uint8 b)
+{
+    Uint8 ra = region_requires(w, a), rb = region_requires(w, b);
+
+    if (ra == rb) return -1;
+    if (w->regions[a].tiles != w->regions[b].tiles)
+        return w->regions[a].tiles > w->regions[b].tiles ? (int)a : (int)b;
+    return a > b ? (int)a : (int)b;
+}
+
+/* If this tile is on the rock side of a gate frontier, which region it faces -
+ * the LOWEST such, so a tile touching two gated neighbours still belongs to
+ * exactly one frontier and its position along that frontier is well defined. */
+static int gate_frontier_pair(const World *w, int x, int y)
+{
+    static const int dx[4] = { 1, -1, 0, 0 };
+    static const int dy[4] = { 0, 0, 1, -1 };
+    Uint8 a = w->region[y][x];
+    int d, best = -1;
+
+    if (a == REGION_NONE) return -1;
+    for (d = 0; d < 4; d++) {
+        int nx = x + dx[d], ny = y + dy[d];
+        Uint8 b;
+        if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H) continue;
+        b = w->region[ny][nx];
+        if (b == REGION_NONE || b == a) continue;
+        if (gate_carve_side(w, a, b) != (int)a) continue;
+        if (best < 0 || (int)b < best) best = (int)b;
+    }
+    return best;
+}
+
+/* Lay the ridges. Caller must regions_relink() afterwards - the partition has
+ * lost tiles and the graph no longer describes it.
+ *
+ * Separate passes rather than one, because the frontier must be classified
+ * against the map as it stood BEFORE any of it was cut: a tile carved early
+ * becomes REGION_NONE, which changes what its neighbours look like, and a
+ * single mutating pass would count a frontier of one length and then walk a
+ * different one - putting the pass in the wrong place, or nowhere. */
+static void gate_ridges(World *w, Uint64 seed)
+{
+    int   total[REGION_COUNT][REGION_COUNT];
+    int   pick[REGION_COUNT][REGION_COUNT];
+    int   seen[REGION_COUNT][REGION_COUNT];
+    short ax[REGION_COUNT][REGION_COUNT], ay[REGION_COUNT][REGION_COUNT];
+    Uint8 carve[WORLD_H][(WORLD_W + 7) / 8];
+    int x, y, i, j;
+
+    for (i = 0; i < REGION_COUNT; i++)
+        for (j = 0; j < REGION_COUNT; j++) {
+            total[i][j] = 0;
+            seen[i][j] = 0;
+            ax[i][j] = ay[i][j] = -1;
+        }
+    SDL_memset(carve, 0, sizeof carve);
+
+    /* 1. How long is each frontier. */
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            int b = gate_frontier_pair(w, x, y);
+            if (b >= 0) total[w->region[y][x]][b]++;
+        }
+
+    /* 2. Which tile along it the pass is anchored on. From tile_hash rather
+     * than the generator RNG, so moving a pass cannot shift entity placement
+     * downstream.
+     *
+     * Held back from the ENDS of the frontier, which is not tidiness. A
+     * frontier ends where the gated region tapers out, so a pass anchored there
+     * has ridge on one side and open ground on the other - she walks up the
+     * outside of the wall, reaches the point where it stops, and is refused by
+     * a tile with nothing next to it. That is the same invisible wall in
+     * miniature, and it was what the last unexplained crossings turned out to
+     * be. Anchored inside the run, a pass has ridge on both sides by
+     * construction. The clamp keeps the index on the frontier when it is too
+     * short to hold a margin at all. */
+    for (i = 0; i < REGION_COUNT; i++)
+        for (j = 0; j < REGION_COUNT; j++) {
+            int n = total[i][j];
+            if (n <= 0)                  pick[i][j] = -1;
+            else if (n <= 2 * GATE_PASS_R) pick[i][j] = n / 2;
+            else pick[i][j] = GATE_PASS_R
+                            + (int)(tile_hash(seed ^ 0x6A7EULL, i, j)
+                                    % (Uint32)(n - 2 * GATE_PASS_R));
+        }
+
+    /* 3. Find that tile's COORDINATES. */
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            int a, b = gate_frontier_pair(w, x, y);
+            if (b < 0) continue;
+            a = w->region[y][x];
+            if (seen[a][b]++ == pick[a][b]) {
+                ax[a][b] = (short)x;
+                ay[a][b] = (short)y;
+            }
+        }
+
+    /* 4. Carve everything but the tiles AROUND that anchor.
+     *
+     * A spatial neighbourhood, not a window over the scan order, and that is
+     * the whole of the difference between a pass and two holes. The scan is
+     * row-major, so consecutive positions along a frontier are only ever
+     * neighbours while the frontier runs down a column; where it turns and
+     * picks up again further along a row, the next position is somewhere else
+     * entirely. An ordinal window straddling one of those turns left a tile of
+     * gap at each end of the jump, each with no carved rock beside it and
+     * nothing to say why she was stopped - which is exactly what the earlier
+     * version measured as its last two unexplained crossings. */
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            int a, b = gate_frontier_pair(w, x, y);
+            int dx, dy;
+            if (b < 0) continue;
+            a = w->region[y][x];
+            dx = x - ax[a][b];
+            dy = y - ay[a][b];
+            if (dx < 0) dx = -dx;
+            if (dy < 0) dy = -dy;
+            /* The pass. Leaving it open is what keeps regions a and b ADJACENT
+             * in the graph, and the whole completability proof is a statement
+             * about that graph - a frontier walled end to end would silently
+             * delete an edge the placement had already relied on. */
+            if (ax[a][b] >= 0 && dx <= GATE_PASS_R && dy <= GATE_PASS_R)
+                continue;
+            carve[y][x >> 3] |= (Uint8)(1u << (x & 7));
+        }
+
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            if (carve[y][x >> 3] & (1u << (x & 7))) {
+                w->terr[y][x] = GT_ROCK;
+                w->solid[y][x] = 1;
+                w->region[y][x] = REGION_NONE;
+            }
+}
+
+/* Wall off any crossing the ridges left unexplained.
+ *
+ * Passes belonging to two DIFFERENT region pairs can come out next to each
+ * other. Where three regions meet along one stretch, each pair earns its own
+ * gap, and two gaps side by side merge into an opening far too wide to read as
+ * a pass - she walks through the middle of it with the nearest rock several
+ * tiles away on either side, which is the original bug again at a smaller
+ * scale. Placing passes so that can never happen is a constraint problem across
+ * the whole map; measuring the frontier afterwards and walling what is left
+ * over is not. The property wanted is "no crossing without a visible reason",
+ * so this enforces exactly that and nothing more.
+ *
+ * It walls the GATED side, turning a crossing into an ordinary rock face. That
+ * can shut a pass completely and delete a graph edge with it, which is why -
+ * like every other part of this step - the caller verifies afterwards and rolls
+ * the whole thing back rather than trusting it. */
+static void gate_repair(World *w)
+{
+    static const int dx[4] = { 1, -1, 0, 0 };
+    static const int dy[4] = { 0, 0, 1, -1 };
+    Uint8 carve[WORLD_H][(WORLD_W + 7) / 8];
+    int sweep, x, y, d, ox, oy;
+
+    for (sweep = 0; sweep < GATE_REPAIR_SWEEPS; sweep++) {
+        int any = 0;
+        SDL_memset(carve, 0, sizeof carve);
+        for (y = 0; y < WORLD_H; y++) {
+            for (x = 0; x < WORLD_W; x++) {
+                Uint8 a = w->region[y][x];
+                int seen_solid = 0;
+                if (w->solid[y][x] || a == REGION_NONE) continue;
+                for (oy = -GATE_LOOK; oy <= GATE_LOOK && !seen_solid; oy++)
+                    for (ox = -GATE_LOOK; ox <= GATE_LOOK; ox++)
+                        if (solid_at(w, x + ox, y + oy)) { seen_solid = 1; break; }
+                if (seen_solid) continue;
+                for (d = 0; d < 4; d++) {
+                    int nx = x + dx[d], ny = y + dy[d];
+                    if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H) continue;
+                    if (w->solid[ny][nx]) continue;
+                    if (!(region_requires(w, w->region[ny][nx]) & ~region_requires(w, a)))
+                        continue;
+                    carve[ny][nx >> 3] |= (Uint8)(1u << (nx & 7));
+                    any = 1;
+                }
+            }
+        }
+        if (!any) return;
+        for (y = 0; y < WORLD_H; y++)
+            for (x = 0; x < WORLD_W; x++)
+                if (carve[y][x >> 3] & (1u << (x & 7))) {
+                    w->terr[y][x] = GT_ROCK;
+                    w->solid[y][x] = 1;
+                    w->region[y][x] = REGION_NONE;
+                }
+    }
+}
+
+/* Is every region still one connected piece?
+ *
+ * Carving a frontier can cut a thin region in half, and the graph would not
+ * notice: adjacency is about labels touching, so both halves still report the
+ * same region id and the same edges. What breaks is the WALK - an entity in the
+ * severed half is unreachable while every graph-level proof says it is fine.
+ * That is the one failure the existing verification cannot see, so it is
+ * checked directly, and it is why the ridges are rolled back rather than
+ * trusted. */
+static int regions_intact(const World *w, Scratch *sc)
+{
+    int first[REGION_COUNT];
+    int i, x, y;
+
+    for (i = 0; i < REGION_COUNT; i++) first[i] = -1;
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            Uint8 o = w->region[y][x];
+            if (o != REGION_NONE && first[o] < 0) first[o] = y * WORLD_W + x;
+        }
+
+    for (i = 0; i < w->region_count; i++) {
+        int head = 0, tail = 0, count = 0;
+        if (w->regions[i].tiles == 0) continue;
+        if (first[i] < 0) return 0;
+        SDL_memset(sc->seen, 0, (size_t)WORLD_W * WORLD_H);
+        sc->seen[first[i]] = 1;
+        sc->queue[tail++] = first[i];
+        while (head < tail) {
+            int nb[4], n, k, idx = sc->queue[head++];
+            count++;
+            n = tile_neighbours(w, idx, nb);
+            for (k = 0; k < n; k++) {
+                if (sc->seen[nb[k]]) continue;
+                if (w->region[nb[k] / WORLD_W][nb[k] % WORLD_W] != i) continue;
+                sc->seen[nb[k]] = 1;
+                sc->queue[tail++] = nb[k];
+            }
+        }
+        if (count != (int)w->regions[i].tiles) return 0;
+    }
+    return 1;
 }
 
 /* Which regions are reachable holding `abilities`, per the GRAPH. */
@@ -1672,30 +2065,6 @@ static int world_solvable(const World *w, const Entity *ents, int *out_restored)
     return count == ENTITY_COUNT;
 }
 
-/* Generate-then-verify, with a fallback ladder that always terminates.
- * Returns attempts used (>0), or -depth when gating had to be relaxed. */
-static int world_place_and_verify(World *w, Rng *rng, const int *depth, Entity *ents)
-{
-    int attempt, d, i;
-
-    for (attempt = 0; attempt < 64; attempt++) {
-        regions_assign_terrain(w, rng, depth);
-        place_entities(w, rng, ents);
-        if (world_solvable(w, ents, NULL))
-            return attempt + 1;
-    }
-    /* Ungate outward, shallowest first, so as much gating as possible survives. */
-    for (d = 1; d <= REGION_COUNT; d++) {
-        for (i = 0; i < w->region_count; i++)
-            if (depth[i] == d) w->regions[i].terrain = TERRAIN_NORMAL;
-        place_entities(w, rng, ents);
-        if (world_solvable(w, ents, NULL))
-            return -d;
-    }
-    for (i = 0; i < w->region_count; i++) w->regions[i].terrain = TERRAIN_NORMAL;
-    place_entities(w, rng, ents);
-    return -100;
-}
 
 /* ---- Fog ----------------------------------------------------------------
  *
@@ -1868,6 +2237,42 @@ static void world_stub(World *w, Uint64 seed)
         }
     }
 
+    /* Ponds must be at least 2x2, and this is a RENDERING constraint enforced
+     * in generation because it cannot be enforced anywhere else.
+     *
+     * The pond rim is a 3x3 blob autotile - it has art for a corner, an edge
+     * and a middle, and none for "a pond one tile across". A lone water tile
+     * therefore draws the blob's TOP-LEFT CORNER over its whole cell, which is
+     * an arc of bank with grass showing through the two thirds of the tile the
+     * corner leaves transparent: a teal square with a grass notch bitten out of
+     * it, scattered across the map. Every water cell that survives here has a
+     * water neighbour on two axes, so every slice the autotile can select has
+     * art that means what it draws.
+     *
+     * Marked from a bitset and applied afterwards, so removing one cell cannot
+     * change the verdict on the next and erode a real pond from its rim inward.
+     * 2 KB of stack, not a world-sized static - see the rule at the top. */
+    {
+        Uint8 keep[WORLD_H][(WORLD_W + 7) / 8];
+        SDL_memset(keep, 0, sizeof keep);
+        for (y = 0; y + 1 < WORLD_H; y++) {
+            for (x = 0; x + 1 < WORLD_W; x++) {
+                if (w->terr[y][x] != GT_WATER || w->terr[y][x + 1] != GT_WATER ||
+                    w->terr[y + 1][x] != GT_WATER || w->terr[y + 1][x + 1] != GT_WATER)
+                    continue;
+                keep[y][x >> 3]           |= (Uint8)(1u << (x & 7));
+                keep[y][(x + 1) >> 3]     |= (Uint8)(1u << ((x + 1) & 7));
+                keep[y + 1][x >> 3]       |= (Uint8)(1u << (x & 7));
+                keep[y + 1][(x + 1) >> 3] |= (Uint8)(1u << ((x + 1) & 7));
+            }
+        }
+        for (y = 0; y < WORLD_H; y++)
+            for (x = 0; x < WORLD_W; x++)
+                if (w->terr[y][x] == GT_WATER &&
+                    !(keep[y][x >> 3] & (1u << (x & 7))))
+                    w->terr[y][x] = GT_GRASS;
+    }
+
     /* Wandering trails between random waypoints. The wander comes from
      * tile_hash rather than the RNG so trail shape cannot shift terrain. */
     for (i = 0; i < 6; i++) {
@@ -1911,8 +2316,19 @@ static void world_stub(World *w, Uint64 seed)
                                      w->terr[y][x] == GT_ROCK);
     /* A one-tile wall around the map, so nothing can walk off the grid and no
      * traversal has to special-case the border. */
-    for (x = 0; x < WORLD_W; x++) { w->solid[0][x] = 1; w->solid[WORLD_H - 1][x] = 1; }
-    for (y = 0; y < WORLD_H; y++) { w->solid[y][0] = 1; w->solid[y][WORLD_W - 1] = 1; }
+    /* The border ring is forced solid, so it has to LOOK solid. Left as
+     * whatever noise put there, it was grass she could see and could not walk
+     * onto - the same invisible wall as a thin rock slice, just parked at the
+     * edge of the map where it is least expected. Writing terr as well as solid
+     * is what keeps the two agreeing. */
+    for (x = 0; x < WORLD_W; x++) {
+        w->solid[0][x] = 1;              w->terr[0][x] = GT_ROCK;
+        w->solid[WORLD_H - 1][x] = 1;    w->terr[WORLD_H - 1][x] = GT_ROCK;
+    }
+    for (y = 0; y < WORLD_H; y++) {
+        w->solid[y][0] = 1;              w->terr[y][0] = GT_ROCK;
+        w->solid[y][WORLD_W - 1] = 1;    w->terr[y][WORLD_W - 1] = GT_ROCK;
+    }
 }
 
 /* Pick the spawn: the centre-most tile of the LARGEST open component. Largest
@@ -1955,6 +2371,78 @@ static void world_spawn(World *w, Scratch *sc)
     }
 }
 
+/* Carve the ridges for the tag assignment currently on the regions, then place
+ * and verify. Returns 1 for a world that is sound, 0 for one to roll back.
+ *
+ * The ORDER is the point. Ridges are cut before placement, so a collectible can
+ * never be placed on a tile the ridge is about to turn to stone - the carved
+ * tiles leave the partition first, and place_entities only ever draws from what
+ * is still labelled. */
+static int gate_try(World *w, Scratch *sc, Rng *rng, Entity *ents, Uint64 seed)
+{
+    gate_ridges(w, seed);
+    gate_repair(w);
+    regions_relink(w);
+    if (!regions_intact(w, sc))
+        return 0;
+    place_entities(w, rng, ents);
+    return world_solvable(w, ents, NULL);
+}
+
+/* The exact inverse of a carve.
+ *
+ * By REGENERATING rather than journalling the tiles: world_stub is a pure
+ * function of the seed, so re-running it restores terr and solid exactly, and
+ * the partition that follows from them is the same partition. A rollback list
+ * would be a second description of the same thing, sized by a guess, and wrong
+ * in exactly the case that matters. The tags are carried across by hand because
+ * regions_build clears them, and losing them here would quietly ungate the
+ * world instead of retrying it. */
+static void gate_rollback(World *w, Scratch *sc, Uint64 seed, const Uint8 *tags)
+{
+    int i;
+
+    world_stub(w, seed);
+    world_spawn(w, sc);
+    regions_build(w, sc);
+    for (i = 0; i < REGION_COUNT; i++)
+        w->regions[i].terrain = tags[i];
+}
+
+/* Generate-then-verify, with a fallback ladder that always terminates.
+ * Returns attempts used (>0), or -depth when gating had to be relaxed. */
+static int world_place_and_verify(World *w, Scratch *sc, Rng *rng, const int *depth,
+                                  Entity *ents, Uint64 seed)
+{
+    Uint8 tags[REGION_COUNT];
+    int attempt, d, i;
+
+    for (attempt = 0; attempt < 64; attempt++) {
+        regions_assign_terrain(w, rng, depth);
+        for (i = 0; i < REGION_COUNT; i++) tags[i] = w->regions[i].terrain;
+        if (gate_try(w, sc, rng, ents, seed))
+            return attempt + 1;
+        gate_rollback(w, sc, seed, tags);
+    }
+    /* Ungate outward, shallowest first, so as much gating as possible survives.
+     * Same shape as an attempt, deliberately: the ladder is the path that runs
+     * when a seed is hard, which is precisely when it is least likely to have
+     * been exercised, so it must not be a second, differently-written pipeline. */
+    for (d = 1; d <= REGION_COUNT; d++) {
+        for (i = 0; i < w->region_count; i++)
+            if (depth[i] == d) w->regions[i].terrain = TERRAIN_NORMAL;
+        for (i = 0; i < REGION_COUNT; i++) tags[i] = w->regions[i].terrain;
+        if (gate_try(w, sc, rng, ents, seed))
+            return -d;
+        gate_rollback(w, sc, seed, tags);
+    }
+    /* Nothing gated at all, so there is no frontier to draw and no ridge to
+     * carve - the world is already honest about having no walls in it. */
+    for (i = 0; i < w->region_count; i++) w->regions[i].terrain = TERRAIN_NORMAL;
+    place_entities(w, rng, ents);
+    return -100;
+}
+
 /* The whole generation pipeline, in the one order that works.
  * Returns placement attempts used (>0), or -depth when gating had to be
  * relaxed to make the world finishable - stored so a test can report it. */
@@ -1967,12 +2455,17 @@ static int world_gen(World *w, Scratch *sc, Entity *ents, Uint64 seed)
     world_stub(w, seed);
     world_spawn(w, sc);
     regions_build(w, sc);
+    /* Depth comes from the graph BEFORE any ridge is cut, and stays valid
+     * across a rollback because a rollback restores that same graph. Gate
+     * ridges only ever remove tiles at a frontier and always leave the pass, so
+     * they cannot add or remove an edge - which is what lets one depth array
+     * serve every attempt. */
     regions_depth(w, depth);
     for (y = 0; y < WORLD_H; y++)
         for (x = 0; x < WORLD_W; x++)
             w->reveal[y][x] = 0;
     rng_seed(&rng, seed, STREAM_ENTITIES);
-    return world_place_and_verify(w, &rng, depth, ents);
+    return world_place_and_verify(w, sc, &rng, depth, ents, seed);
 }
 
 /* ---- Props --------------------------------------------------------------
@@ -2014,6 +2507,33 @@ static const PropArt prop_art[PROP_COUNT] = {
  * tree crowns off the top of the screen as you walk north. */
 #define PROP_OVERSCAN ((98 / TILE) + 2)
 
+/* Would a tree standing on this tile hide water?
+ *
+ * A tree sprite is 70x98 px anchored at its foot, so it covers roughly two
+ * tiles either side and SIX ROWS ABOVE its own - a pond three tiles north of a
+ * trunk is simply not on screen. The reed rule below already keeps trunks off
+ * the waterline, but it only looks at the four tiles touching the bank, and the
+ * tile that hides a small pond is never one of those. Nothing else in the build
+ * says a pond is there and the fog is already withholding the ground, so the
+ * canopy must not withhold it a second time.
+ *
+ * Only the rows a crown actually reaches are asked about, and only when the
+ * roll has already come up canopy - so this runs on about a fifth of tiles, not
+ * on every one. */
+#define CROWN_HALF_W 2
+#define CROWN_ROWS   5
+
+static int crown_hides_water(const World *w, int tx, int ty)
+{
+    int ox, oy;
+
+    for (oy = 1; oy <= CROWN_ROWS; oy++)
+        for (ox = -CROWN_HALF_W; ox <= CROWN_HALF_W; ox++)
+            if (terr_at(w, tx + ox, ty - oy) == GT_WATER)
+                return 1;
+    return 0;
+}
+
 /* Which prop, if any, stands on this tile. `density` is the canopy field in
  * 0..1 at that tile. */
 static int prop_at(const World *w, Uint64 seed, int tx, int ty, float density, Uint32 *out_hash)
@@ -2029,8 +2549,18 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, float density, U
         return PROP_NONE;
     if (t == GT_DIRT)
         return roll < 2u ? PROP_STONE : (roll < 4u ? PROP_TUFT : PROP_NONE);
-    if (t == GT_ROCK)
-        return roll < 6u ? PROP_ROCK : (roll < 10u ? PROP_STONE : PROP_NONE);
+    if (t == GT_ROCK) {
+        /* The ring autotile already draws stone across every RIM cell of an
+         * outcrop, so a boulder standing on one doubles the rim - and being
+         * 26 px wide on a 16 px cell it overhangs the cell beside it, which is
+         * walkable ground. That is a rock she walks through, pressed against a
+         * rim she cannot. The hollow CENTRE is where the sheet leaves a hole,
+         * so that is where a free-standing boulder belongs; the rate is raised
+         * because there are far fewer interior cells than rim ones. */
+        if (!blob_interior(w, tx, ty, GT_ROCK))
+            return PROP_NONE;
+        return roll < 26u ? PROP_ROCK : (roll < 44u ? PROP_STONE : PROP_NONE);
+    }
 
     /* Reeds hug the waterline. Checked before the canopy so a bank always reads
      * as a bank even inside a dense stand. */
@@ -2046,8 +2576,13 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, float density, U
          * 26/64 the stands closed into unbroken canopy and hid the ground the
          * whole game is about revealing. */
         unsigned canopy = (unsigned)(density * 13.0f);
-        if (roll < canopy)
+        if (roll < canopy) {
+            /* Downgraded to understorey rather than cleared, so suppressing a
+             * crown does not also punch a hole in the stand it stood in. */
+            if (crown_hides_water(w, tx, ty))
+                return PROP_BUSH;
             return ((h >> 20) & 3u) == 0 ? PROP_PINE : PROP_TREE;
+        }
         if (roll < canopy + 4u)  return PROP_BUSH;
         if (roll < canopy + 6u)  return PROP_LOG;
         if (roll < canopy + 9u)  return PROP_MUSHROOM;
@@ -2154,6 +2689,21 @@ static void draw_list_sort(DrawList *dl)
     }
 }
 
+/* Where to DRAW her this frame: between the last two tick positions, by how far
+ * past the last tick the frame is. See the long note at the call site in main.
+ *
+ * A named function rather than three lines inline, so --move-test can drive the
+ * real one. A test that restated the lerp would only prove the lerp equals
+ * itself, and the property worth checking - that the drawn position advances
+ * evenly when the ticks do not - is a property of this being applied, not of
+ * the arithmetic. */
+static float render_lerp(float prev, float cur, float alpha)
+{
+    if (alpha < 0.0f) alpha = 0.0f;
+    if (alpha > 1.0f) alpha = 1.0f;
+    return prev + (cur - prev) * alpha;
+}
+
 /* ---- Camera -------------------------------------------------------------
  * Kept in floats and clamped in floats: at integer precision a sub-pixel
  * remainder truncates to no motion and the ease stalls short of its target. */
@@ -2205,25 +2755,70 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
             int t = w->terr[ty][tx];
             Uint32 h = tile_hash(seed, tx, ty);
             int sx = tx * TILE - cam_x, sy = ty * TILE - cam_y;
+            int touches_dirt =
+                terr_at(w, tx - 1, ty) == GT_DIRT || terr_at(w, tx + 1, ty) == GT_DIRT ||
+                terr_at(w, tx, ty - 1) == GT_DIRT || terr_at(w, tx, ty + 1) == GT_DIRT;
+            int dirt = tile_dirt_fill[h % 6u];
             int id;
 
-            if (t == GT_WATER) {
-                id = tile_water_fill[h % 10u];
-            } else if (t == GT_DIRT) {
-                id = tile_dirt_fill[h % 6u];
+            if (t == GT_DIRT || t == GT_ROCK) {
+                /* Earth under the rubble, never grass: the rubble carries a
+                 * dozen transparent pixels and its own margins are dirt-brown,
+                 * so on grass those pixels showed as a green seam ruled along
+                 * every tile edge inside the outcrop. On earth they disappear
+                 * into what the art is already drawing. */
+                id = dirt;
+            } else if (t == GT_WATER) {
+                /* ONLY the interior of a pond gets the opaque water fill.
+                 *
+                 * The rim overlay two passes below is transparent on its LAND
+                 * side - that transparency is what lets a bank read as a ragged
+                 * shoreline instead of a cut edge. With the water fill laid
+                 * underneath it, what showed through was the fill's own square
+                 * corner, so every pond rendered as a teal RECTANGLE with its
+                 * bank floating inside it. Lay the land tile on a boundary cell
+                 * and let the rim draw the water it covers; the rim's water
+                 * side is opaque, so nothing is left unpainted. */
+                id = blob_interior(w, tx, ty, GT_WATER)
+                     ? tile_water_fill[h % 10u]
+                     : (touches_dirt ? dirt : tile_grass_base[h % 4u]);
             } else {
-                int touches_dirt =
-                    terr_at(w, tx - 1, ty) == GT_DIRT || terr_at(w, tx + 1, ty) == GT_DIRT ||
-                    terr_at(w, tx, ty - 1) == GT_DIRT || terr_at(w, tx, ty + 1) == GT_DIRT;
-                id = touches_dirt ? tile_dirt_fill[h % 6u] : tile_grass_base[h % 4u];
+                id = touches_dirt ? dirt : tile_grass_base[h % 4u];
             }
             draw_sprite(fb, id, sx, sy, tile_level(w, tx, ty));
+
+            /* Stone rubble under EVERY rock cell, not just the hollow middle.
+             *
+             * WHAT BLOCKS HER HAS TO BE WHAT SHE CAN SEE, and the ring art
+             * alone does not manage it. Its nine slices are drawn with the mass
+             * low in the tile, the way this sheet fakes height, so they cover
+             * wildly different amounts of their cell: measured in opaque pixels
+             * out of 256, the bottom edge draws 243 and the two TOP CORNERS
+             * draw 12 and 18. Collision is the whole square either way. The
+             * result was a tile of solid nothing standing on open grass along
+             * the top of every outcrop - about a third of all rock cells drew
+             * under an eighth of themselves - and walking into one stopped her
+             * dead against grass with no toast, because a wall is not a gate
+             * and says nothing.
+             *
+             * Filling underneath fixes the silhouette without touching
+             * collision at all: solid[][] is untouched, so every reachability
+             * and completability proof stands exactly as it was. The ring still
+             * draws on top and still supplies the rim.
+             *
+             * An OVERLAY, not a base - these cells are authored as the body of
+             * a boulder and carry a dozen transparent pixels each, so used as a
+             * base they left 57 px of the screen unpainted, which is what
+             * --tile-test's coverage check reported. */
+            if (t == GT_ROCK)
+                draw_sprite(fb, tile_rock_fill[(h >> 4) & 1u], sx, sy,
+                            tile_level(w, tx, ty));
 
             /* Scattered ground detail over the opaque base, on interior grass
              * only: a dirt-adjacent cell gets its grass from the edge overlay
              * in the next pass, and a detail tile here would paint grass across
              * the boundary the overlay is about to draw. */
-            if (t == GT_GRASS && id != tile_dirt_fill[h % 6u] && ((h >> 8) & 7u) == 0)
+            if (t == GT_GRASS && id != dirt && ((h >> 8) & 7u) == 0)
                 draw_sprite(fb, tile_grass_detail[(h >> 10) % 6u], sx, sy, tile_level(w, tx, ty));
         }
     }
@@ -2295,9 +2890,17 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
                 int wst = terr_at(w, tx - 1, ty) == GT_WATER;
                 if (!(n && s && e && wst))
                     draw_sprite(fb, tile_water_edge[blob_slice(n, s, e, wst)], sx, sy, tile_level(w, tx, ty));
-            } else if (terr_at(w, tx, ty + 1) == GT_WATER) {
+            } else if ((t == GT_GRASS || t == GT_OLIVE) &&
+                       terr_at(w, tx, ty + 1) == GT_WATER) {
                 /* The cap sits on LAND and overhangs the water below it, which
-                 * is what makes a bank read as a bank rather than a cut edge. */
+                 * is what makes a bank read as a bank rather than a cut edge.
+                 *
+                 * Restricted to leafy ground because the cap tile is an OPAQUE
+                 * grass tile with a lip along its bottom, not an overlay: drawn
+                 * on a dirt cell it repainted the whole cell green, so a trail
+                 * running along a pond's north shore grew a one-tile grass
+                 * stripe out of nothing. The water cell below still draws its
+                 * own rim, so dropping the cap costs the bank nothing. */
                 int e = terr_at(w, tx + 1, ty + 1) == GT_WATER;
                 int wst = terr_at(w, tx - 1, ty + 1) == GT_WATER;
                 draw_sprite(fb, tile_water_cap[wst ? (e ? 1 : 2) : 0], sx, sy, tile_level(w, tx, ty));
@@ -2453,7 +3056,7 @@ static void props_draw(SDL_Surface *fb, const DrawList *dl)
             int soul = (it->kind == DI_SOUL);
             int s = soul ? 7 : 5;
             Uint32 core = soul ? SDL_MapRGB(fb->format, 0xf3, 0xda, 0xda)
-                               : SDL_MapRGB(fb->format, 0xf3, 0xda, 0xda);
+                               : SDL_MapRGB(fb->format, 0xf3, 0xda, 0xb0);
             Uint32 halo = soul ? SDL_MapRGB(fb->format, 0x3e, 0x7d, 0x8d)
                                : SDL_MapRGB(fb->format, 0xe0, 0x3b, 0x0e);
             fill_rect(fb, it->x - s / 2 - 1, it->y - s - 1, s + 2, s + 2, halo);
@@ -3085,6 +3688,35 @@ static int try_interact(Game *g, Audio *a)
     return i;
 }
 
+/* Step to another world without leaving the session, for '[' and ']'.
+ *
+ * Everything a fresh start touches has to be reset here or it survives into a
+ * world it does not describe, and each one fails quietly rather than loudly:
+ * the minimap cache is a whole SURFACE that would keep drawing the old map, and
+ * win_shown is a latch that would suppress the completion banner in the new
+ * world because it had already fired in the old one.
+ *
+ * Delegates to game_init rather than reproducing it - a seed reaches a playable
+ * state through exactly one path, which is the same rule that keeps a loaded
+ * world from drifting from a generated one.
+ *
+ * Payload before flag, as everywhere the audio callback is involved: it owns
+ * audio.rng and the synth and it is running right now. Restore counts go to
+ * zero because a new world starts with nothing remembered, so the music drops
+ * back to its opening layer instead of carrying the old world's progress. */
+static void game_reseed(Game *g, Scratch *sc, Audio *a, Uint64 seed)
+{
+    game_init(g, sc, seed);
+    hud.mm_dirty  = 1;
+    hud.win_shown = 0;
+    hud.win_left  = 0;
+    a->rng_seed_req = seed;
+    a->reset_frags  = 0;
+    a->reset_souls  = 0;
+    SDL_AtomicSet(&a->rng_req, 1);
+    SDL_AtomicSet(&a->reset_req, 1);
+}
+
 /* Say which ability the gate wanted, once per bump rather than once per tick -
  * see gate_refusal. Ordered wade, climb, kindle so a tile gated on two names
  * the one she is likelier to find first. */
@@ -3114,6 +3746,34 @@ static SDL_Surface *test_surface(int w, int h)
 {
     return SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
 }
+
+/* Decode a sprite and count how many of its pixels are palette index 0, i.e.
+ * transparent. Used to prove a base-fill tile really covers its whole cell. */
+static int sprite_transparent_px(const ArtSprite *sp)
+{
+    unsigned int i = sp->data_off, n = sp->data_off + sp->data_len;
+    int seen = 0, trans = 0;
+
+    if (n > ART_DATA_BYTES) return -1;
+    while (i < n && seen < (int)sp->w * (int)sp->h) {
+        unsigned int c = ART_DATA[i++], count, k;
+        if (c >= 0x80) {
+            count = (c & 0x7Fu) + 1u;
+            if (i + count > n) break;
+            for (k = 0; k < count && seen < (int)sp->w * (int)sp->h; k++, seen++)
+                if (ART_DATA[i + k] == 0) trans++;
+            i += count;
+        } else {
+            count = c + 1u;
+            if (i >= n) break;
+            for (k = 0; k < count && seen < (int)sp->w * (int)sp->h; k++, seen++)
+                if (ART_DATA[i] == 0) trans++;
+            i++;
+        }
+    }
+    return trans;
+}
+
 
 /* Strict validator, self-test only. Where the shipping decoder CLAMPS so that
  * corrupt data degrades into a visible hole, this REJECTS, and demands exact
@@ -3599,12 +4259,111 @@ static int move_selftest(int seeds, Uint64 base)
 
     SDL_free(w);
     SDL_free(sc);
+    /* FRAME PACING. The simulation is fixed-step and the renderer is not, and
+     * nothing phase-locks them: there is no vsync here, and the frame nap
+     * resolves to whole milliseconds against a 16.67 ms period. So ticks do not
+     * land one per frame - the count alternates 1, 1, 2, 1, 0, ... as the two
+     * rates drift past each other - and a frame drawn at the last TICK position
+     * moves the world 0 px, then 2.4 px, then 1.2 px at walking speed. The
+     * simulation is perfectly regular and the screen still stutters.
+     *
+     * Driven at a frame rate deliberately close to but not equal to the tick
+     * rate, which is the worst case: near-equal rates beat slowly, so the
+     * uneven frames arrive in long visible runs rather than as noise.
+     *
+     * The negative control is the OLD behaviour, measured in the same run: if
+     * the raw per-frame advance does not vary here, this scenario never
+     * produced an uneven tick and the check proves nothing. */
+    {
+        const float frame_dt = 1.0f / 59.7f;   /* not a multiple of TICK_DT */
+        float acc = 0.0f, x = 0.0f, prev_x = 0.0f;
+        float last_raw = 0.0f, last_drawn = 0.0f;
+        float raw_lo = 1e9f, raw_hi = -1e9f, lerp_lo = 1e9f, lerp_hi = -1e9f;
+        int f;
+
+        for (f = 0; f < 400; f++) {
+            float drawn;
+            acc += frame_dt;
+            while (acc >= TICK_DT) {
+                prev_x = x;
+                x += PLAYER_SPEED * TICK_DT;
+                acc -= TICK_DT;
+            }
+            drawn = render_lerp(prev_x, x, acc / TICK_DT);
+            if (f >= 20) {          /* skip the first frames, where acc is settling */
+                float d_raw = x - last_raw, d_drawn = drawn - last_drawn;
+                if (d_raw   < raw_lo)  raw_lo  = d_raw;
+                if (d_raw   > raw_hi)  raw_hi  = d_raw;
+                if (d_drawn < lerp_lo) lerp_lo = d_drawn;
+                if (d_drawn > lerp_hi) lerp_hi = d_drawn;
+            }
+            last_raw = x;
+            last_drawn = drawn;
+        }
+
+        if (lerp_hi - lerp_lo > 0.01f) {
+            printf("  interpolated advance varies by %.4f px/frame (limit 0.01) -"
+                   " the drawn position is not evenly paced\n", lerp_hi - lerp_lo);
+            fails++;
+        }
+        /* And it must never go backwards, which would read as a jerk. */
+        if (lerp_lo <= 0.0f) {
+            printf("  interpolated advance reached %.4f px/frame - she stalls or"
+                   " moves backwards between ticks\n", lerp_lo);
+            fails++;
+        }
+        if (raw_hi - raw_lo < 1.0f) {
+            printf("  pacing negative control FAILED: the un-interpolated advance"
+                   " varied by only %.4f px/frame, so this scenario never produced"
+                   " an uneven tick\n", raw_hi - raw_lo);
+            fails++;
+        } else {
+            printf("move    : negative control - drawing at the tick position varies"
+                   " %.2f-%.2f px/frame at %.1f fps\n",
+                   raw_lo, raw_hi, 1.0f / frame_dt);
+        }
+        printf("move    : interpolated advance holds %.4f-%.4f px/frame\n",
+               lerp_lo, lerp_hi);
+    }
+
     printf("move    : %d seeds, determinism and wall containment hold\n", seeds);
     printf("move    : %s\n", fails ? "FAIL" : "PASS");
     return fails;
 }
 
 /* Regions, and the parity between the model and an actual walk. */
+
+/* Crossings into a stricter gate that nothing visible accounts for. The bug, as
+ * a number. See the call site in gating_selftest for what it means. */
+static int gate_unexplained(const World *w)
+{
+    static const int dx[4] = { 1, -1, 0, 0 };
+    static const int dy[4] = { 0, 0, 1, -1 };
+    int x, y, d, n = 0;
+
+    for (y = 0; y < WORLD_H; y++) {
+        for (x = 0; x < WORLD_W; x++) {
+            Uint8 a = w->region[y][x];
+            int ox, oy, seen_solid = 0;
+            if (w->solid[y][x] || a == REGION_NONE) continue;
+            for (d = 0; d < 4; d++) {
+                int nx = x + dx[d], ny = y + dy[d];
+                if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H) continue;
+                if (w->solid[ny][nx]) continue;
+                /* Stepping OUT of this tile into one that demands more. */
+                if (region_requires(w, w->region[ny][nx]) & ~region_requires(w, a))
+                    break;
+            }
+            if (d == 4) continue;
+            for (oy = -GATE_LOOK; oy <= GATE_LOOK && !seen_solid; oy++)
+                for (ox = -GATE_LOOK; ox <= GATE_LOOK; ox++)
+                    if (solid_at(w, x + ox, y + oy)) { seen_solid = 1; break; }
+            if (!seen_solid) n++;
+        }
+    }
+    return n;
+}
+
 static int gating_selftest(int seeds, Uint64 base)
 {
     static const Uint8 tiers[4] = {
@@ -3713,6 +4472,68 @@ static int gating_selftest(int seeds, Uint64 base)
         } else {
             printf("gating  : negative control - a gate-blind graph walker disagrees"
                    " with the real walk\n");
+        }
+    }
+
+    /* EVERY GATE MUST BE VISIBLE, which is the bug the ridges exist to fix: a
+     * gate is a property of a whole region, and the partition is a Voronoi over
+     * open ground, so before the ridges the line where "too steep to climb"
+     * began ran through flat grass with nothing drawn on it.
+     *
+     * Measured as unexplained crossings: an open tile she can stand on, next to
+     * an open tile that demands an ability this one did not, with no solid tile
+     * anywhere within GATE_LOOK - nothing on screen, in other words, that could
+     * account for being stopped. Solid rather than rock specifically, because a
+     * pond bank explains a Wade gate just as honestly as a cliff explains a
+     * Climb one.
+     *
+     * The control is the SAME measurement on the same worlds with the ridge
+     * step skipped - the previous behaviour, rebuilt here from the real
+     * generator functions rather than described. If that does not produce a
+     * large count, this check is measuring nothing. */
+    {
+        int before = 0, after = 0, seeds_bad = 0;
+        for (s = 0; s < seeds; s++) {
+            Uint64 seed = base + (Uint64)s;
+            Rng rng;
+            int depth[REGION_COUNT], n;
+
+            /* The pipeline up to the point where gates exist but ridges do not,
+             * which is exactly the state the old generator shipped. */
+            world_stub(w, seed);
+            world_spawn(w, sc);
+            regions_build(w, sc);
+            if (w->spawn_tile < 0 || w->region_count < 2) continue;
+            regions_depth(w, depth);
+            rng_seed(&rng, seed, STREAM_ENTITIES);
+            regions_assign_terrain(w, &rng, depth);
+
+            before += gate_unexplained(w);
+
+            /* The same two steps, in the same order, that gate_try runs. */
+            gate_ridges(w, seed);
+            gate_repair(w);
+            regions_relink(w);
+            n = gate_unexplained(w);
+            after += n;
+            if (n) seeds_bad++;
+        }
+        if (before == 0) {
+            printf("  gate-visibility negative control FAILED: the un-ridged"
+                   " generator left no unexplained gate crossings, so this check"
+                   " cannot detect one\n");
+            fails++;
+        } else {
+            printf("gating  : negative control - without ridges, %d unexplained gate"
+                   " crossings over %d seeds\n", before, seeds);
+        }
+        if (after) {
+            printf("  %d unexplained gate crossings remain on %d of %d seeds -"
+                   " she is stopped by nothing she can see\n", after, seeds_bad, seeds);
+            fails++;
+        } else {
+            printf("gating  : every gate crossing is flanked by something solid"
+                   " within %d tiles\n", GATE_LOOK);
         }
     }
 
@@ -4255,33 +5076,6 @@ static int sort_selftest(void)
     return fails;
 }
 
-/* Decode a sprite and count how many of its pixels are palette index 0, i.e.
- * transparent. Used to prove a base-fill tile really covers its whole cell. */
-static int sprite_transparent_px(const ArtSprite *sp)
-{
-    unsigned int i = sp->data_off, n = sp->data_off + sp->data_len;
-    int seen = 0, trans = 0;
-
-    if (n > ART_DATA_BYTES) return -1;
-    while (i < n && seen < (int)sp->w * (int)sp->h) {
-        unsigned int c = ART_DATA[i++], count, k;
-        if (c >= 0x80) {
-            count = (c & 0x7Fu) + 1u;
-            if (i + count > n) break;
-            for (k = 0; k < count && seen < (int)sp->w * (int)sp->h; k++, seen++)
-                if (ART_DATA[i + k] == 0) trans++;
-            i += count;
-        } else {
-            count = c + 1u;
-            if (i >= n) break;
-            for (k = 0; k < count && seen < (int)sp->w * (int)sp->h; k++, seen++)
-                if (ART_DATA[i] == 0) trans++;
-            i++;
-        }
-    }
-    return trans;
-}
-
 /* The blob autotiler, against a hand-written truth table. Deliberately a table
  * rather than a re-derivation: restating the formula in the test would only
  * prove the formula equals itself. */
@@ -4327,8 +5121,8 @@ static int autotile_selftest(void)
     /* Every tile the tables name must exist, and the rock ring's centre must be
      * the hollow the source sheet actually has. */
     {
-        const short *tables[7];
-        int sizes[7], t, k;
+        const short *tables[8];
+        int sizes[8], t, k;
         tables[0] = tile_grass_base;   sizes[0] = 4;
         tables[1] = tile_dirt_fill;    sizes[1] = 6;
         tables[2] = tile_water_fill;   sizes[2] = 10;
@@ -4336,7 +5130,8 @@ static int autotile_selftest(void)
         tables[4] = tile_olive_edge;   sizes[4] = 9;
         tables[5] = tile_water_edge;   sizes[5] = 9;
         tables[6] = tile_grass_detail; sizes[6] = 6;
-        for (t = 0; t < 7; t++) {
+        tables[7] = tile_rock_fill;    sizes[7] = 2;
+        for (t = 0; t < 8; t++) {
             for (k = 0; k < sizes[t]; k++) {
                 if (tables[t][k] < 0 || tables[t][k] >= ART_SPRITE_COUNT) {
                     printf("  table %d entry %d is not a valid sprite id\n", t, k);
@@ -4361,6 +5156,62 @@ static int autotile_selftest(void)
         }
     }
 
+    /* blob_interior must name EXACTLY the mask whose slice draws nothing.
+     *
+     * That agreement is the entire contract behind the pond and outcrop fills.
+     * The ground pass lays a fill on the cells blob_interior calls interior; the
+     * rim pass skips the cells whose slice is the hollow centre. If the two ever
+     * disagree, a cell gets NEITHER - a hole in the middle of a pond - or BOTH,
+     * which is the opaque square with its bank floating inside it that the pond
+     * fix removed. Neither failure is visible in the predicate; both are obvious
+     * on screen, and by then they look like an art bug.
+     *
+     * Exhaustive over all 16 neighbour masks, against a world built to order
+     * rather than a generated one, so no seed has to happen to contain the
+     * arrangement being tested. */
+    {
+        World *w = (World *)SDL_malloc(sizeof(World));
+        int mask, bad_axis = 0;
+
+        if (!w) {
+            printf("  autotile: out of memory for the interior check\n");
+            fails++;
+        } else {
+            for (mask = 0; mask < 16; mask++) {
+                int n = mask & 1, s = (mask >> 1) & 1;
+                int e = (mask >> 2) & 1, wst = (mask >> 3) & 1;
+                int tx = 8, ty = 8, got, want, slice;
+                SDL_memset(w->terr, GT_GRASS, sizeof w->terr);
+                w->terr[ty][tx] = GT_WATER;
+                if (n)   w->terr[ty - 1][tx] = GT_WATER;
+                if (s)   w->terr[ty + 1][tx] = GT_WATER;
+                if (e)   w->terr[ty][tx + 1] = GT_WATER;
+                if (wst) w->terr[ty][tx - 1] = GT_WATER;
+                slice = blob_slice(n, s, e, wst);
+                got   = blob_interior(w, tx, ty, GT_WATER);
+                want  = (slice == 4);
+                if (got != want) {
+                    printf("  interior disagrees with the slicer at mask %d:"
+                           " interior says %d, slice is %d\n", mask, got, slice);
+                    fails++;
+                }
+                /* Negative control over the same masks: a predicate that forgets
+                 * the east/west axis - the same omission the slicer control
+                 * below makes - must be caught by this comparison. */
+                if ((n && s) != want) bad_axis++;
+            }
+            if (bad_axis == 0) {
+                printf("  interior negative control FAILED: a north/south-only"
+                       " predicate agreed with the slicer on every mask\n");
+                fails++;
+            } else {
+                printf("autotile: negative control - a north/south-only interior"
+                       " test disagrees on %d of 16 masks\n", bad_axis);
+            }
+            SDL_free(w);
+        }
+    }
+
     /* Negative control: a slicer that ignores the west/east axis - the classic
      * way to get this wrong - must fail the same table. */
     {
@@ -4379,6 +5230,7 @@ static int autotile_selftest(void)
         }
     }
 
+
     printf("autotile: %d cases, all 9 slices reachable, tables reference real 16x16 tiles\n",
            (int)(sizeof cases / sizeof *cases));
     printf("autotile: %s\n", fails ? "FAIL" : "PASS");
@@ -4388,6 +5240,55 @@ static int autotile_selftest(void)
 /* The ground pass must cover every visible pixel exactly once. A renderer that
  * left gaps and one that hid them by overdrawing are both wrong, and only
  * counting writes distinguishes them. */
+/* Transparent-pixel budget for a rock fill cell: twice the worst the two
+ * authored cells actually measure. See the check in tile_selftest. */
+#define ROCK_FILL_MAX_TRANS 24
+
+/* How much of itself a BLOCKING tile has to draw as obstacle, out of 256.
+ *
+ * 96 is three eighths of the cell - enough that a glance reads it as something
+ * to walk around. The number that matters is on the other side of the gap: the
+ * ring's two top corners draw 12 and 18, so anything between about 20 and 240
+ * separates "drawn" from "not drawn" equally well, and nothing is being tuned
+ * to sit just above a measurement. */
+#define SOLID_MIN_OBSTACLE_PX 96
+
+/* Obstacle pixels the ground pass puts on a blocking cell.
+ *
+ * `with_fill` selects whether the rock rubble underlay is counted, which is the
+ * only difference between the current renderer and the one that shipped the
+ * invisible walls - so the same function measures the fix and the control.
+ *
+ * Ordinary ground returns 0 on purpose. A solid cell drawn as grass is exactly
+ * the failure being looked for, and an opacity measure would score it 256. */
+static int solid_obstacle_px(const World *w, int tx, int ty, int with_fill)
+{
+    int t = w->terr[ty][tx], sl;
+
+    if (t == GT_WATER) {
+        if (blob_interior(w, tx, ty, GT_WATER)) return 256;
+        sl = blob_slice(terr_at(w, tx, ty - 1) == GT_WATER,
+                        terr_at(w, tx, ty + 1) == GT_WATER,
+                        terr_at(w, tx + 1, ty) == GT_WATER,
+                        terr_at(w, tx - 1, ty) == GT_WATER);
+        return 256 - sprite_transparent_px(&ART_SPRITES[tile_water_edge[sl]]);
+    }
+    if (t == GT_ROCK) {
+        int ring;
+        /* Mirrors the renderer: the underlay goes under every rock cell. */
+        if (with_fill)
+            return 256 - sprite_transparent_px(&ART_SPRITES[tile_rock_fill[0]]);
+        sl = blob_slice(terr_at(w, tx, ty - 1) == GT_ROCK,
+                        terr_at(w, tx, ty + 1) == GT_ROCK,
+                        terr_at(w, tx + 1, ty) == GT_ROCK,
+                        terr_at(w, tx - 1, ty) == GT_ROCK);
+        ring = tile_rock_ring[sl];
+        return ring == ART_NONE ? 0
+             : 256 - sprite_transparent_px(&ART_SPRITES[ring]);
+    }
+    return 0;
+}
+
 static int tile_selftest(void)
 {
     SDL_Surface *fb = test_surface(LOGICAL_W, LOGICAL_H);
@@ -4422,7 +5323,7 @@ static int tile_selftest(void)
             { tile_water_fill, 10, "water fill" }
         };
         int t, k;
-        for (t = 0; t < 3; t++) {
+        for (t = 0; t < (int)(sizeof bases / sizeof *bases); t++) {
             for (k = 0; k < bases[t].n; k++) {
                 const ArtSprite *sp = &ART_SPRITES[bases[t].ids[k]];
                 int trans = sprite_transparent_px(sp);
@@ -4439,6 +5340,39 @@ static int tile_selftest(void)
             printf("  base-opacity negative control FAILED: a detail tile"
                    " measured as fully opaque\n");
             fails++;
+        }
+    }
+
+    /* The rock fill is an OVERLAY, so it is held to NEARLY opaque rather than
+     * fully - but its whole job is to hide the ground inside a rock outcrop, so
+     * "nearly" is a real bound and not a shrug. The two cells measure 12 and 11
+     * transparent px; the limit is set at twice the worst so a re-bake can move
+     * a pixel without tripping it, and every OTHER cell in that block of the
+     * sheet is rim art measuring an order of magnitude worse - which is what
+     * the control demonstrates. Picking one of those by mistake is the specific
+     * error this catches, and it is an easy one to make: they sit adjacent in
+     * the sheet and all read as "rock". */
+    {
+        int k, worst = 0, ctl;
+        for (k = 0; k < 2; k++) {
+            int trans = sprite_transparent_px(&ART_SPRITES[tile_rock_fill[k]]);
+            if (trans > worst) worst = trans;
+            if (trans > ROCK_FILL_MAX_TRANS) {
+                printf("  rock fill entry %d has %d transparent px (limit %d) -"
+                       " an outcrop's interior would show ground through it\n",
+                       k, trans, ROCK_FILL_MAX_TRANS);
+                fails++;
+            }
+        }
+        ctl = sprite_transparent_px(&ART_SPRITES[tile_rock_ring[0]]);
+        if (ctl <= ROCK_FILL_MAX_TRANS) {
+            printf("  rock-fill negative control FAILED: a rim tile measured as"
+                   " nearly opaque, so this check cannot reject one\n");
+            fails++;
+        } else {
+            printf("tile    : rock fill worst %d transparent px of %d (limit %d);"
+                   " a rim tile measures %d\n",
+                   worst, TILE * TILE, ROCK_FILL_MAX_TRANS, ctl);
         }
     }
 
@@ -4508,6 +5442,61 @@ static int tile_selftest(void)
         }
     }
 
+    /* EVERY BLOCKING TILE MUST DRAW ITSELF.
+     *
+     * This is the check that was missing, and the shape of its absence is worth
+     * keeping: --gating-test already proved every gate boundary had solid tiles
+     * along it, and the boundaries were still invisible on screen, because
+     * "there is a solid tile here" and "there is something here to see" are
+     * different claims and only the first was being made.
+     *
+     * The rock ring fakes height by drawing its mass low in the cell, so its
+     * nine slices cover 12 to 256 pixels of their 256. Collision is the whole
+     * square regardless. Wherever a thin slice was selected - the top of every
+     * outcrop, and every diagonal step of one - the result was a solid cell
+     * standing on open grass, which stops her dead and says nothing, because a
+     * wall is not a gate and gate_report has nothing to report.
+     *
+     * Measured over generated worlds rather than a constructed case: the thin
+     * slices appear at particular SHAPES, and a hand-built outcrop would only
+     * ever contain the shapes I thought to build. */
+    {
+        int bad = 0, ctl = 0, worst = 256, s;
+        const int SEEDS = 8;
+
+        for (s = 0; s < SEEDS; s++) {
+            world_stub(w, (Uint64)(s + 1));
+            for (y = 0; y < WORLD_H; y++)
+                for (x = 0; x < WORLD_W; x++) {
+                    int px;
+                    if (!w->solid[y][x]) continue;
+                    px = solid_obstacle_px(w, x, y, 1);
+                    if (px < worst) worst = px;
+                    if (px < SOLID_MIN_OBSTACLE_PX) bad++;
+                    if (solid_obstacle_px(w, x, y, 0) < SOLID_MIN_OBSTACLE_PX) ctl++;
+                }
+        }
+        if (bad) {
+            printf("  %d blocking tiles draw less than %d px of obstacle over %d"
+                   " seeds - she is stopped by something she cannot see\n",
+                   bad, SOLID_MIN_OBSTACLE_PX, SEEDS);
+            fails++;
+        }
+        /* Negative control: the same worlds, scored without the rubble underlay
+         * - which is precisely the renderer that shipped the invisible walls.
+         * If that does not fail this check, the check cannot detect them. */
+        if (ctl == 0) {
+            printf("  obstacle-visibility negative control FAILED: the un-filled"
+                   " renderer left nothing under the threshold\n");
+            fails++;
+        } else {
+            printf("tile    : negative control - without the rubble underlay,"
+                   " %d blocking tiles drew under %d px\n", ctl, SOLID_MIN_OBSTACLE_PX);
+        }
+        printf("tile    : every blocking tile draws at least %d px of obstacle"
+               " (worst %d of 256)\n", SOLID_MIN_OBSTACLE_PX, worst);
+    }
+
     /* Ground-type census, averaged over 8 seeds so no threshold can be tuned to
      * flatter one map.
      *
@@ -4559,13 +5548,16 @@ static Uint32 fog_lerp_hue_swap(SDL_Surface *s, int r, int gr, int b, float reve
     float fg = FOG_TINT_G + (lum - FOG_TINT_G) * FOG_KEEP;
     float fb = FOG_TINT_B + (lum - FOG_TINT_B) * FOG_KEEP;
 
-    if (reveal < 0.0f) reveal = 0.0f;
-    if (reveal > 1.0f) reveal = 1.0f;
-    /* Note the swap: green's target gets red's source and vice versa. */
+    /* Eased identically to fog_lerp, so the ONE thing this control varies is
+     * the hue swap - a second difference would leave it unclear which of them
+     * the inversions it produces are actually testing for. */
+    reveal = fog_ease(reveal);
+    /* Note the swap: green's target gets red's source and vice versa. Rounded
+     * like the real one, for the same reason the ease is shared. */
     return SDL_MapRGB(s->format,
-                      (Uint8)(fr + ((float)gr - fr) * reveal),
-                      (Uint8)(fg + ((float)r  - fg) * reveal),
-                      (Uint8)(fb + ((float)b  - fb) * reveal));
+                      (Uint8)(fr + ((float)gr - fr) * reveal + 0.5f),
+                      (Uint8)(fg + ((float)r  - fg) * reveal + 0.5f),
+                      (Uint8)(fb + ((float)b  - fb) * reveal + 0.5f));
 }
 
 static int fog_selftest(void)
@@ -4987,6 +5979,95 @@ static int hud_selftest(Uint64 base)
                 fails++;
             }
         printf("hud     : %d HUD strings all fit %d px\n", i, LOGICAL_W);
+    }
+
+    /* Seed cycling. The '[' and ']' keys route through game_reseed for the same
+     * reason E routes through try_interact: so a test drives exactly what the
+     * key runs, rather than a re-implementation of it that can agree with the
+     * test while disagreeing with the game.
+     *
+     * Three things have to hold, and each one fails SILENTLY - the game keeps
+     * running and looks fine, it is just showing the wrong world:
+     *   - the world actually changes, so the key is not a no-op;
+     *   - she is standing somewhere legal in the NEW world, not at coordinates
+     *     that only meant something in the old one;
+     *   - the latches a fresh start clears are cleared, or the completion
+     *     banner never fires again for the rest of the session. */
+    {
+        Audio a;
+        Uint64 t0, t1;
+        int x, y;
+
+        SDL_zero(a);
+        game_init(g, sc, base);
+        /* Stand-ins for a session in progress: a finished area and a stale map. */
+        hud.win_shown = 1;
+        hud.mm_dirty  = 0;
+        for (t0 = 0, y = 0; y < WORLD_H; y++)
+            for (x = 0; x < WORLD_W; x++)
+                t0 = t0 * 31u + g->w.terr[y][x];
+
+        game_reseed(g, sc, &a, base + 1);
+
+        for (t1 = 0, y = 0; y < WORLD_H; y++)
+            for (x = 0; x < WORLD_W; x++)
+                t1 = t1 * 31u + g->w.terr[y][x];
+        if (t0 == t1) {
+            printf("FAIL  hud: reseed left the terrain identical - the key is a"
+                   " no-op\n");
+            fails++;
+        }
+        if (g->seed != base + 1) {
+            printf("FAIL  hud: reseed left seed at %.0f, expected %.0f\n",
+                   (double)g->seed, (double)(base + 1));
+            fails++;
+        }
+        /* Feet on legal ground in the world she is now standing in. */
+        if (player_blocked(&g->w, g->p.abilities, g->p.x, g->p.y)) {
+            printf("FAIL  hud: reseed left her inside a wall at (%.2f, %.2f)\n",
+                   (double)g->p.x, (double)g->p.y);
+            fails++;
+        }
+        if (hud.win_shown || !hud.mm_dirty ||
+            g->frags_restored != 0 || g->souls_restored != 0 ||
+            g->p.abilities != ABIL_NONE) {
+            printf("FAIL  hud: reseed carried session state into the new world"
+                   " (win_shown %d, mm_dirty %d, frags %d, souls %d, abil %d)\n",
+                   hud.win_shown, hud.mm_dirty, g->frags_restored,
+                   g->souls_restored, g->p.abilities);
+            fails++;
+        }
+        /* The audio callback owns its RNG, so the reseed must be handed over as
+         * a request rather than written behind its back. */
+        if (!SDL_AtomicGet(&a.rng_req) || !SDL_AtomicGet(&a.reset_req) ||
+            a.rng_seed_req != base + 1) {
+            printf("FAIL  hud: reseed did not post the audio reseed request\n");
+            fails++;
+        }
+
+        /* Negative control: the same checks against a reseed that only sets the
+         * seed - which is the obvious way to write this and leaves every latch
+         * standing - must REJECT it. Without this the block above would pass
+         * against a game_reseed that did almost nothing. */
+        {
+            int caught = 0;
+            game_init(g, sc, base);
+            hud.win_shown = 1;
+            hud.mm_dirty  = 0;
+            g->seed = base + 1;          /* the whole of the broken "reseed" */
+            if (hud.win_shown)  caught++;
+            if (!hud.mm_dirty)  caught++;
+            if (caught == 0) {
+                printf("  hud reseed negative control FAILED: a seed-only reseed"
+                       " satisfied the state checks\n");
+                fails++;
+            } else {
+                printf("hud     : negative control - a seed-only reseed misses %d"
+                       " of the state resets\n", caught);
+            }
+        }
+        printf("hud     : reseed rebuilds the world, lands her on open ground,"
+               " and clears the session\n");
     }
 
     printf("hud     : %s\n", fails ? "FAIL" : "PASS");
@@ -5567,8 +6648,12 @@ int main(int argc, char **argv)
     SDL_AudioSpec have;
     int scale, running = 1, frame = 0, limit, fullscreen = 0;
     int cam_x = 0, cam_y = 0;
-    Uint64 perf, prev, now, seed;
+    Uint64 perf, prev, now, seed, frame_due = 0;
     float acc = 0.0f, clock = 0.0f;
+    /* Where the player stood at the START of the most recent tick. The renderer
+     * draws between this and where she stands now - see the interpolation
+     * comment below the tick loop. */
+    float prev_px = 0.0f, prev_py = 0.0f;
 #if WAYFARER_SELFTEST
     const char *shot = NULL;
     int atlas_page = -1;
@@ -5624,6 +6709,8 @@ int main(int argc, char **argv)
         return fatal("Wayfarer could not allocate the world.", 6);
     }
     game_init(g, sc, seed);
+    prev_px = g->p.x;
+    prev_py = g->p.y;
 #if WAYFARER_SELFTEST
     if (arg_flag(argc, argv, "--dev"))
         g->p.abilities = ABIL_ALL;
@@ -5702,7 +6789,7 @@ int main(int argc, char **argv)
 
     while (running) {
         SDL_Event ev;
-        double elapsed, spent, budget;
+        double elapsed;
 
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT)
@@ -5724,10 +6811,39 @@ int main(int argc, char **argv)
                     hud_toast(game_save(g, SAVE_FILENAME) == 0
                               ? "saved" : "could not write the save file");
                     break;
+                /* Step to the next or previous world. Both spellings are here
+                 * because both are the obvious one to somebody: ] and [ read as
+                 * "forward" and "back" on a bracket pair, n and p as "next" and
+                 * "previous". Neither collides with a movement or action key.
+                 *
+                 * Seed 1 is the floor rather than wrapping through 0: the seed
+                 * is a Uint64, so decrementing past 1 would land on a world
+                 * numbered 18446744073709551615, which the HUD prints through a
+                 * double and cannot even render back correctly. */
+                case SDLK_RIGHTBRACKET:
+                case SDLK_n:
+                case SDLK_LEFTBRACKET:
+                case SDLK_p: {
+                    char buf[32];
+                    int fwd = (ev.key.keysym.sym == SDLK_RIGHTBRACKET ||
+                               ev.key.keysym.sym == SDLK_n);
+                    if (fwd)          seed++;
+                    else if (seed > 1) seed--;
+                    game_reseed(g, sc, &audio, seed);
+                    /* She is somewhere else entirely now, so the interpolator
+                     * must not draw a frame on the way from where she was. */
+                    prev_px = g->p.x;
+                    prev_py = g->p.y;
+                    SDL_snprintf(buf, sizeof(buf), "seed %.0f", (double)seed);
+                    hud_toast(buf);
+                    break;
+                }
                 case SDLK_F9: {
                     Uint64 ls = seed;
                     if (game_load(g, sc, SAVE_FILENAME, &ls) == 0) {
                         seed = ls;
+                        prev_px = g->p.x;
+                        prev_py = g->p.y;
                         hud.mm_dirty = 1;
                         hud.win_shown = area_complete(g);
                         /* Payloads first, flags second - the callback owns
@@ -5766,6 +6882,11 @@ int main(int argc, char **argv)
         acc += (float)elapsed;
         while (acc >= TICK_DT) {
             const Uint8 *keys = SDL_GetKeyboardState(NULL);
+            /* Captured before anything moves her, and captured on EVERY tick
+             * including a catch-up one, so the pair always spans exactly the
+             * tick the leftover accumulator is a fraction of. */
+            prev_px = g->p.x;
+            prev_py = g->p.y;
             float mx = (float)((keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT]) -
                                (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]));
             float my = (float)((keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN]) -
@@ -5827,21 +6948,69 @@ int main(int argc, char **argv)
             break;
         draw = back ? back : fb;
 
-        camera_follow(g->p.x, g->p.y, draw->w, draw->h, &cam_x, &cam_y);
-#if WAYFARER_SELFTEST
-        if (atlas_page >= 0) {
-            draw_atlas(draw, atlas_page, clock);
-        } else
-#endif
+        /* SUB-TICK INTERPOLATION. The simulation is fixed-step and the renderer
+         * is not, and the two are not phase-locked - nothing here waits on a
+         * vsync, and SDL_Delay resolves to whole milliseconds against a 16.67 ms
+         * frame. So the number of ticks that land in one frame is 1 most of the
+         * time and 0 or 2 whenever the phases drift past each other, and drawing
+         * at the last tick's position turns that into visible motion: at 72 px/s
+         * the world scrolls 0 px, then 2.4 px, then 1.2 px again. It reads as
+         * stutter even though the simulation is perfectly regular.
+         *
+         * Drawing BETWEEN the last two tick positions decouples the two rates:
+         * `acc` is how far past the last tick this frame is, so alpha is the
+         * fraction of the next tick already elapsed, and the drawn position
+         * advances by the same amount every frame however the ticks fall.
+         *
+         * It is the camera this matters for, not the sprite: she is centred, so
+         * what actually moves on screen is the world. Both are driven from the
+         * same interpolated point so they cannot disagree by a pixel. */
         {
-            render_world(draw, &g->w, seed, cam_x, cam_y);
-            props_build(draw->w, draw->h, &g->w, seed, cam_x, cam_y, g->ents,
-                        &g->p, clock, dl);
-            props_draw(draw, dl);
-            /* Drawn against `draw`, whose dimensions are read from the surface
-             * rather than LOGICAL_*: with no backbuffer we render at native
-             * resolution, and a HUD placed by LOGICAL_* would land off screen. */
-            hud_draw(draw, g);
+            float alpha = acc / TICK_DT;
+            Player rp = g->p;
+            rp.x = render_lerp(prev_px, g->p.x, alpha);
+            rp.y = render_lerp(prev_py, g->p.y, alpha);
+
+            camera_follow(rp.x, rp.y, draw->w, draw->h, &cam_x, &cam_y);
+#if WAYFARER_SELFTEST
+            if (atlas_page >= 0) {
+                draw_atlas(draw, atlas_page, clock);
+            } else
+#endif
+            {
+                render_world(draw, &g->w, seed, cam_x, cam_y);
+                props_build(draw->w, draw->h, &g->w, seed, cam_x, cam_y, g->ents,
+                            &rp, clock, dl);
+                props_draw(draw, dl);
+#if WAYFARER_SELFTEST
+                /* --solidmap: a dot on every blocking tile, so COLLISION can be
+                 * compared against what is actually DRAWN.
+                 *
+                 * Kept because it is what found the invisible walls. The tests
+                 * had proved every gate boundary was lined with solid tiles and
+                 * the boundaries were still invisible, because a solid tile and
+                 * a visible one are different claims; the dots made the gap
+                 * obvious in one frame - markers sitting on open grass a full
+                 * tile outside the rock they belonged to. Same reason --lit and
+                 * --dev exist: some states only a screenshot can settle. */
+                if (arg_flag(argc, argv, "--solidmap")) {
+                    int mtx, mty;
+                    Uint32 red = SDL_MapRGB(draw->format, 0xff, 0x20, 0x20);
+                    for (mty = cam_y / TILE; mty <= (cam_y + draw->h) / TILE; mty++)
+                        for (mtx = cam_x / TILE; mtx <= (cam_x + draw->w) / TILE; mtx++) {
+                            if (mtx < 0 || mty < 0 || mtx >= WORLD_W || mty >= WORLD_H) continue;
+                            if (!g->w.solid[mty][mtx]) continue;
+                            fill_rect(draw, mtx * TILE - cam_x + 6, mty * TILE - cam_y + 6,
+                                      4, 4, red);
+                        }
+                }
+#endif
+                /* Drawn against `draw`, whose dimensions are read from the
+                 * surface rather than LOGICAL_*: with no backbuffer we render at
+                 * native resolution, and a HUD placed by LOGICAL_* would land
+                 * off screen. */
+                hud_draw(draw, g);
+            }
         }
         present(win, fb, draw == back ? back : NULL);
 
@@ -5861,13 +7030,31 @@ int main(int argc, char **argv)
          * SDL_UpdateWindowSurface does not block on the display. Without this
          * the loop free-runs at thousands of fps and pegs a core to draw frames
          * nobody sees. Simulation is already fixed-step, so this affects only
-         * how often we redraw. */
-        spent = (double)(SDL_GetPerformanceCounter() - now) / (double)perf;
-        budget = 1.0 / FRAME_HZ;
-        if (spent < budget) {
-            Uint32 nap = (Uint32)((budget - spent) * 1000.0);
-            if (nap > 0)
-                SDL_Delay(nap);
+         * how often we redraw.
+         *
+         * Paced against an ABSOLUTE deadline that advances by exactly one period
+         * each frame, not against how long this frame took. The difference is
+         * whether the error accumulates. Measuring the frame and sleeping the
+         * remainder throws away the sub-millisecond part of every wait - the nap
+         * is whole milliseconds against a 16.67 ms period - so the loop runs
+         * persistently slow and the leftover drifts; carrying the deadline
+         * forward instead means a nap that undershoots is paid back by the next
+         * one, and the average period is exact. What is left is bounded jitter,
+         * which is what the interpolation above absorbs.
+         *
+         * Resynchronised if we fall more than a period behind, so a stall (a
+         * window drag, a breakpoint) does not leave the deadline in the past and
+         * spin a burst of catch-up frames to no purpose. */
+        {
+            Uint64 period = (Uint64)((double)perf / FRAME_HZ);
+            Uint64 t = SDL_GetPerformanceCounter();
+            if (frame_due < t - period) frame_due = t;
+            frame_due += period;
+            if (t < frame_due) {
+                Uint32 nap = (Uint32)(((frame_due - t) * 1000ULL) / perf);
+                if (nap > 0)
+                    SDL_Delay(nap);
+            }
         }
     }
 

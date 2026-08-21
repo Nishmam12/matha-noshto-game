@@ -33,3 +33,6 @@ sdl2-build/
 # working tree. Never committed and must never be: this entry exists so a future `git add -A`
 # cannot catch it by accident.
 opencode.json
+.kilo/
+firebase-debug.log
+Bugs/
