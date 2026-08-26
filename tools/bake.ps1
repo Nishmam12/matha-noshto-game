@@ -49,6 +49,12 @@ $TilesetPng = Join-Path $ASSETS 'Fantasy Forest\Tiles\Tileset.png'
 $DecorPng   = Join-Path $ASSETS 'Fantasy Forest\Decorations\Decorations.png'
 $CharDir    = Join-Path $ASSETS 'Character'
 
+# ---- Underworld (biome 2) source paths -----------------------------------
+$UwGroundPng  = Join-Path $ASSETS 'Underworld\PNG\Ground_rocks.png'
+$UwWaterPng   = Join-Path $ASSETS 'Underworld\PNG\Water_coasts.png'
+$UwObjectsDir = Join-Path $ASSETS 'Underworld\PNG\Objects_separately'
+$PortalPng    = Join-Path $ASSETS 'Portal\Dimensional_Portal.png'
+
 # ---- Tileset -------------------------------------------------------------
 # 128x240 = an 8x15 grid of 16x16 cells, 92 of which have content. Emitted
 # MECHANICALLY as ART_TILE_C<col>_R<row>, with no hand-written name table: which
@@ -169,7 +175,7 @@ function Get-PaletteIndex([int]$r, [int]$g, [int]$b) {
 # partial alpha is counted and REPORTED rather than silently rounded: a future
 # delivery with soft edges would otherwise change how everything looks with no
 # signal at all.
-function Get-IndexArray($Img, [int]$x0, [int]$y0, [int]$w, [int]$h) {
+function Get-IndexArray($Img, [int]$x0, [int]$y0, [int]$w, [int]$h, [scriptblock]$Tint = $null) {
     $b = $Img.B; $stride = $Img.Stride
     $idx = New-Object byte[] ($w * $h)
     for ($y = 0; $y -lt $h; $y++) {
@@ -183,7 +189,12 @@ function Get-IndexArray($Img, [int]$x0, [int]$y0, [int]$w, [int]$h) {
                 $idx[$dst + $x] = 0
             } else {
                 if ($a -ne 255) { $script:PartialAlpha++ }
-                $idx[$dst + $x] = [byte](Get-PaletteIndex $b[$o + 2] $b[$o + 1] $b[$o])
+                $r = $b[$o + 2]; $g = $b[$o + 1]; $bl = $b[$o]
+                if ($Tint) {
+                    $rgb = & $Tint $r $g $bl
+                    $r = $rgb[0]; $g = $rgb[1]; $bl = $rgb[2]
+                }
+                $idx[$dst + $x] = [byte](Get-PaletteIndex $r $g $bl)
             }
         }
     }
@@ -341,7 +352,150 @@ foreach ($d in $Decor) {
 }
 if (-not $Quiet) { Write-Host ("  decorations {0} objects, all opaque pixels accounted for" -f $Decor.Count) }
 
-# --- character ---
+# ---- Underworld tiles (biome 2) ------------------------------------------
+#
+# NOTE ON ORDER: everything Underworld (tiles, decorations, portal) is baked
+# BEFORE the character sheets below, deliberately - sprite_selftest identifies
+# character frames as "everything from ART_CH_IDLE_DOWN_0 to the end of
+# ART_SPRITES[]" (main.c, see the `i >= ART_CH_IDLE_DOWN_0` check), so the
+# character block must stay LAST or that heuristic silently misclassifies
+# whatever comes after it.
+# Ground_rocks.png and Water_coasts.png are vendor "cave wall" autotile mega
+# sheets in a layout that is NOT the engine's 3x3 blob format and not worth
+# reverse-engineering cell-by-cell. Rather than mechanically baking either
+# whole sheet (a 31x37 and a 66x16 grid - CLAUDE.md: "bake only what a caller
+# in main.c actually draws"), specific 16x16 cells are curated by hand, the
+# same way $Decor curates Fantasy Forest's decorations. Each cell was located
+# with tools/inspect-grid.ps1 (a scratch dev tool, not part of the build) and
+# alpha-verified opaque before being picked.
+#
+# One clean 4x3 "hole" motif in Water_coasts.png (cols 0-3, rows 0-2) supplies
+# a real 3x3 blob_slice mapping (see main.c's blob_slice: row = N?(S?1:2):0,
+# col = W?(E?1:2):0) for the acid rim - its natural green algae highlight is
+# reserved for the acid/hazard edge specifically, so it is not reused for the
+# cosmetic ground/dirt edge below.
+# Every (c,r) below was verified fully opaque (256/256 px, alpha>=250) by a
+# full-sheet automated scan, not by eye - the first pass here was picked by
+# eye against tools/inspect-grid.ps1 crops and got three cells wrong (two
+# reading as "flat grey floor" that were in fact mostly transparent "you can
+# see through to the background" hole interior, one rock-wall cell the same
+# way), caught only once --tile-test's opacity/obstacle-visibility checks ran
+# against real Underworld tables. ACID_NW/N/NE are the only three cells of the
+# curated acid-rim "hole" motif confirmed opaque by that same scan - the
+# W/E/S/SW/SE positions of the original 3x3 read are NOT (the motif's side and
+# bottom bands carry real transparency), so main.c's water_edge/rock_ring
+# tables reuse these three for all eight non-centre slots rather than
+# referencing cells that would fail the same obstacle-visibility check.
+$UwTileCells = @(
+    @{ n = 'UW_ACID_NW';    src = 'wc'; c = 0; r = 0 }
+    @{ n = 'UW_ACID_N';     src = 'wc'; c = 1; r = 0 }
+    @{ n = 'UW_ACID_NE';    src = 'wc'; c = 3; r = 0 }
+    @{ n = 'UW_FLOOR_A';    src = 'gr'; c = 6; r = 21 }
+    @{ n = 'UW_FLOOR_B';    src = 'gr'; c = 8; r = 21 }
+    @{ n = 'UW_RUBBLE_A';   src = 'wc'; c = 0; r = 4 }
+    @{ n = 'UW_RUBBLE_B';   src = 'wc'; c = 2; r = 4 }
+    @{ n = 'UW_FLOOR_C';    src = 'gr'; c = 4; r = 21 }
+    @{ n = 'UW_FLOOR_D';    src = 'gr'; c = 9; r = 21 }
+    @{ n = 'UW_RUBBLE_C';   src = 'gr'; c = 2; r = 21 }
+    @{ n = 'UW_RUBBLE_D';   src = 'gr'; c = 3; r = 21 }
+    @{ n = 'UW_ROCKWALL_A'; src = 'gr'; c = 0; r = 21 }
+    @{ n = 'UW_ROCKWALL_B'; src = 'gr'; c = 1; r = 21 }
+)
+$imgGr = Get-PixelData $UwGroundPng
+$imgWc = Get-PixelData $UwWaterPng
+foreach ($t in $UwTileCells) {
+    $img = if ($t.src -eq 'wc') { $imgWc } else { $imgGr }
+    $idx = Get-IndexArray $img ($t.c * $TILE) ($t.r * $TILE) $TILE $TILE
+    Add-Sprite $t.n $idx $TILE $TILE 0 0
+}
+# The acid FILL (pond interior) has no ready-made opaque liquid tile in the
+# source art - the hole centres are transparent by design, meant to show
+# whatever is composited underneath. Rather than invent new pixels, the two
+# floor tiles above are re-baked here through a fixed toxic-green tint, so
+# acid reads as visibly distinct from plain floor at a glance (the same
+# legibility concern CLAUDE.md's "ponds invisible on the minimap" note is
+# about) while staying byte-for-byte reproducible from the same source rects.
+$AcidTint = { param($r, $g, $b) @([int]($r * 0.55), [int][Math]::Min(255, $g * 0.95 + 40), [int]($b * 0.55)) }
+$idx = Get-IndexArray $imgGr (6 * $TILE) (21 * $TILE) $TILE $TILE $AcidTint
+Add-Sprite 'UW_ACIDFILL_A' $idx $TILE $TILE 0 0
+$idx = Get-IndexArray $imgGr (8 * $TILE) (21 * $TILE) $TILE $TILE $AcidTint
+Add-Sprite 'UW_ACIDFILL_B' $idx $TILE $TILE 0 0
+$idx = Get-IndexArray $imgGr (4 * $TILE) (21 * $TILE) $TILE $TILE $AcidTint
+Add-Sprite 'UW_ACIDFILL_C' $idx $TILE $TILE 0 0
+$idx = Get-IndexArray $imgGr (9 * $TILE) (21 * $TILE) $TILE $TILE $AcidTint
+Add-Sprite 'UW_ACIDFILL_D' $idx $TILE $TILE 0 0
+if (-not $Quiet) { Write-Host ("  uw tiles    {0} curated cells + 4 tinted acid-fill variants" -f $UwTileCells.Count) }
+
+# ---- Underworld decorations -----------------------------------------------
+# Objects_separately ships each object as its OWN pre-cropped PNG (not a
+# shared sheet), so no curated-rect overlap bookkeeping is needed - each file
+# already is one object. 2-4 numbered poses are picked per family (from the
+# 'shadow1' recolour; shadow2/shadow3 are near-identical recolours of the same
+# poses, verified by near-identical file sizes) for genuine silhouette variety
+# rather than picking three copies of the same pose. Lich_shadow* (reads as an
+# NPC/enemy - no such system exists), Animation*.png (unrelated reference
+# sheet), and Ruin_shadow*/Scull_door_shadow* (no PROP_* slot needs them - see
+# UNDERWORLD_BIOME_PLAN.md discussion) are deliberately excluded.
+$UwObjects = @(
+    @{ n = 'UW_TREE_1';    f = 'Tree_shadow1_1.png' }
+    @{ n = 'UW_TREE_2';    f = 'Tree_shadow1_2.png' }
+    @{ n = 'UW_TREE_3';    f = 'Tree_shadow1_3.png' }
+    @{ n = 'UW_PINE_1';    f = 'Broken_tree_shadow1_1.png' }
+    @{ n = 'UW_PINE_2';    f = 'Broken_tree_shadow1_2.png' }
+    @{ n = 'UW_PINE_3';    f = 'Broken_tree_shadow1_3.png' }
+    @{ n = 'UW_BUSH_1';    f = 'Thorn_plant_shadow1_3.png' }
+    @{ n = 'UW_BUSH_2';    f = 'Thorn_plant_shadow1_5.png' }
+    @{ n = 'UW_BUSH_3';    f = 'Thorn_plant_shadow1_6.png' }
+    @{ n = 'UW_LOG_1';     f = 'Dead_arm_shadow1_1.png' }
+    @{ n = 'UW_LOG_2';     f = 'Dead_arm_shadow1_2.png' }
+    @{ n = 'UW_LOG_3';     f = 'Dead_arm_shadow1_3.png' }
+    @{ n = 'UW_LOG_4';     f = 'Dead_arm_shadow1_4.png' }
+    @{ n = 'UW_ROCKPROP_1';f = 'Rock_shadow1_1.png' }
+    @{ n = 'UW_ROCKPROP_2';f = 'Rock_shadow1_2.png' }
+    @{ n = 'UW_ROCKPROP_3';f = 'Rock_shadow1_3.png' }
+    @{ n = 'UW_STONE_1';   f = 'Bones_shadow1_1.png' }
+    @{ n = 'UW_STONE_2';   f = 'Bones_shadow1_3.png' }
+    @{ n = 'UW_STONE_3';   f = 'Bones_shadow1_13.png' }
+    @{ n = 'UW_CRYSTAL_1'; f = 'Crystal_shadow1_1.png' }
+    @{ n = 'UW_CRYSTAL_2'; f = 'Crystal_shadow1_2.png' }
+    @{ n = 'UW_CRYSTAL_3'; f = 'Crystal_shadow1_3.png' }
+    @{ n = 'UW_CRYSTAL_4'; f = 'Crystal_shadow1_4.png' }
+    @{ n = 'UW_TUFT_1';    f = 'Bones_shadow1_2.png' }
+    @{ n = 'UW_TUFT_2';    f = 'Bones_shadow1_18.png' }
+    @{ n = 'UW_TUFT_3';    f = 'Bones_shadow1_16.png' }
+    @{ n = 'UW_TUFT_4';    f = 'Bones_shadow1_5.png' }
+    @{ n = 'UW_REED_1';    f = 'Grave_shadow1_1.png' }
+    @{ n = 'UW_REED_2';    f = 'Grave_shadow1_2.png' }
+    @{ n = 'UW_REED_3';    f = 'Grave_shadow1_3.png' }
+)
+foreach ($o in $UwObjects) {
+    $path = Join-Path $UwObjectsDir $o.f
+    $img = Get-PixelData $path
+    $box = Get-OpaqueBox $img 0 0 $img.W $img.H
+    if ($null -eq $box) { throw ("bake: {0} is fully transparent" -f $o.f) }
+    $idx = Get-IndexArray $img $box.X $box.Y $box.W $box.H
+    Add-Sprite $o.n $idx $box.W $box.H ([int][Math]::Floor($box.W / 2)) $box.H
+}
+if (-not $Quiet) { Write-Host ("  uw objects  {0} decorations, one PNG each" -f $UwObjects.Count) }
+
+# ---- Portal ---------------------------------------------------------------
+# 96x64 = 3x2 grid of 32x32 frames, a looping swirl animation. Baked as plain
+# decoration-anchor sprites (bottom-centre of each frame's own trimmed box) -
+# not the character sheet's cell-relative convention, since this is a small
+# fixed-size prop, not a walk cycle whose stride matters.
+$PORTAL_CELL = 32
+$imgPortal = Get-PixelData $PortalPng
+$portalNames = @('UW_PORTAL_A', 'UW_PORTAL_B', 'UW_PORTAL_C', 'UW_PORTAL_D', 'UW_PORTAL_E', 'UW_PORTAL_F')
+for ($f = 0; $f -lt 6; $f++) {
+    $pc = $f % 3; $pr = [int][Math]::Floor($f / 3)
+    $box = Get-OpaqueBox $imgPortal ($pc * $PORTAL_CELL) ($pr * $PORTAL_CELL) $PORTAL_CELL $PORTAL_CELL
+    if ($null -eq $box) { throw ("bake: portal frame {0} is empty" -f $f) }
+    $idx = Get-IndexArray $imgPortal ($pc * $PORTAL_CELL + $box.X) ($pr * $PORTAL_CELL + $box.Y) $box.W $box.H
+    Add-Sprite $portalNames[$f] $idx $box.W $box.H ([int][Math]::Floor($box.W / 2)) $box.H
+}
+if (-not $Quiet) { Write-Host "  portal      6 frames" }
+
+# --- character --- (must stay last - see the NOTE ON ORDER above)
 $charLowestFoot = -1
 foreach ($s in $CharSheets) {
     $path = Join-Path $CharDir $s.f

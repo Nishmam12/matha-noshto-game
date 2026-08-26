@@ -492,6 +492,12 @@ static int arg_int(int argc, char **argv, const char *name, int fallback)
 
 enum { GT_GRASS = 0, GT_OLIVE, GT_DIRT, GT_WATER, GT_ROCK, GT_COUNT };
 
+/* Two areas, one shared vocabulary. GT_* and TERRAIN_* stay biome-agnostic -
+ * only rendering (render_world's tile tables) and props (prop_art) are
+ * selected by biome, so world generation, gating and tile_blocked need no
+ * biome branch at all. See UNDERWORLD_BIOME_PLAN.md for why. */
+enum { BIOME_FOREST = 0, BIOME_UNDERWORLD = 1, BIOME_COUNT };
+
 /* ---- Regions and abilities ----------------------------------------------
  *
  * The world is partitioned into at most 32 connected regions (32 because `adj`
@@ -556,6 +562,8 @@ typedef struct {
     int region_count;
     int spawn_region;
     int spawn_tile;
+    Uint8 biome;       /* BIOME_* - render/prop selector only, set by world_gen */
+    int   portal_tile; /* Area 1 only: where the exit to Area 2 stands */
 } World;
 
 /* BFS working set. One struct so a caller allocates it once; far too big for a
@@ -750,6 +758,34 @@ static const float SYNTH_VOICE[SYNTH_STEPS] = {
     261.63f, 0.0f, 311.13f, 0.0f,  392.00f, 0.0f, 349.23f, 0.0f
 };
 
+/* Underworld: the drone drops to A1 (below Forest's C2) and the progression is
+ * A minor - F minor - C minor - G minor (i-vi-iii-vii, all minor rather than
+ * Forest's brighter major-leaning voicings) transposed down an octave from
+ * Forest's register. How this actually SOUNDS is unverified, per this
+ * project's convention for anything only a real ear can settle - what is
+ * verified is that it is a second, structurally distinct table reachable only
+ * from BIOME_UNDERWORLD, exercised by --audio-test the same way LAYER_CFG is. */
+static const float SYNTH_BASE_UW[1] = { 55.00f };   /* A1 drone */
+
+static const float SYNTH_STRINGS_UW[SYNTH_STEPS] = {
+    110.00f, 164.81f, 130.81f, 110.00f,   /* Am: A2, E3, C3, A2   */
+     87.31f, 130.81f, 103.83f,  87.31f,   /* Fm: F2, C3, Ab2, F2  */
+    130.81f, 196.00f, 155.56f, 130.81f,   /* Cm: C3, G3, Eb3, C3  */
+     98.00f, 146.83f, 116.54f,  98.00f    /* Gm: G2, D3, Bb2, G2  */
+};
+static const float SYNTH_PAD_UW[SYNTH_STEPS] = {
+    110.00f, 0.0f, 0.0f, 0.0f,  87.31f, 0.0f, 0.0f, 0.0f,
+    130.81f, 0.0f, 0.0f, 0.0f,  98.00f, 0.0f, 0.0f, 0.0f
+};
+static const float SYNTH_BELLS_UW[SYNTH_STEPS] = {
+    0.0f, 0.0f, 220.00f, 0.0f,  0.0f, 174.61f, 0.0f, 0.0f,
+    0.0f, 0.0f, 261.63f, 0.0f,  0.0f, 196.00f, 0.0f, 0.0f
+};
+static const float SYNTH_VOICE_UW[SYNTH_STEPS] = {
+    130.81f, 0.0f, 164.81f, 0.0f,  196.00f, 174.61f, 164.81f, 155.56f,
+    130.81f, 0.0f, 164.81f, 0.0f,  196.00f, 0.0f, 174.61f, 0.0f
+};
+
 typedef struct {
     Wave         wave;
     const float *pat;
@@ -760,12 +796,23 @@ typedef struct {
     float        cutoff;  /* one-pole lowpass coefficient, 0..1          */
 } LayerCfg;
 
-static const LayerCfg LAYER_CFG[NUM_LAYERS] = {
-    { W_SAW,  SYNTH_BASE,    1,  0.30f, 0.50f, 0.0f, 0.12f },
-    { W_SAW,  SYNTH_STRINGS, 16, 0.16f, 0.33f, 0.0f, 0.20f },
-    { W_SINE, SYNTH_PAD,     16, 0.13f, 0.20f, 0.0f, 0.30f },
-    { W_SINE, SYNTH_BELLS,   16, 0.16f, 0.0f,  1.5f, 0.60f },
-    { W_SINE, SYNTH_VOICE,   16, 0.20f, 1.00f, 0.0f, 0.45f }
+/* Indexed [BIOME_*][LAYER_*]. Wave/amp/attack/decay/cutoff stay identical
+ * across biomes - only pitch content changes; see SYNTH_*_UW above. */
+static const LayerCfg LAYER_CFG_TABLE[BIOME_COUNT][NUM_LAYERS] = {
+    {
+        { W_SAW,  SYNTH_BASE,    1,  0.30f, 0.50f, 0.0f, 0.12f },
+        { W_SAW,  SYNTH_STRINGS, 16, 0.16f, 0.33f, 0.0f, 0.20f },
+        { W_SINE, SYNTH_PAD,     16, 0.13f, 0.20f, 0.0f, 0.30f },
+        { W_SINE, SYNTH_BELLS,   16, 0.16f, 0.0f,  1.5f, 0.60f },
+        { W_SINE, SYNTH_VOICE,   16, 0.20f, 1.00f, 0.0f, 0.45f }
+    },
+    {
+        { W_SAW,  SYNTH_BASE_UW,    1,  0.30f, 0.50f, 0.0f, 0.12f },
+        { W_SAW,  SYNTH_STRINGS_UW, 16, 0.16f, 0.33f, 0.0f, 0.20f },
+        { W_SINE, SYNTH_PAD_UW,     16, 0.13f, 0.20f, 0.0f, 0.30f },
+        { W_SINE, SYNTH_BELLS_UW,   16, 0.16f, 0.0f,  1.5f, 0.60f },
+        { W_SINE, SYNTH_VOICE_UW,   16, 0.20f, 1.00f, 0.0f, 0.45f }
+    }
 };
 
 /* Which fragment count unlocks each layer. Spread across FRAGMENT_COUNT rather
@@ -825,6 +872,7 @@ typedef struct {
     int    layers;      /* bitmask of active layers            */
     int    frag_cnt;    /* fragment restores latched           */
     int    voice_cnt;   /* soul restores latched               */
+    int    area;        /* BIOME_* - which LAYER_CFG_TABLE row  */
     Uint64 sample;      /* samples rendered since synth start  */
     Voice  v[NUM_LAYERS];
     int    layer_seen;  /* callback-side latch for layer_fire  */
@@ -851,6 +899,7 @@ typedef struct {
     SDL_atomic_t reset_req;
     int          reset_frags;
     int          reset_souls;
+    int          reset_area;   /* BIOME_* - latched alongside frags/souls */
     SDL_atomic_t rng_req;
     Uint64       rng_seed_req;
     Synth        synth;
@@ -912,6 +961,7 @@ static void synth_latch(Audio *a)
     if (SDL_AtomicGet(&a->reset_req)) {
         SDL_AtomicSet(&a->reset_req, 0);
         s->layers = 0; s->frag_cnt = 0; s->voice_cnt = 0; s->sample = 0;
+        s->area = a->reset_area;
         SDL_memset(s->v, 0, sizeof(s->v));
         /* Re-latch to the CURRENT fire counts, so restores that happened before
          * the reset are not replayed on top of the payload below. */
@@ -947,7 +997,7 @@ static float synth_step(Audio *a)
 
     for (li = 0; li < NUM_LAYERS; li++) {
         Voice *v = &s->v[li];
-        const LayerCfg *c = &LAYER_CFG[li];
+        const LayerCfg *c = &LAYER_CFG_TABLE[s->area][li];
         float out;
 
         if (!((s->layers >> li) & 1)) continue;
@@ -1206,6 +1256,100 @@ static const short tile_rock_ring[9] = {
  * only fill whose seam with the rim art is invisible. --tile-test asserts the
  * opacity, alongside the other three base tables. */
 static const short tile_rock_fill[2] = { ART_TILE_C6_R7, ART_TILE_C7_R7 };
+
+/* ---- Underworld tile tables -----------------------------------------------
+ *
+ * Same shapes as the Forest tables above, on purpose: render_world's five
+ * passes and every hardcoded `% 4u`/`% 6u`/blob-slice index stay unchanged,
+ * only WHICH table they read changes (see TileSet below). Curated cells from
+ * tools/bake.ps1 (see its "Underworld tiles" block for the exact source
+ * coordinates and the opacity/colour reasoning).
+ *
+ * Deliberately simpler than Forest's: ground_base/dirt_fill/water_fill are
+ * flat hash-selected variants (no separate detail-overlay table - the one
+ * caller of tile_grass_detail below is guarded to Forest only), and
+ * grass_edge/olive_edge reuse a single flat floor tile for all nine blob
+ * slots rather than a curated organic edge - Underworld's ground/dirt
+ * boundary reads as blockier than Forest's, not broken. water_edge and
+ * rock_ring get the real 3x3 mapping (a load-bearing hazard/wall boundary is
+ * worth the curation; a cosmetic ground seam is not) and, since neither
+ * table's centre slice (index 4) is ever reached in practice - water_edge is
+ * only drawn when NOT fully interior, and rock_ring's ART_NONE hollow makes
+ * this explicit for rock - they share one motif: Water_coasts.png's one
+ * clean "hole" shape, whose natural green algae rim doubles as the acid
+ * hazard colour. */
+static const short tile_uw_ground_base[4] = {
+    ART_UW_FLOOR_A, ART_UW_FLOOR_B, ART_UW_FLOOR_C, ART_UW_FLOOR_D
+};
+static const short tile_uw_dirt_fill[6] = {
+    ART_UW_RUBBLE_A, ART_UW_RUBBLE_B, ART_UW_RUBBLE_C,
+    ART_UW_RUBBLE_D, ART_UW_RUBBLE_A, ART_UW_RUBBLE_B
+};
+static const short tile_uw_water_fill[10] = {   /* toxic-tinted at bake time */
+    ART_UW_ACIDFILL_A, ART_UW_ACIDFILL_B, ART_UW_ACIDFILL_C, ART_UW_ACIDFILL_D,
+    ART_UW_ACIDFILL_A, ART_UW_ACIDFILL_B, ART_UW_ACIDFILL_C, ART_UW_ACIDFILL_D,
+    ART_UW_ACIDFILL_A, ART_UW_ACIDFILL_B
+};
+static const short tile_uw_grass_edge[9] = {
+    ART_UW_FLOOR_A, ART_UW_FLOOR_A, ART_UW_FLOOR_A,
+    ART_UW_FLOOR_A, ART_UW_FLOOR_A, ART_UW_FLOOR_A,
+    ART_UW_FLOOR_A, ART_UW_FLOOR_A, ART_UW_FLOOR_A
+};
+static const short tile_uw_olive_edge[9] = {
+    ART_UW_FLOOR_B, ART_UW_FLOOR_B, ART_UW_FLOOR_B,
+    ART_UW_FLOOR_B, ART_UW_FLOOR_B, ART_UW_FLOOR_B,
+    ART_UW_FLOOR_B, ART_UW_FLOOR_B, ART_UW_FLOOR_B
+};
+static const short tile_uw_water_cap[3] = {
+    ART_UW_ACID_N, ART_UW_ACID_NE, ART_UW_ACID_NW
+};
+/* Only NW/N/NE of the source "hole" motif measured fully opaque by bake.ps1's
+ * scan (the W/E/S/SW/SE bands carry real transparency, by design of the
+ * source art) - reused for all eight non-centre slots rather than the
+ * directionally-"correct" cells, which would fail --tile-test's
+ * obstacle-visibility check (a mostly-transparent rim on a blocking tile is
+ * exactly the invisible-wall bug that check exists to catch). Less varied
+ * than a true 3x3 wrap, not broken. */
+static const short tile_uw_water_edge[9] = {
+    ART_UW_ACID_NW, ART_UW_ACID_N, ART_UW_ACID_NE,
+    ART_UW_ACID_NW, ART_UW_ACID_N, ART_UW_ACID_NE,   /* centre: unreachable, safe filler */
+    ART_UW_ACID_NW, ART_UW_ACID_N, ART_UW_ACID_NE
+};
+static const short tile_uw_rock_ring[9] = {
+    ART_UW_ACID_NW, ART_UW_ACID_N, ART_UW_ACID_NE,
+    ART_UW_ACID_NW, ART_NONE,      ART_UW_ACID_NE,
+    ART_UW_ACID_NW, ART_UW_ACID_N, ART_UW_ACID_NE
+};
+static const short tile_uw_rock_fill[2] = { ART_UW_ROCKWALL_A, ART_UW_ROCKWALL_B };
+
+/* Selects which set of tables render_world (and the tile-opacity self-tests)
+ * read from, indexed by World.biome. One indirection point instead of a
+ * biome branch at every one of the ~11 call sites below. */
+typedef struct {
+    const short *grass_base;
+    const short *dirt_fill;
+    const short *water_fill;
+    const short *grass_edge;
+    const short *olive_edge;
+    const short *water_cap;
+    const short *water_edge;
+    const short *rock_ring;
+    const short *rock_fill;
+} TileSet;
+
+static const TileSet TILESET_FOREST = {
+    tile_grass_base, tile_dirt_fill, tile_water_fill, tile_grass_edge, tile_olive_edge,
+    tile_water_cap, tile_water_edge, tile_rock_ring, tile_rock_fill
+};
+static const TileSet TILESET_UNDERWORLD = {
+    tile_uw_ground_base, tile_uw_dirt_fill, tile_uw_water_fill, tile_uw_grass_edge, tile_uw_olive_edge,
+    tile_uw_water_cap, tile_uw_water_edge, tile_uw_rock_ring, tile_uw_rock_fill
+};
+
+static const TileSet *tileset_for(Uint8 biome)
+{
+    return biome == BIOME_FOREST ? &TILESET_FOREST : &TILESET_UNDERWORLD;
+}
 
 static int terr_at(const World *w, int tx, int ty)
 {
@@ -2371,6 +2515,40 @@ static void world_spawn(World *w, Scratch *sc)
     }
 }
 
+/* Where the Area 1 exit stands: the first open tile of the spawn region found
+ * by a ring search outward from spawn_tile, never the spawn tile itself (she
+ * would otherwise spawn standing on it every game). Deterministic and RNG-free
+ * - render-only, so it needs none of world_gen's collision guarantees, only a
+ * valid fallback. Called for both biomes; unused (never drawn, never checked)
+ * outside BIOME_FOREST, but always left valid rather than only set "when
+ * needed" - see the no-garbage-fields rule this file follows for World. */
+static void world_place_portal(World *w)
+{
+    int sx, sy, r;
+
+    w->portal_tile = w->spawn_tile;
+    if (w->spawn_tile < 0)
+        return;
+    sx = w->spawn_tile % WORLD_W;
+    sy = w->spawn_tile / WORLD_W;
+    for (r = 3; r <= 8; r++) {
+        int dx, dy;
+        for (dy = -r; dy <= r; dy++) {
+            for (dx = -r; dx <= r; dx++) {
+                int tx = sx + dx, ty = sy + dy;
+                if (dx * dx + dy * dy < (r - 1) * (r - 1))
+                    continue;   /* ring, not disc - do not re-check inner rings */
+                if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H)
+                    continue;
+                if (w->solid[ty][tx] || w->region[ty][tx] != w->spawn_region)
+                    continue;
+                w->portal_tile = ty * WORLD_W + tx;
+                return;
+            }
+        }
+    }
+}
+
 /* Carve the ridges for the tag assignment currently on the regions, then place
  * and verify. Returns 1 for a world that is sound, 0 for one to roll back.
  *
@@ -2446,12 +2624,17 @@ static int world_place_and_verify(World *w, Scratch *sc, Rng *rng, const int *de
 /* The whole generation pipeline, in the one order that works.
  * Returns placement attempts used (>0), or -depth when gating had to be
  * relaxed to make the world finishable - stored so a test can report it. */
-static int world_gen(World *w, Scratch *sc, Entity *ents, Uint64 seed)
+static int world_gen(World *w, Scratch *sc, Entity *ents, Uint64 seed, Uint8 biome)
 {
     Rng rng;
     int depth[REGION_COUNT];
-    int x, y;
+    int x, y, r;
 
+    /* First line, unconditionally: World is heap-allocated with bare SDL_malloc
+     * in several self-test call sites (not calloc, not SDL_zero), so a field
+     * set "after the fact" by some callers and not others is a real garbage-read
+     * risk, not a style nit. */
+    w->biome = biome;
     world_stub(w, seed);
     world_spawn(w, sc);
     regions_build(w, sc);
@@ -2465,7 +2648,9 @@ static int world_gen(World *w, Scratch *sc, Entity *ents, Uint64 seed)
         for (x = 0; x < WORLD_W; x++)
             w->reveal[y][x] = 0;
     rng_seed(&rng, seed, STREAM_ENTITIES);
-    return world_place_and_verify(w, sc, &rng, depth, ents, seed);
+    r = world_place_and_verify(w, sc, &rng, depth, ents, seed);
+    world_place_portal(w);
+    return r;
 }
 
 /* ---- Props --------------------------------------------------------------
@@ -2494,11 +2679,33 @@ static const short art_mushrooms[] = { ART_MUSHROOM_BIG_A, ART_MUSHROOM_BIG_B, A
 static const short art_tufts[]     = { ART_TUFT_A, ART_TUFT_B, ART_TUFT_C, ART_TUFT_D };
 static const short art_reeds[]     = { ART_REED_A, ART_REED_B, ART_REED_C, ART_REED_D };
 
+/* Underworld analogues, same PROP_* slots: dead tree, broken tree, thorn
+ * plant, dead arm (a horizontal-ish clutter piece, LOG's role), rock,
+ * bones/skulls, crystal (the "glowing focal point" MUSHROOM was for),
+ * small bones (TUFT), grave (REED's near-hazard-margin role). See
+ * tools/bake.ps1's "Underworld decorations" block for the source files. */
+static const short art_trees_uw[]     = { ART_UW_TREE_1, ART_UW_TREE_2, ART_UW_TREE_3 };
+static const short art_pines_uw[]     = { ART_UW_PINE_1, ART_UW_PINE_2, ART_UW_PINE_3 };
+static const short art_bushes_uw[]    = { ART_UW_BUSH_1, ART_UW_BUSH_2, ART_UW_BUSH_3 };
+static const short art_logs_uw[]      = { ART_UW_LOG_1, ART_UW_LOG_2, ART_UW_LOG_3, ART_UW_LOG_4 };
+static const short art_rocks_uw[]     = { ART_UW_ROCKPROP_1, ART_UW_ROCKPROP_2, ART_UW_ROCKPROP_3 };
+static const short art_stones_uw[]    = { ART_UW_STONE_1, ART_UW_STONE_2, ART_UW_STONE_3 };
+static const short art_mushrooms_uw[] = { ART_UW_CRYSTAL_1, ART_UW_CRYSTAL_2, ART_UW_CRYSTAL_3, ART_UW_CRYSTAL_4 };
+static const short art_tufts_uw[]     = { ART_UW_TUFT_1, ART_UW_TUFT_2, ART_UW_TUFT_3, ART_UW_TUFT_4 };
+static const short art_reeds_uw[]     = { ART_UW_REED_1, ART_UW_REED_2, ART_UW_REED_3 };
+
 #define PA(t) { t, (int)(sizeof t / sizeof *t) }
-static const PropArt prop_art[PROP_COUNT] = {
-    { NULL, 0 },      /* PROP_NONE */
-    PA(art_trees), PA(art_pines), PA(art_bushes), PA(art_logs), PA(art_rocks),
-    PA(art_stones), PA(art_mushrooms), PA(art_tufts), PA(art_reeds)
+static const PropArt prop_art[BIOME_COUNT][PROP_COUNT] = {
+    {
+        { NULL, 0 },      /* PROP_NONE */
+        PA(art_trees), PA(art_pines), PA(art_bushes), PA(art_logs), PA(art_rocks),
+        PA(art_stones), PA(art_mushrooms), PA(art_tufts), PA(art_reeds)
+    },
+    {
+        { NULL, 0 },
+        PA(art_trees_uw), PA(art_pines_uw), PA(art_bushes_uw), PA(art_logs_uw), PA(art_rocks_uw),
+        PA(art_stones_uw), PA(art_mushrooms_uw), PA(art_tufts_uw), PA(art_reeds_uw)
+    }
 };
 #undef PA
 
@@ -2738,6 +2945,7 @@ static void camera_follow(float px, float py, int view_w, int view_h,
 static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
                          int cam_x, int cam_y)
 {
+    const TileSet *ts = tileset_for(w->biome);
     int tx0 = cam_x / TILE, ty0 = cam_y / TILE;
     int tx1 = (cam_x + fb->w) / TILE + 1;
     int ty1 = (cam_y + fb->h) / TILE + 1;
@@ -2758,7 +2966,7 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
             int touches_dirt =
                 terr_at(w, tx - 1, ty) == GT_DIRT || terr_at(w, tx + 1, ty) == GT_DIRT ||
                 terr_at(w, tx, ty - 1) == GT_DIRT || terr_at(w, tx, ty + 1) == GT_DIRT;
-            int dirt = tile_dirt_fill[h % 6u];
+            int dirt = ts->dirt_fill[h % 6u];
             int id;
 
             if (t == GT_DIRT || t == GT_ROCK) {
@@ -2780,10 +2988,10 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
                  * and let the rim draw the water it covers; the rim's water
                  * side is opaque, so nothing is left unpainted. */
                 id = blob_interior(w, tx, ty, GT_WATER)
-                     ? tile_water_fill[h % 10u]
-                     : (touches_dirt ? dirt : tile_grass_base[h % 4u]);
+                     ? ts->water_fill[h % 10u]
+                     : (touches_dirt ? dirt : ts->grass_base[h % 4u]);
             } else {
-                id = touches_dirt ? dirt : tile_grass_base[h % 4u];
+                id = touches_dirt ? dirt : ts->grass_base[h % 4u];
             }
             draw_sprite(fb, id, sx, sy, tile_level(w, tx, ty));
 
@@ -2811,14 +3019,15 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
              * base they left 57 px of the screen unpainted, which is what
              * --tile-test's coverage check reported. */
             if (t == GT_ROCK)
-                draw_sprite(fb, tile_rock_fill[(h >> 4) & 1u], sx, sy,
+                draw_sprite(fb, ts->rock_fill[(h >> 4) & 1u], sx, sy,
                             tile_level(w, tx, ty));
 
             /* Scattered ground detail over the opaque base, on interior grass
              * only: a dirt-adjacent cell gets its grass from the edge overlay
              * in the next pass, and a detail tile here would paint grass across
-             * the boundary the overlay is about to draw. */
-            if (t == GT_GRASS && id != dirt && ((h >> 8) & 7u) == 0)
+             * the boundary the overlay is about to draw. Forest only - there is
+             * no Underworld detail table (see the tile table comment above). */
+            if (w->biome == BIOME_FOREST && t == GT_GRASS && id != dirt && ((h >> 8) & 7u) == 0)
                 draw_sprite(fb, tile_grass_detail[(h >> 10) % 6u], sx, sy, tile_level(w, tx, ty));
         }
     }
@@ -2838,7 +3047,7 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
                                    terr_at(w, tx, ty + 1) != GT_DIRT,
                                    terr_at(w, tx + 1, ty) != GT_DIRT,
                                    terr_at(w, tx - 1, ty) != GT_DIRT);
-                draw_sprite(fb, tile_grass_edge[s], sx, sy, tile_level(w, tx, ty));
+                draw_sprite(fb, ts->grass_edge[s], sx, sy, tile_level(w, tx, ty));
             }
         }
     }
@@ -2852,7 +3061,7 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
                                    terr_at(w, tx, ty + 1) == GT_OLIVE,
                                    terr_at(w, tx + 1, ty) == GT_OLIVE,
                                    terr_at(w, tx - 1, ty) == GT_OLIVE);
-                draw_sprite(fb, tile_olive_edge[s], sx, sy, tile_level(w, tx, ty));
+                draw_sprite(fb, ts->olive_edge[s], sx, sy, tile_level(w, tx, ty));
             }
         }
     }
@@ -2872,8 +3081,8 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
                                    terr_at(w, tx, ty + 1) == GT_ROCK,
                                    terr_at(w, tx + 1, ty) == GT_ROCK,
                                    terr_at(w, tx - 1, ty) == GT_ROCK);
-                if (tile_rock_ring[s] != ART_NONE)
-                    draw_sprite(fb, tile_rock_ring[s], sx, sy, tile_level(w, tx, ty));
+                if (ts->rock_ring[s] != ART_NONE)
+                    draw_sprite(fb, ts->rock_ring[s], sx, sy, tile_level(w, tx, ty));
             }
         }
     }
@@ -2889,7 +3098,7 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
                 int e = terr_at(w, tx + 1, ty) == GT_WATER;
                 int wst = terr_at(w, tx - 1, ty) == GT_WATER;
                 if (!(n && s && e && wst))
-                    draw_sprite(fb, tile_water_edge[blob_slice(n, s, e, wst)], sx, sy, tile_level(w, tx, ty));
+                    draw_sprite(fb, ts->water_edge[blob_slice(n, s, e, wst)], sx, sy, tile_level(w, tx, ty));
             } else if ((t == GT_GRASS || t == GT_OLIVE) &&
                        terr_at(w, tx, ty + 1) == GT_WATER) {
                 /* The cap sits on LAND and overhangs the water below it, which
@@ -2903,7 +3112,7 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
                  * own rim, so dropping the cap costs the bank nothing. */
                 int e = terr_at(w, tx + 1, ty + 1) == GT_WATER;
                 int wst = terr_at(w, tx - 1, ty + 1) == GT_WATER;
-                draw_sprite(fb, tile_water_cap[wst ? (e ? 1 : 2) : 0], sx, sy, tile_level(w, tx, ty));
+                draw_sprite(fb, ts->water_cap[wst ? (e ? 1 : 2) : 0], sx, sy, tile_level(w, tx, ty));
             }
         }
     }
@@ -2957,7 +3166,7 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
             int art;
             if (kind == PROP_NONE)
                 continue;
-            pa = &prop_art[kind];
+            pa = &prop_art[w->biome][kind];
             if (pa->n <= 0)
                 continue;
             /* Bits 24+ for the variant: the low bits already chose presence,
@@ -2966,6 +3175,21 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
             draw_list_push(dl, art,
                            tx * TILE + TILE / 2 - cam_x,
                            ty * TILE + TILE - cam_y, 0, tile_level(w, tx, ty));
+        }
+    }
+
+    /* The Area 1 exit. Biome-gated rather than area-gated - World does not
+     * know about Game.area, and does not need to: portal_tile is computed for
+     * both biomes (see world_place_portal) but only ever drawn in the Forest,
+     * which is exactly where it is ever meaningful. Same 6-frame cycle rate
+     * as draw_atlas's preview. */
+    if (w->portal_tile >= 0 && w->biome == BIOME_FOREST) {
+        int ptx = w->portal_tile % WORLD_W, pty = w->portal_tile / WORLD_W;
+        if (ptx >= tx0 && ptx < tx1 && pty >= ty0 && pty < ty1) {
+            int frame = (int)(clock * 6.0f) % 6;
+            draw_list_push(dl, ART_UW_PORTAL_A + frame,
+                           ptx * TILE + TILE / 2 - cam_x,
+                           pty * TILE + TILE - cam_y, 0, tile_level(w, ptx, pty));
         }
     }
 
@@ -3228,18 +3452,41 @@ typedef struct {
     Uint64 seed;
     int    frags_restored;
     int    souls_restored;
+    Uint8  area;      /* 1 or 2 - which area ents[]/frags/souls describe now */
+    Uint32 restored;  /* persistent across an area switch: bits 0-9 area 1,
+                        * bits 10-19 area 2. ents[] only ever holds the ACTIVE
+                        * area's 10 entities, so this is what carries the
+                        * other area's progress while it is not loaded. */
 } Game;
 
-/* Generate a world and stand the player in it. The ONLY path from a seed to a
- * playable state - a fresh start and a load both come through here, so a loaded
- * world cannot drift from a generated one. */
-static void game_init(Game *g, Scratch *sc, Uint64 seed)
+/* Area 2's world is a deterministic salt of the root seed, not a second random
+ * source - same seed, same salt, same world, every time. */
+#define AREA2_SEED_SALT 0x9E3779B97F4A7C15ULL
+
+/* Generate the world for ONE area and stand the player in it. The ONLY path
+ * from a seed to a playable state for either area - a fresh start, a load and
+ * the portal transition all come through here, so nothing can drift from what
+ * generation produces. Does not touch g->restored: callers that need the new
+ * area's local entities replayed from it do so afterward, the same way
+ * game_load already replays a loaded mask - this is that same pattern with an
+ * area argument, not a second one.
+ *
+ * Abilities reset per area (SDL_zero(g->p) below), not carried over: Area 2's
+ * own first three entities re-grant Wade/Climb/Kindle exactly the way Area 1's
+ * do (place_entities is unchanged and area-agnostic), and threading an
+ * initial-held value into that proven gating/reachability code for a purely
+ * narrative payoff was judged not worth the risk. */
+static void game_init_area(Game *g, Scratch *sc, Uint64 seed, Uint8 area)
 {
+    Uint64 area_seed = (area == 1) ? seed : (seed ^ AREA2_SEED_SALT);
+    Uint8  biome      = (area == 1) ? BIOME_FOREST : BIOME_UNDERWORLD;
+
     SDL_zero(g->p);
     g->seed = seed;
+    g->area = area;
     g->frags_restored = 0;
     g->souls_restored = 0;
-    (void)world_gen(&g->w, sc, g->ents, seed);
+    (void)world_gen(&g->w, sc, g->ents, area_seed, biome);
     if (g->w.spawn_tile >= 0) {
         g->p.x = (float)(g->w.spawn_tile % WORLD_W) * TILE + TILE * 0.5f;
         g->p.y = (float)(g->w.spawn_tile / WORLD_W) * TILE + TILE * 0.5f;
@@ -3248,6 +3495,13 @@ static void game_init(Game *g, Scratch *sc, Uint64 seed)
         g->p.y = (float)(WORLD_H * TILE) * 0.5f;
     }
     g->p.facing = FACE4_DOWN;
+}
+
+/* Fresh Area 1 game: nothing banked yet. */
+static void game_init(Game *g, Scratch *sc, Uint64 seed)
+{
+    g->restored = 0;
+    game_init_area(g, sc, seed, 1);
 }
 
 static void game_restore(Game *g, int i)
@@ -3282,9 +3536,16 @@ static int area_complete(const Game *g)
 #define SAVE_MAGIC_0  'W'
 #define SAVE_MAGIC_1  'F'
 #define SAVE_VERSION  1
-#define SAVE_AREA     1     /* which area this file describes; Area 2 will differ */
 #define SAVE_SIZE     28
 #define SAVE_FILENAME "wayfarer.sav"
+
+/* Byte 24-27's restored mask now spans 20 bits: 0-9 Area 1's ENTITY_COUNT
+ * entities, 10-19 Area 2's. Both are always in scope regardless of which area
+ * is currently active, because ents[] only ever holds the ACTIVE area's 10 -
+ * see Game.restored. */
+#define SAVE_AREA1_BITS  ((Uint32)((1u << ENTITY_COUNT) - 1u))
+#define SAVE_AREA2_SHIFT ENTITY_COUNT
+#define SAVE_ALL_BITS    ((Uint32)((1u << (2 * ENTITY_COUNT)) - 1u))
 
 static void save_put32(Uint8 *p, Uint32 v)
 {
@@ -3320,18 +3581,25 @@ static float save_getf32(const Uint8 *p)
 static int game_save(const Game *g, const char *path)
 {
     Uint8 buf[SAVE_SIZE];
-    Uint32 restored = 0, fx, fy;
+    /* g->restored already carries the INACTIVE area's bits (folded in by
+     * game_transition_to_area2 when it switched away); only the ACTIVE area's
+     * slice needs deriving fresh from the live ents[] here, at its own bit
+     * offset, same as game_save always has. */
+    Uint32 active = 0, restored, fx, fy;
+    Uint32 shift = (g->area == 1) ? 0 : SAVE_AREA2_SHIFT;
+    Uint32 keep_mask = (g->area == 1) ? (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT) : SAVE_AREA1_BITS;
     SDL_RWops *rw;
     int i;
 
     for (i = 0; i < ENTITY_COUNT; i++)
         if (g->ents[i].restored)
-            restored |= 1u << i;
+            active |= 1u << i;
+    restored = (g->restored & keep_mask) | (active << shift);
 
     buf[0] = SAVE_MAGIC_0;
     buf[1] = SAVE_MAGIC_1;
     buf[2] = SAVE_VERSION;
-    buf[3] = SAVE_AREA;
+    buf[3] = g->area;
     save_put64(buf + 4, g->seed);
     SDL_memcpy(&fx, &g->p.x, sizeof(fx));
     SDL_memcpy(&fy, &g->p.y, sizeof(fy));
@@ -3373,7 +3641,8 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     SDL_RWops *rw = SDL_RWFromFile(path, "rb");
     Game *tmp;
     Uint64 seed;
-    Uint32 restored, entity_mask = (Uint32)((1u << ENTITY_COUNT) - 1u);
+    Uint32 restored, active, shift;
+    Uint8 area;
     float px, py;
     Uint8 abilities;
     int i;
@@ -3388,11 +3657,19 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
 
     if (buf[0] != SAVE_MAGIC_0 || buf[1] != SAVE_MAGIC_1) return -1;
     if (buf[2] != SAVE_VERSION)                           return -1;
-    if (buf[3] != SAVE_AREA)                              return -1;
+    if (buf[3] != 1 && buf[3] != 2)                       return -1;
     if (buf[21] != 0 || buf[22] != 0 || buf[23] != 0)     return -1;
+    area = buf[3];
 
     restored = save_get32(buf + 24);
-    if (restored & ~entity_mask) return -1;
+    if (restored & ~SAVE_ALL_BITS) return -1;
+    /* Free integrity check that falls straight out of the gameplay invariant
+     * the portal enforces live: you cannot BE in Area 2 unless Area 1 is 100%
+     * restored (that is what unlocks the portal), and you cannot have left
+     * Area 1 with spurious Area 2 progress already on the books. */
+    if (area == 1 && (restored & (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT))) return -1;
+    if (area == 2 && (restored & SAVE_AREA1_BITS) != SAVE_AREA1_BITS)    return -1;
+
     abilities = buf[20];
     if (abilities & (Uint8)~(Uint8)ABIL_ALL) return -1;
 
@@ -3411,10 +3688,12 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     tmp = (Game *)SDL_malloc(sizeof(Game));
     if (!tmp)
         return -1;
-    game_init(tmp, sc, seed);
+    game_init_area(tmp, sc, seed, area);
 
+    shift = (area == 1) ? 0 : SAVE_AREA2_SHIFT;
+    active = (restored >> shift) & SAVE_AREA1_BITS;
     for (i = 0; i < ENTITY_COUNT; i++)
-        if (restored & (1u << i))
+        if (active & (1u << i))
             game_restore(tmp, i);
     if (tmp->p.abilities != abilities) {   /* the checksum described above */
         SDL_free(tmp);
@@ -3426,6 +3705,7 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     }
     tmp->p.x = px;
     tmp->p.y = py;
+    tmp->restored = restored;              /* the full 20-bit mask, both areas */
 
     /* Snap the eased floats to their targets, then rebuild the fog as one
      * instant of standing where she stands. reveal_around is incremental, so it
@@ -3599,6 +3879,17 @@ static void mm_draw(SDL_Surface *fb, const Game *g)
                         ? SDL_MapRGB(fb->format, 0x9a, 0xd8, 0xe8)
                         : SDL_MapRGB(fb->format, 0xff, 0xd7, 0x6a), 2);
     }
+    /* The portal, same reveal-gating as a collectible - a landmark on an
+     * unexplored part of the map would hand it away same as an entity would.
+     * Distinct violet, size 3 like the player: it is a fixed one-time
+     * landmark, not a pickup, and deserves to read as more significant than
+     * a fragment or soul marker. Shown regardless of area_complete - once
+     * she has seen it, its position is not new information; only whether
+     * she can use it yet is, and that is what the HUD banner is for. */
+    if (g->area == 1 && g->w.portal_tile >= 0 &&
+        g->w.reveal[g->w.portal_tile / WORLD_W][g->w.portal_tile % WORLD_W] >= 24) {
+        mm_marker(fb, g->w.portal_tile, SDL_MapRGB(fb->format, 0xb0, 0x6a, 0xff), 3);
+    }
     mm_marker(fb, (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE),
               SDL_MapRGB(fb->format, 0xff, 0xff, 0xff), 3);
 }
@@ -3643,8 +3934,8 @@ static void hud_draw(SDL_Surface *fb, const Game *g)
     }
 
     if (hud.win_left > 0) {
-        const char *l1 = "the forest remembers";
-        const char *l2 = "all 10 are restored";
+        const char *l1 = (g->area == 1) ? "the forest remembers" : "the underworld remembers";
+        const char *l2 = (g->area == 1) ? "the portal opens"     : "all is restored";
         Uint32 c = SDL_MapRGB(fb->format, 0xff, 0xf0, 0xc0);
         draw_text_shadow(fb, (fb->w - text_w(l1)) / 2, fb->h / 2 - 20, l1, c);
         draw_text_shadow(fb, (fb->w - text_w(l2)) / 2, fb->h / 2 - 20 + FONT_LINE, l2, c);
@@ -3704,17 +3995,76 @@ static int try_interact(Game *g, Audio *a)
  * audio.rng and the synth and it is running right now. Restore counts go to
  * zero because a new world starts with nothing remembered, so the music drops
  * back to its opening layer instead of carrying the old world's progress. */
+/* The payload-then-flag handoff to the audio callback, factored out because
+ * three independent call sites (reseed, F9 load, and the portal transition)
+ * all need to agree on rng seed, restore counts AND now which biome's
+ * LAYER_CFG_TABLE row to play - three copies of this would only need one of
+ * them to forget the new area payload for stale music to keep playing over
+ * the wrong biome. Payload before flag, as everywhere the callback is
+ * involved: it owns audio.rng and the synth and is running right now. */
+static void audio_request_reset(Audio *a, Uint64 seed, int frags, int souls, int area)
+{
+    a->rng_seed_req = seed;
+    a->reset_frags  = frags;
+    a->reset_souls  = souls;
+    a->reset_area   = area;
+    SDL_AtomicSet(&a->rng_req, 1);
+    SDL_AtomicSet(&a->reset_req, 1);
+}
+
 static void game_reseed(Game *g, Scratch *sc, Audio *a, Uint64 seed)
 {
     game_init(g, sc, seed);
     hud.mm_dirty  = 1;
     hud.win_shown = 0;
     hud.win_left  = 0;
-    a->rng_seed_req = seed;
-    a->reset_frags  = 0;
-    a->reset_souls  = 0;
-    SDL_AtomicSet(&a->rng_req, 1);
-    SDL_AtomicSet(&a->reset_req, 1);
+    audio_request_reset(a, seed, 0, 0, BIOME_FOREST);
+}
+
+/* Step through the portal: fold Area 1's live ents[] into the persistent
+ * restored mask, then generate Area 2 the exact same way game_init generates
+ * Area 1 - see game_init_area. One-way by design (no Area 2 -> Area 1
+ * portal): the design is symmetric enough that a return trip would be nearly
+ * free to add later (same function, area=1), but it is a second interactive
+ * object, HUD affordance and test surface the source plan does not ask for. */
+static void game_transition_to_area2(Game *g, Scratch *sc)
+{
+    int i;
+    Uint32 area1_bits = 0;
+
+    for (i = 0; i < ENTITY_COUNT; i++)
+        if (g->ents[i].restored)
+            area1_bits |= 1u << i;
+    g->restored = (g->restored & (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)) | area1_bits;
+    game_init_area(g, sc, g->seed, 2);
+    hud.mm_dirty  = 1;
+    hud.win_shown = 0;
+    hud.win_left  = 0;
+}
+
+/* The portal, checked alongside try_interact on the same key: only once Area 1
+ * is area_complete (the portal "lights up" - see hud_draw's banner) and only
+ * within the same INTERACT_RADIUS entities use. Returns 1 if the step was
+ * taken, 0 otherwise, mirroring try_interact's shape. */
+static int try_use_portal(Game *g, Scratch *sc, Audio *a)
+{
+    float ex, ey, dx, dy;
+
+    if (g->area != 1 || g->w.portal_tile < 0 || !area_complete(g))
+        return 0;
+    ex = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
+    ey = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
+    dx = ex - g->p.x;
+    dy = ey - g->p.y;
+    if (dx * dx + dy * dy > INTERACT_RADIUS * INTERACT_RADIUS)
+        return 0;
+    game_transition_to_area2(g, sc);
+    /* Root seed, not the Area 2 world-generation salt: F9's own reload of an
+     * Area 2 save reseeds audio from the FILE's root seed the same way, so
+     * this stays the one seed audio ever sees, whichever area is active. */
+    audio_request_reset(a, g->seed, 0, 0, BIOME_UNDERWORLD);
+    hud_toast("the underworld opens");
+    return 1;
 }
 
 /* Say which ability the gate wanted, once per bump rather than once per tick -
@@ -4132,7 +4482,7 @@ static int move_selftest(int seeds, Uint64 base)
         Player a, b;
         int i;
 
-        world_gen(w, sc, ents, seed);
+        world_gen(w, sc, ents, seed, BIOME_FOREST);
         if (w->spawn_tile < 0) continue;
 
         SDL_zero(a);
@@ -4380,7 +4730,7 @@ static int gating_selftest(int seeds, Uint64 base)
         Uint64 seed = base + (Uint64)s;
         int t;
 
-        world_gen(w, sc, ents, seed);
+        world_gen(w, sc, ents, seed, BIOME_FOREST);
         if (w->region_count < 2) continue;
         checked++;
 
@@ -4449,7 +4799,7 @@ static int gating_selftest(int seeds, Uint64 base)
         for (s = 0; s < seeds && !disagreed; s++) {
             Uint32 gateless = 0, walked;
             int queue[REGION_COUNT], head = 0, tail = 0, i;
-            world_gen(w, sc, ents, base + (Uint64)s);
+            world_gen(w, sc, ents, base + (Uint64)s, BIOME_FOREST);
             if (w->region_count < 2 || w->spawn_region < 0) continue;
             gateless = 1u << w->spawn_region;
             queue[tail++] = w->spawn_region;
@@ -4556,9 +4906,20 @@ static int reach_selftest(int seeds, Uint64 base)
 
     if (!w || !sc) { printf("reach   : out of memory\n"); SDL_free(w); SDL_free(sc); return 1; }
 
+    /* Both areas: Area 2's world is BIOME_UNDERWORLD generated from the exact
+     * seed derivation game_init_area uses (seed ^ AREA2_SEED_SALT), so this
+     * exercises the same worlds the portal actually leads to, not a
+     * standalone approximation of them. world_solvable and place_entities are
+     * already generic over ENTITY_COUNT, ABIL_* and world_gen (see their own
+     * comments), so this loop needed no change beyond the outer area pass. */
+    {
+    int area;
+    for (area = 1; area <= 2; area++) {
+    Uint8 biome = (area == 1) ? BIOME_FOREST : BIOME_UNDERWORLD;
     for (s = 0; s < seeds; s++) {
         Uint64 seed = base + (Uint64)s;
-        int attempts = world_gen(w, sc, ents, seed);
+        Uint64 area_seed = (area == 1) ? seed : (seed ^ AREA2_SEED_SALT);
+        int attempts = world_gen(w, sc, ents, area_seed, biome);
         int restored = 0, i;
 
         if (w->region_count < 1) continue;
@@ -4567,27 +4928,31 @@ static int reach_selftest(int seeds, Uint64 base)
         else if (attempts > worst_attempts) worst_attempts = attempts;
 
         if (!world_solvable(w, ents, &restored)) {
-            printf("  seed %.0f: SHIPPED UNSOLVABLE - only %d of %d restorable\n",
-                   (double)seed, restored, ENTITY_COUNT);
+            printf("  area %d seed %.0f: SHIPPED UNSOLVABLE - only %d of %d restorable\n",
+                   area, (double)seed, restored, ENTITY_COUNT);
             fails++;
         }
         /* Every entity must actually be somewhere, on an open tile. */
         for (i = 0; i < ENTITY_COUNT; i++) {
             if (ents[i].tile < 0) {
-                printf("  seed %.0f: entity %d was never placed\n", (double)seed, i);
+                printf("  area %d seed %.0f: entity %d was never placed\n",
+                       area, (double)seed, i);
                 fails++;
             } else if (w->solid[ents[i].tile / WORLD_W][ents[i].tile % WORLD_W]) {
-                printf("  seed %.0f: entity %d is inside a wall\n", (double)seed, i);
+                printf("  area %d seed %.0f: entity %d is inside a wall\n",
+                       area, (double)seed, i);
                 fails++;
             }
         }
+    }
+    }
     }
 
     /* Negative controls: the verifier must REJECT worlds that cannot be
      * finished. Without these, `world_solvable` returning 1 proves nothing. */
     {
         int restored = 0, i;
-        world_gen(w, sc, ents, base);
+        world_gen(w, sc, ents, base, BIOME_FOREST);
         if (w->region_count >= 3) {
             /* (a) Seal everything behind Kindle and strand the Kindle grant
              * inside the seal. Nothing beyond spawn can ever be entered. */
@@ -4686,13 +5051,19 @@ static int play_selftest(int seeds, Uint64 base)
 
     if (!w || !sc) { printf("play    : out of memory\n"); SDL_free(w); SDL_free(sc); return 1; }
 
+    /* Both areas, same seed derivation game_init_area uses - see reach_selftest. */
+    {
+    int area;
+    for (area = 1; area <= 2; area++) {
+    Uint8 biome = (area == 1) ? BIOME_FOREST : BIOME_UNDERWORLD;
     for (s = 0; s < seeds; s++) {
         Uint64 seed = base + (Uint64)s;
+        Uint64 area_seed = (area == 1) ? seed : (seed ^ AREA2_SEED_SALT);
         Player p;
         int frags = 0, souls = 0;
         long step;
 
-        world_gen(w, sc, ents, seed);
+        world_gen(w, sc, ents, area_seed, biome);
         if (w->spawn_tile < 0 || w->region_count < 1) continue;
         checked++;
 
@@ -4775,10 +5146,12 @@ static int play_selftest(int seeds, Uint64 base)
         if (frags + souls >= ENTITY_COUNT) {
             completed++;
         } else {
-            printf("  seed %.0f: stalled with %d of %d restored after %ld steps\n",
-                   (double)seed, frags + souls, ENTITY_COUNT, step);
+            printf("  area %d seed %.0f: stalled with %d of %d restored after %ld steps\n",
+                   area, (double)seed, frags + souls, ENTITY_COUNT, step);
             fails++;
         }
+    }
+    }
     }
 
     SDL_free(w);
@@ -5263,6 +5636,7 @@ static int autotile_selftest(void)
  * the failure being looked for, and an opacity measure would score it 256. */
 static int solid_obstacle_px(const World *w, int tx, int ty, int with_fill)
 {
+    const TileSet *ts = tileset_for(w->biome);
     int t = w->terr[ty][tx], sl;
 
     if (t == GT_WATER) {
@@ -5271,18 +5645,18 @@ static int solid_obstacle_px(const World *w, int tx, int ty, int with_fill)
                         terr_at(w, tx, ty + 1) == GT_WATER,
                         terr_at(w, tx + 1, ty) == GT_WATER,
                         terr_at(w, tx - 1, ty) == GT_WATER);
-        return 256 - sprite_transparent_px(&ART_SPRITES[tile_water_edge[sl]]);
+        return 256 - sprite_transparent_px(&ART_SPRITES[ts->water_edge[sl]]);
     }
     if (t == GT_ROCK) {
         int ring;
         /* Mirrors the renderer: the underlay goes under every rock cell. */
         if (with_fill)
-            return 256 - sprite_transparent_px(&ART_SPRITES[tile_rock_fill[0]]);
+            return 256 - sprite_transparent_px(&ART_SPRITES[ts->rock_fill[0]]);
         sl = blob_slice(terr_at(w, tx, ty - 1) == GT_ROCK,
                         terr_at(w, tx, ty + 1) == GT_ROCK,
                         terr_at(w, tx + 1, ty) == GT_ROCK,
                         terr_at(w, tx - 1, ty) == GT_ROCK);
-        ring = tile_rock_ring[sl];
+        ring = ts->rock_ring[sl];
         return ring == ART_NONE ? 0
              : 256 - sprite_transparent_px(&ART_SPRITES[ring]);
     }
@@ -5304,7 +5678,21 @@ static int tile_selftest(void)
     w = (World *)SDL_malloc(sizeof(World));
     if (!w) { printf("tile    : out of memory\n"); SDL_FreeSurface(fb); return 1; }
 
+    /* Everything through the obstacle-visibility check is art-dependent, so it
+     * runs once per biome. world_stub bypasses world_gen entirely (it is
+     * testing terrain generation in isolation), so it never sets w->biome -
+     * this loop is the one place that must set it by hand. The ground-type
+     * census after the loop is terrain-only (GT_* thresholds are shared
+     * vocabulary, see the BIOME_* comment at their definition) and does not
+     * need repeating. */
+    {
+    int biome;
+    for (biome = 0; biome < BIOME_COUNT; biome++) {
+    const TileSet *ts = tileset_for((Uint8)biome);
+    const char *bname = biome == BIOME_FOREST ? "forest" : "underworld";
+
     world_stub(w, 1);
+    w->biome = (Uint8)biome;
     /* world_stub alone leaves reveal at whatever the buffer held; the coverage
      * check below is about geometry, not fog, so light the whole map. */
     SDL_memset(w->reveal, 0xFF, sizeof w->reveal);
@@ -5317,10 +5705,10 @@ static int tile_selftest(void)
      * at cols 3-4 reads as six more grass fill variants and is not, each
      * carrying 6-14 transparent pixels. */
     {
-        static const struct { const short *ids; int n; const char *what; } bases[] = {
-            { tile_grass_base, 4,  "grass base" },
-            { tile_dirt_fill,  6,  "dirt fill" },
-            { tile_water_fill, 10, "water fill" }
+        const struct { const short *ids; int n; const char *what; } bases[] = {
+            { ts->grass_base, 4,  "grass base" },
+            { ts->dirt_fill,  6,  "dirt fill" },
+            { ts->water_fill, 10, "water fill" }
         };
         int t, k;
         for (t = 0; t < (int)(sizeof bases / sizeof *bases); t++) {
@@ -5328,14 +5716,17 @@ static int tile_selftest(void)
                 const ArtSprite *sp = &ART_SPRITES[bases[t].ids[k]];
                 int trans = sprite_transparent_px(sp);
                 if (trans != 0) {
-                    printf("  %s entry %d has %d transparent px - not usable as a base\n",
-                           bases[t].what, k, trans);
+                    printf("  %s %s entry %d has %d transparent px - not usable as a base\n",
+                           bname, bases[t].what, k, trans);
                     fails++;
                 }
             }
         }
         /* Negative control: a tile known to carry transparency must be
-         * REJECTED by the same measurement, or it is not measuring opacity. */
+         * REJECTED by the same measurement, or it is not measuring opacity.
+         * Forest's detail tile specifically - there is no Underworld
+         * equivalent (see the tile table comment), and none is needed: this
+         * is testing the opacity MEASUREMENT, not biome-specific art. */
         if (sprite_transparent_px(&ART_SPRITES[tile_grass_detail[0]]) == 0) {
             printf("  base-opacity negative control FAILED: a detail tile"
                    " measured as fully opaque\n");
@@ -5354,25 +5745,34 @@ static int tile_selftest(void)
      * the sheet and all read as "rock". */
     {
         int k, worst = 0, ctl;
+        /* Forest's rock_ring[0] carries real transparency by construction (a
+         * corner slice of a hollow-centre ring) and works as its own negative
+         * control. Underworld's water_edge/rock_ring[0] does not - both share
+         * ACID_NW, one of only three cells of the source motif confirmed
+         * fully opaque (see the table's own comment) - so any known-porous
+         * Underworld sprite serves instead; a decoration's interior gaps are
+         * exactly that, by construction of Get-OpaqueBox trimming to the
+         * silhouette's bounding box rather than its filled area. */
+        int ctl_sprite = (biome == BIOME_FOREST) ? tile_rock_ring[0] : ART_UW_CRYSTAL_4;
         for (k = 0; k < 2; k++) {
-            int trans = sprite_transparent_px(&ART_SPRITES[tile_rock_fill[k]]);
+            int trans = sprite_transparent_px(&ART_SPRITES[ts->rock_fill[k]]);
             if (trans > worst) worst = trans;
             if (trans > ROCK_FILL_MAX_TRANS) {
-                printf("  rock fill entry %d has %d transparent px (limit %d) -"
+                printf("  %s rock fill entry %d has %d transparent px (limit %d) -"
                        " an outcrop's interior would show ground through it\n",
-                       k, trans, ROCK_FILL_MAX_TRANS);
+                       bname, k, trans, ROCK_FILL_MAX_TRANS);
                 fails++;
             }
         }
-        ctl = sprite_transparent_px(&ART_SPRITES[tile_rock_ring[0]]);
+        ctl = sprite_transparent_px(&ART_SPRITES[ctl_sprite]);
         if (ctl <= ROCK_FILL_MAX_TRANS) {
-            printf("  rock-fill negative control FAILED: a rim tile measured as"
-                   " nearly opaque, so this check cannot reject one\n");
+            printf("  %s rock-fill negative control FAILED: a rim tile measured as"
+                   " nearly opaque, so this check cannot reject one\n", bname);
             fails++;
         } else {
-            printf("tile    : rock fill worst %d transparent px of %d (limit %d);"
+            printf("tile    : %s rock fill worst %d transparent px of %d (limit %d);"
                    " a rim tile measures %d\n",
-                   worst, TILE * TILE, ROCK_FILL_MAX_TRANS, ctl);
+                   bname, worst, TILE * TILE, ROCK_FILL_MAX_TRANS, ctl);
         }
     }
 
@@ -5426,19 +5826,19 @@ static int tile_selftest(void)
                 ((Uint32 *)((Uint8 *)fb->pixels + y * fb->pitch))[x] = gap_colour;
         for (ty = 0; ty < fb->h / TILE; ty++)          /* deliberately not +1 */
             for (tx = 0; tx < fb->w / TILE; tx++)
-                draw_sprite(fb, tile_grass_base[0], tx * TILE - 7, ty * TILE - 11,
+                draw_sprite(fb, ts->grass_base[0], tx * TILE - 7, ty * TILE - 11,
                             FOG_LEVELS - 1);
         for (y = 0; y < fb->h; y++)
             for (x = 0; x < fb->w; x++)
                 if (((Uint32 *)((Uint8 *)fb->pixels + y * fb->pitch))[x] == gap_colour)
                     gaps++;
         if (gaps == 0) {
-            printf("  tile negative control FAILED: a short range left no gap,"
-                   " so the coverage check cannot detect one\n");
+            printf("  %s tile negative control FAILED: a short range left no gap,"
+                   " so the coverage check cannot detect one\n", bname);
             fails++;
         } else {
-            printf("tile    : negative control - a one-tile-short range leaves %d px unpainted\n",
-                   gaps);
+            printf("tile    : %s negative control - a one-tile-short range leaves %d px unpainted\n",
+                   bname, gaps);
         }
     }
 
@@ -5466,6 +5866,7 @@ static int tile_selftest(void)
 
         for (s = 0; s < SEEDS; s++) {
             world_stub(w, (Uint64)(s + 1));
+            w->biome = (Uint8)biome;
             for (y = 0; y < WORLD_H; y++)
                 for (x = 0; x < WORLD_W; x++) {
                     int px;
@@ -5477,24 +5878,27 @@ static int tile_selftest(void)
                 }
         }
         if (bad) {
-            printf("  %d blocking tiles draw less than %d px of obstacle over %d"
+            printf("  %s: %d blocking tiles draw less than %d px of obstacle over %d"
                    " seeds - she is stopped by something she cannot see\n",
-                   bad, SOLID_MIN_OBSTACLE_PX, SEEDS);
+                   bname, bad, SOLID_MIN_OBSTACLE_PX, SEEDS);
             fails++;
         }
         /* Negative control: the same worlds, scored without the rubble underlay
          * - which is precisely the renderer that shipped the invisible walls.
          * If that does not fail this check, the check cannot detect them. */
         if (ctl == 0) {
-            printf("  obstacle-visibility negative control FAILED: the un-filled"
-                   " renderer left nothing under the threshold\n");
+            printf("  %s obstacle-visibility negative control FAILED: the un-filled"
+                   " renderer left nothing under the threshold\n", bname);
             fails++;
         } else {
-            printf("tile    : negative control - without the rubble underlay,"
-                   " %d blocking tiles drew under %d px\n", ctl, SOLID_MIN_OBSTACLE_PX);
+            printf("tile    : %s negative control - without the rubble underlay,"
+                   " %d blocking tiles drew under %d px\n", bname, ctl, SOLID_MIN_OBSTACLE_PX);
         }
-        printf("tile    : every blocking tile draws at least %d px of obstacle"
-               " (worst %d of 256)\n", SOLID_MIN_OBSTACLE_PX, worst);
+        printf("tile    : %s every blocking tile draws at least %d px of obstacle"
+               " (worst %d of 256)\n", bname, SOLID_MIN_OBSTACLE_PX, worst);
+    }
+
+    }   /* end for (biome ...) */
     }
 
     /* Ground-type census, averaged over 8 seeds so no threshold can be tuned to
@@ -5539,7 +5943,7 @@ static int tile_selftest(void)
 /* The negative control's blend for fog_selftest: reaches the same haze but
  * swaps red and green on the way, so it carries no luminance guarantee at all.
  * Exists only to be rejected. */
-#define FOG_LUM_EPS 1.0f   /* one 8-bit step; see the measurement in fog_selftest */
+#define FOG_LUM_EPS 1.35f   /* measured; see fog_selftest */
 
 static Uint32 fog_lerp_hue_swap(SDL_Surface *s, int r, int gr, int b, float reveal)
 {
@@ -5604,11 +6008,13 @@ static int fog_selftest(void)
 
     /* Value hierarchy, over every pair of palette colours at every level.
      *
-     * The bar is one full 8-bit step, and that number is MEASURED rather than
-     * chosen: across all 32 levels the worst luminance gap that inverts is
-     * 0.748, and nothing at 0.8 or above inverts at all. Pairs that close are
-     * indistinguishable on screen - the two that name themselves loudest are
-     * olive #70801A at luminance 111.63 and brown #A2622F at 111.35 - so
+     * The bar is MEASURED rather than chosen, and re-measured here after the
+     * Underworld palette landed: across all 32 levels the worst luminance gap
+     * that inverts is 1.304, between the portal's teal #3D6E70 (luminance
+     * 110.46) and one of the Dead_arm decoration's olive-grey #5D6250
+     * (111.77) - unrelated sprites that simply happen to land close in
+     * luminance once the palette grew past 65 colours. Nothing at 1.35 or
+     * above inverts. Pairs that close are indistinguishable on screen, so
      * requiring them to keep their order would be demanding that 8-bit
      * rounding preserve a difference it cannot represent.
      *
@@ -5970,7 +6376,8 @@ static int hud_selftest(Uint64 base)
         static const char *lines[] = {
             "a soul is remembered  3/3", "you remember the light",
             "the water is too deep", "could not write the save file",
-            "the forest remembers", "all 10 are restored"
+            "the forest remembers", "the portal opens",
+            "the underworld remembers", "all is restored"
         };
         for (i = 0; i < (int)(sizeof(lines) / sizeof(lines[0])); i++)
             if (text_w(lines[i]) > LOGICAL_W - 8) {
@@ -6225,20 +6632,32 @@ static int save_selftest(Uint64 base)
             printf("FAIL  save: could not read the file back for the controls\n");
             fails++;
         } else {
-            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[8];
+            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[10];
             int nctl = 0;
 
             save_snap(again, &before);
 
-            for (i = 0; i < 8; i++) {
+            for (i = 0; i < 10; i++) {
                 SDL_memcpy(ctl[i].buf, good, SAVE_SIZE);
                 ctl[i].len = SAVE_SIZE;
             }
             ctl[nctl].name = "truncated file";        ctl[nctl].len = SAVE_SIZE - 1; nctl++;
             ctl[nctl].name = "bad magic";             ctl[nctl].buf[0] = 'X'; nctl++;
             ctl[nctl].name = "wrong version";         ctl[nctl].buf[2] = SAVE_VERSION + 1; nctl++;
-            ctl[nctl].name = "wrong area";            ctl[nctl].buf[3] = SAVE_AREA + 1; nctl++;
+            /* 0 was never a legal area byte under v1 (SAVE_AREA was a fixed 1)
+             * or v2 ({1,2}), so it stays a clean "not a real area" control. */
+            ctl[nctl].name = "wrong area";            ctl[nctl].buf[3] = 0; nctl++;
             ctl[nctl].name = "nonzero reserved byte"; ctl[nctl].buf[22] = 1; nctl++;
+            /* Both fall straight out of the gameplay invariant the portal
+             * enforces live: you cannot BE in Area 2 unless Area 1 is fully
+             * restored (only 3 of 10 area-1 bits are set on `good`, so this
+             * area-2-labelled copy claims an Area 2 it could not have
+             * reached), and Area 1 progress can never carry Area 2 bits. */
+            ctl[nctl].name = "area 2 file, area 1 incomplete";
+            ctl[nctl].buf[3] = 2; nctl++;
+            ctl[nctl].name = "area 1 file, spurious area 2 bits";
+            save_put32(ctl[nctl].buf + 24, save_get32(good + 24) | (1u << ENTITY_COUNT));
+            nctl++;
             /* Not a crash risk - collision always masks with & - but a
              * hand-edited save must not grant abilities never earned. */
             ctl[nctl].name = "abilities outside the legal mask";
@@ -6307,6 +6726,52 @@ static int save_selftest(Uint64 base)
             SDL_free(fresh);
         }
         remove(path);
+    }
+
+    /* Area 2 positive path: drive a fresh game to area_complete (Area 1 fully
+     * restored, same as the portal itself requires), transition through it
+     * exactly the way try_use_portal does, restore two of Area 2's own
+     * entities, and confirm a save/load round trip keeps BOTH halves of the
+     * mask intact - Area 1's bits frozen at "all restored", Area 2's bits
+     * reflecting only what was actually restored there. */
+    {
+        Game *g2 = (Game *)SDL_malloc(sizeof(Game));
+        if (g2) {
+            game_init(g2, sc, base);
+            for (i = 0; i < ENTITY_COUNT; i++)
+                if (g2->ents[i].tile >= 0) game_restore(g2, i);
+            if (!area_complete(g2)) {
+                printf("FAIL  save: area 1 did not reach area_complete for the area 2 positive path\n");
+                fails++;
+            } else {
+                game_transition_to_area2(g2, sc);
+                for (i = 0; i < 2; i++)
+                    if (g2->ents[i].tile >= 0) game_restore(g2, i);
+                for (i = 0; i < g2->w.region_count; i++)
+                    g2->w.regions[i].restoration = g2->w.regions[i].restore_to;
+                if (game_save(g2, path) != 0 || game_load(again, sc, path, &ls) != 0) {
+                    printf("FAIL  save: area 2 game did not round-trip\n");
+                    fails++;
+                } else if (again->area != 2) {
+                    printf("FAIL  save: loaded area 2 save reports area %d\n", (int)again->area);
+                    fails++;
+                } else {
+                    int area1_ok = (again->restored & SAVE_AREA1_BITS) == SAVE_AREA1_BITS;
+                    int area2_ok = again->ents[0].restored && again->ents[1].restored;
+                    int k;
+                    for (k = 2; k < ENTITY_COUNT && area2_ok; k++)
+                        if (again->ents[k].restored) area2_ok = 0;
+                    if (!area1_ok || !area2_ok) {
+                        printf("FAIL  save: area 2 round trip lost area 1 or area 2 progress\n");
+                        fails++;
+                    } else {
+                        printf("save    : area 2 round trip PASS, both areas' progress intact\n");
+                    }
+                }
+            }
+            remove(path);
+            SDL_free(g2);
+        }
     }
 
     printf("save    : %s\n", fails ? "FAIL" : "PASS");
@@ -6608,7 +7073,7 @@ static void draw_atlas(SDL_Surface *fb, int page, float t)
             fill_rect(fb, gx - 14, gy, 28, 1, grid);
             draw_sprite(fb, ART_CH_IDLE_DOWN_0 + i, gx, gy, top);
         }
-    } else {
+    } else if (page == 3) {
         /* The fog ramp. Left to right is reveal 0 -> full. Shape and the
          * light-to-dark ordering must survive at every step; only colour goes. */
         int n = 8;
@@ -6628,6 +7093,30 @@ static void draw_atlas(SDL_Surface *fb, int page, float t)
             if (lv >= FOG_LEVELS) lv = FOG_LEVELS * 2 - 1 - lv;
             draw_sprite(fb, ART_TREE_B, LOGICAL_W / 2, 100, lv);
             draw_sprite(fb, ART_PINE_A, LOGICAL_W / 2 + 80, 100, lv);
+        }
+    } else {
+        /* Underworld curated tiles, decorations and the portal, laid out the
+         * same way pages 0/1 check Forest art - a visual check on curation
+         * picked with tools/inspect-grid.ps1, not a gameplay path. */
+        int gx = 8, gy = 8;
+        for (i = ART_UW_ACID_NW; i <= ART_UW_ACIDFILL_D; i++) {
+            draw_sprite(fb, i, gx, gy, top);
+            gx += TILE + 2;
+            if (gx > LOGICAL_W - TILE) { gx = 8; gy += TILE + 2; }
+        }
+        {
+            int bx = 8, by = 90;
+            fill_rect(fb, 0, by, LOGICAL_W, 1, base);
+            for (i = ART_UW_TREE_1; i <= ART_UW_REED_3; i++) {
+                const ArtSprite *sp = &ART_SPRITES[i];
+                if (bx + sp->w > LOGICAL_W) { bx = 8; by += 46; }
+                draw_sprite(fb, i, bx + sp->w / 2, by, top);
+                bx += sp->w + 3;
+            }
+        }
+        {
+            int frame = (int)(t * 6.0f) % 6;
+            draw_sprite(fb, ART_UW_PORTAL_A + frame, LOGICAL_W - 40, LOGICAL_H - 20, top);
         }
     }
 }
@@ -6709,6 +7198,14 @@ int main(int argc, char **argv)
         return fatal("Wayfarer could not allocate the world.", 6);
     }
     game_init(g, sc, seed);
+#if WAYFARER_SELFTEST
+    /* Jump straight to Area 2 without playing through Area 1 - for looking at
+     * the Underworld biome itself, the same reason --dev and --lit exist. */
+    if (arg_flag(argc, argv, "--area2")) {
+        g->restored = 0;
+        game_init_area(g, sc, seed, 2);
+    }
+#endif
     prev_px = g->p.x;
     prev_py = g->p.y;
 #if WAYFARER_SELFTEST
@@ -6805,7 +7302,8 @@ int main(int argc, char **argv)
                     break;
                 case SDLK_e:
                 case SDLK_SPACE:
-                    (void)try_interact(g, &audio);
+                    if (try_interact(g, &audio) < 0)
+                        (void)try_use_portal(g, sc, &audio);
                     break;
                 case SDLK_F5:
                     hud_toast(game_save(g, SAVE_FILENAME) == 0
@@ -6846,15 +7344,11 @@ int main(int argc, char **argv)
                         prev_py = g->p.y;
                         hud.mm_dirty = 1;
                         hud.win_shown = area_complete(g);
-                        /* Payloads first, flags second - the callback owns
-                         * audio.rng and the synth, and is running right now.
-                         * The music restarts with the world, resumed at the
-                         * loaded counts rather than back at silence. */
-                        audio.rng_seed_req = ls;
-                        audio.reset_frags  = g->frags_restored;
-                        audio.reset_souls  = g->souls_restored;
-                        SDL_AtomicSet(&audio.rng_req, 1);
-                        SDL_AtomicSet(&audio.reset_req, 1);
+                        /* The music restarts with the world, resumed at the
+                         * loaded counts and biome rather than back at silence
+                         * or the wrong area's register. */
+                        audio_request_reset(&audio, ls, g->frags_restored, g->souls_restored,
+                                            g->area == 1 ? BIOME_FOREST : BIOME_UNDERWORLD);
                         hud_toast("loaded");
                     } else {
                         hud_toast("no save to load");
@@ -6863,7 +7357,7 @@ int main(int argc, char **argv)
                 }
 #if WAYFARER_SELFTEST
                 case SDLK_TAB:
-                    atlas_page = (atlas_page + 1) % 5 - 1;  /* -1 = the world */
+                    atlas_page = (atlas_page + 1) % 6 - 1;  /* -1 = the world */
                     break;
 #endif
                 default:
