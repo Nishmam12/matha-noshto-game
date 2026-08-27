@@ -55,6 +55,13 @@ $UwWaterPng   = Join-Path $ASSETS 'Underworld\PNG\Water_coasts.png'
 $UwObjectsDir = Join-Path $ASSETS 'Underworld\PNG\Objects_separately'
 $PortalPng    = Join-Path $ASSETS 'Portal\Dimensional_Portal.png'
 
+# ---- Lumiara (biome 3) source paths ---------------------------------------
+$LumDir        = Join-Path $ASSETS 'Lumiara'
+$LumTopDownDir = Join-Path $LumDir 'TopDown'
+$LumChasmPng   = Join-Path $LumTopDownDir 'tileset_chasm_to_grass_16x16.png'
+$LumCobblePng  = Join-Path $LumTopDownDir 'tileset_grass_to_cobblestone_16x16.png'
+$LumWaterPng   = Join-Path $LumTopDownDir 'tileset_water_to_grass_16x16.png'
+
 # ---- Tileset -------------------------------------------------------------
 # 128x240 = an 8x15 grid of 16x16 cells, 92 of which have content. Emitted
 # MECHANICALLY as ART_TILE_C<col>_R<row>, with no hand-written name table: which
@@ -217,6 +224,258 @@ function Get-OpaqueBox($Img, [int]$x0, [int]$y0, [int]$w, [int]$h) {
     }
     if ($maxX -lt 0) { return $null }
     return @{ X = $minX; Y = $minY; W = $maxX - $minX + 1; H = $maxY - $minY + 1 }
+}
+
+# ---- Lumiara palette quantization ----------------------------------------
+# Forest/Underworld are flat-shaded pixel art - each new delivery has added a
+# few dozen colours to the global palette. Lumiara's source is painterly
+# (soft gradients, dither), and a straight per-pixel scan of even just the
+# curated tile cells below finds ~190 distinct opaque colours; the full
+# curated set (tiles + decorations) over 600 - against a global-palette
+# budget (254 entries, CLAUDE.md) that has ~59 slots left before this biome.
+# Reusing every distinct source pixel is therefore not an option. A weighted
+# median-cut quantizer reduces the WHOLE Lumiara set to a fixed
+# LUM_PALETTE_BUDGET of representative colours up front; every Lumiara sprite
+# is then baked through that one fixed mapping via Get-IndexArray's existing
+# $Tint hook (the same mechanism the Underworld acid-fill tint uses), so the
+# global palette gains at most LUM_PALETTE_BUDGET new entries no matter how
+# much source art feeds it.
+$LUM_PALETTE_BUDGET = 48
+
+# ---- Lumiara ground-tile calming ------------------------------------------
+# MEASURED PROBLEM, so nobody re-derives it. Mean local contrast ("dither" -
+# the mean absolute luminance delta between horizontally/vertically adjacent
+# pixels) over each biome's ground tiles:
+#
+#     Forest      grass_base   7.1    dirt_fill   4.9
+#     Underworld  ground_base  7.1    dirt_fill  19.5
+#     Lumiara     grass_base  22.1    cobble     40.4    <-- 3x and 8x Forest
+#
+# and over a whole rendered 480x270 frame (--lit --dev, seed 1):
+#
+#     Forest 13.5   Underworld 23.0   Lumiara 31.7
+#
+# Lumiara reads as harsh/glaring NOT because it is bright - measured over the
+# same frames it is in fact the DARKEST of the three (mean luma 90.9 against
+# Forest's 105.6) and less saturated than Forest (0.56 against 0.71) - but
+# because of that pixel-level speckle. The source sheets are painterly
+# illustrations cut into 16x16 cells, so what is a pleasing soft gradient at
+# illustration scale becomes a high-frequency checkerboard when tiled as a
+# ground fill, and the median-cut quantizer above sharpens it further by
+# snapping neighbouring near-identical colours into different buckets.
+#
+# GROUND TILES ONLY. Ground should recede and props should read against it, so
+# the 20 curated tile cells get calmed and the 16 decorations are left at full
+# fidelity deliberately - blurring those would cost the dream trees and fauna
+# exactly the detail they are on screen for.
+#
+# SMOOTH blends each pixel toward its 3x3 neighbourhood mean, which kills the
+# speckle while keeping the tile's larger shapes and its hue.
+#
+# FLATTEN then blends toward the CELL's own mean colour, and it is the one
+# doing the heavy lifting. Smoothing alone got a rendered frame from 31.7 to
+# 25.1 and still looked wrong beside Forest, because the remaining contrast is
+# not dither at all - it is dense little crystal and flower MOTIFS authored
+# into every cell, which a blur softens but cannot remove. Forest's ground
+# works precisely because it is nearly a flat colour carrying light texture
+# (dither 7.1 / 4.9), so the ground recedes and the props read against it.
+# FLATTEN is what buys that: it pulls each tile toward its own average, which
+# keeps every tile's hue and its relationship to its neighbours while dropping
+# the motif contrast that was competing with the sprites.
+#
+# DIM and DESAT are a mild tone trim on top: the water and void cells measure
+# luma 118-145 at source, the brightest ground in the game, and saturated cyan
+# reads as glare at any luminance. Deliberately gentle - the frame is already
+# darker than Forest's, so the fix here is contrast, not exposure.
+# Values chosen by baking three candidates and comparing rendered frames
+# against Forest and Underworld. Measured mean local contrast over a whole
+# --lit --dev frame (seed 1), Forest 13.5 / Underworld 23.0 for scale:
+#
+#     source                             31.7   the reported "too bright"
+#     0.60 / 0.45 / 0.95 / 0.88          22.8   still visibly busy
+#     0.70 / 0.62 / 0.93 / 0.76          21.0   <-- chosen
+#     0.80 / 0.78 / 0.90 / 0.62          21.1   ground near-neutral grey
+#
+# Note the floor around 21: past this point the remaining frame contrast is
+# the DECORATIONS, not the ground, so flattening the ground further only
+# drains its colour and buys no measurable calm. Getting nearer Forest's 13.5
+# would mean calming the props too, which is deliberately not done.
+$LUM_TILE_SMOOTH  = 0.70  # 0 = untouched, 1 = full 3x3 box blur
+$LUM_TILE_FLATTEN = 0.62  # 0 = keep tile detail, 1 = solid flat colour per tile
+$LUM_TILE_DIM     = 0.93  # luminance scale
+$LUM_TILE_DESAT   = 0.76  # 1 = source saturation, 0 = greyscale
+
+# A cell pulled out as flat per-channel arrays, so it can be filtered before it
+# ever reaches the palette. Alpha is carried through untouched - the filters
+# below move colour only, so an opaque tile stays opaque and --tile-test's
+# base-fill opacity assertion cannot be affected by any of this.
+function Get-CellRGBA($Img, [int]$x0, [int]$y0, [int]$w, [int]$h) {
+    $b = $Img.B; $stride = $Img.Stride
+    $r = New-Object double[] ($w*$h)
+    $g = New-Object double[] ($w*$h)
+    $bl = New-Object double[] ($w*$h)
+    $a = New-Object byte[] ($w*$h)
+    for ($y = 0; $y -lt $h; $y++) {
+        for ($x = 0; $x -lt $w; $x++) {
+            $o = ($y0+$y)*$stride + ($x0+$x)*4
+            $i = $y*$w + $x
+            $r[$i] = [double]$b[$o+2]; $g[$i] = [double]$b[$o+1]; $bl[$i] = [double]$b[$o]
+            $a[$i] = $b[$o+3]
+        }
+    }
+    return @{ W = $w; H = $h; R = $r; G = $g; B = $bl; A = $a }
+}
+
+# Smooth, then tone, then round+clamp to integers. Rounding HERE rather than at
+# bake time is load-bearing: the histogram and the bake both read this same
+# already-integer cell, so every colour the bake asks the quantizer about is
+# one the histogram actually saw. Rounding independently in two places would
+# let a pixel land one unit away from any histogram key and throw.
+function Invoke-LumGroundTone($cell) {
+    $w = $cell.W; $h = $cell.H
+    $chans = @($cell.R, $cell.G, $cell.B)
+    $sm = @()
+    foreach ($src in $chans) {
+        $dst = New-Object double[] ($w*$h)
+        for ($y = 0; $y -lt $h; $y++) {
+            for ($x = 0; $x -lt $w; $x++) {
+                $sum = 0.0; $cnt = 0
+                for ($dy = -1; $dy -le 1; $dy++) {
+                    $ny = $y + $dy
+                    if ($ny -lt 0 -or $ny -ge $h) { continue }
+                    for ($dx = -1; $dx -le 1; $dx++) {
+                        $nx = $x + $dx
+                        if ($nx -lt 0 -or $nx -ge $w) { continue }
+                        $sum += $src[$ny*$w + $nx]; $cnt++
+                    }
+                }
+                $i = $y*$w + $x
+                $dst[$i] = $src[$i] * (1.0 - $LUM_TILE_SMOOTH) + ($sum/$cnt) * $LUM_TILE_SMOOTH
+            }
+        }
+        $sm += ,$dst
+    }
+    $r = $sm[0]; $g = $sm[1]; $bl = $sm[2]
+    # Flatten toward the cell's own mean, over the OPAQUE pixels only - letting
+    # transparent pixels vote would drag the average toward whatever RGB the
+    # source happens to store behind alpha 0.
+    if ($LUM_TILE_FLATTEN -gt 0.0) {
+        $mr = 0.0; $mg = 0.0; $mb = 0.0; $mn = 0
+        for ($i = 0; $i -lt ($w*$h); $i++) {
+            if ($cell.A[$i] -lt 128) { continue }
+            $mr += $r[$i]; $mg += $g[$i]; $mb += $bl[$i]; $mn++
+        }
+        if ($mn -gt 0) {
+            $mr /= $mn; $mg /= $mn; $mb /= $mn
+            $f = $LUM_TILE_FLATTEN
+            for ($i = 0; $i -lt ($w*$h); $i++) {
+                $r[$i]  = $r[$i]  * (1.0-$f) + $mr * $f
+                $g[$i]  = $g[$i]  * (1.0-$f) + $mg * $f
+                $bl[$i] = $bl[$i] * (1.0-$f) + $mb * $f
+            }
+        }
+    }
+    for ($i = 0; $i -lt ($w*$h); $i++) {
+        $lum = 0.299*$r[$i] + 0.587*$g[$i] + 0.114*$bl[$i]
+        $vr = ($lum + ($r[$i]  - $lum) * $LUM_TILE_DESAT) * $LUM_TILE_DIM
+        $vg = ($lum + ($g[$i]  - $lum) * $LUM_TILE_DESAT) * $LUM_TILE_DIM
+        $vb = ($lum + ($bl[$i] - $lum) * $LUM_TILE_DESAT) * $LUM_TILE_DIM
+        $ir = [int][Math]::Round($vr); $ig = [int][Math]::Round($vg); $ib = [int][Math]::Round($vb)
+        if ($ir -lt 0) { $ir = 0 } elseif ($ir -gt 255) { $ir = 255 }
+        if ($ig -lt 0) { $ig = 0 } elseif ($ig -gt 255) { $ig = 255 }
+        if ($ib -lt 0) { $ib = 0 } elseif ($ib -gt 255) { $ib = 255 }
+        $r[$i] = $ir; $g[$i] = $ig; $bl[$i] = $ib
+    }
+    return @{ W = $w; H = $h; R = $r; G = $g; B = $bl; A = $cell.A }
+}
+
+function Get-CellHistogram($cell, [hashtable]$Hist) {
+    for ($i = 0; $i -lt ($cell.W * $cell.H); $i++) {
+        if ($cell.A[$i] -lt 128) { continue }
+        $key = "$([int]$cell.R[$i]),$([int]$cell.G[$i]),$([int]$cell.B[$i])"
+        if ($Hist.ContainsKey($key)) { $Hist[$key]++ } else { $Hist[$key] = 1 }
+    }
+}
+
+function Get-IndexArrayFromCell($cell, [hashtable]$Map) {
+    $n = $cell.W * $cell.H
+    $idx = New-Object byte[] $n
+    for ($i = 0; $i -lt $n; $i++) {
+        if ($cell.A[$i] -lt 128) { $idx[$i] = 0; continue }
+        $key = "$([int]$cell.R[$i]),$([int]$cell.G[$i]),$([int]$cell.B[$i])"
+        if (-not $Map.ContainsKey($key)) {
+            throw "bake: toned Lumiara tile pixel $key has no quantized mapping"
+        }
+        $q = $Map[$key]
+        $idx[$i] = [byte](Get-PaletteIndex $q[0] $q[1] $q[2])
+    }
+    return ,$idx
+}
+
+function Get-OpaqueHistogram($Img, [int]$x0, [int]$y0, [int]$w, [int]$h, [hashtable]$Hist) {
+    $b = $Img.B; $stride = $Img.Stride
+    for ($y = 0; $y -lt $h; $y++) {
+        $row = ($y0 + $y) * $stride
+        for ($x = 0; $x -lt $w; $x++) {
+            $o = $row + ($x0 + $x) * 4
+            if ($b[$o + 3] -ge 128) {
+                $key = "$($b[$o+2]),$($b[$o+1]),$($b[$o])"
+                if ($Hist.ContainsKey($key)) { $Hist[$key]++ } else { $Hist[$key] = 1 }
+            }
+        }
+    }
+}
+
+# Classic weighted median-cut: repeatedly split the bucket with the widest
+# single-channel range at its (unweighted) median along that channel, until
+# there are K buckets, then average each bucket (weighted by pixel count) to
+# get its representative colour. Every ORIGINAL histogram entry ends up in
+# exactly one final bucket, so the r,g,b -> representative map falls out
+# directly from bucket membership - no separate nearest-colour search needed.
+function Get-MedianCutMap([hashtable]$Hist, [int]$K) {
+    $entries = New-Object System.Collections.Generic.List[object]
+    foreach ($key in $Hist.Keys) {
+        $p = $key -split ','
+        $entries.Add([pscustomobject]@{ R = [int]$p[0]; G = [int]$p[1]; B = [int]$p[2]; N = $Hist[$key] })
+    }
+    $buckets = New-Object System.Collections.Generic.List[object]
+    $buckets.Add($entries)
+    while ($buckets.Count -lt $K) {
+        $bestIdx = -1; $bestRange = 0; $bestChan = 'R'
+        for ($i = 0; $i -lt $buckets.Count; $i++) {
+            $bk = $buckets[$i]
+            if ($bk.Count -le 1) { continue }
+            $rMin = 255; $rMax = 0; $gMin = 255; $gMax = 0; $bMin = 255; $bMax = 0
+            foreach ($e in $bk) {
+                if ($e.R -lt $rMin) { $rMin = $e.R }; if ($e.R -gt $rMax) { $rMax = $e.R }
+                if ($e.G -lt $gMin) { $gMin = $e.G }; if ($e.G -gt $gMax) { $gMax = $e.G }
+                if ($e.B -lt $bMin) { $bMin = $e.B }; if ($e.B -gt $bMax) { $bMax = $e.B }
+            }
+            $rr = $rMax - $rMin; $gr = $gMax - $gMin; $br = $bMax - $bMin
+            $mx = [Math]::Max($rr, [Math]::Max($gr, $br))
+            if ($mx -gt $bestRange) {
+                $bestRange = $mx; $bestIdx = $i
+                $bestChan = if ($mx -eq $rr) { 'R' } elseif ($mx -eq $gr) { 'G' } else { 'B' }
+            }
+        }
+        if ($bestIdx -lt 0) { break }   # no bucket left with more than one colour
+        $sorted = $buckets[$bestIdx] | Sort-Object $bestChan
+        $mid = [int][Math]::Floor($sorted.Count / 2)
+        $lo = New-Object System.Collections.Generic.List[object]
+        $hi = New-Object System.Collections.Generic.List[object]
+        for ($i = 0; $i -lt $sorted.Count; $i++) { if ($i -lt $mid) { $lo.Add($sorted[$i]) } else { $hi.Add($sorted[$i]) } }
+        $buckets.RemoveAt($bestIdx)
+        $buckets.Add($lo); $buckets.Add($hi)
+    }
+    $map = @{}
+    foreach ($bk in $buckets) {
+        $sr = 0; $sg = 0; $sb = 0; $sn = 0
+        foreach ($e in $bk) { $sr += $e.R * $e.N; $sg += $e.G * $e.N; $sb += $e.B * $e.N; $sn += $e.N }
+        if ($sn -eq 0) { continue }
+        $ar = [int][Math]::Round($sr / $sn); $ag = [int][Math]::Round($sg / $sn); $ab = [int][Math]::Round($sb / $sn)
+        foreach ($e in $bk) { $map["$($e.R),$($e.G),$($e.B)"] = @($ar, $ag, $ab) }
+    }
+    return $map
 }
 
 # ---- RLE ----------------------------------------------------------------
@@ -494,6 +753,164 @@ for ($f = 0; $f -lt 6; $f++) {
     Add-Sprite $portalNames[$f] $idx $box.W $box.H ([int][Math]::Floor($box.W / 2)) $box.H
 }
 if (-not $Quiet) { Write-Host "  portal      6 frames" }
+
+# ---- Lumiara tiles (biome 3) -----------------------------------------------
+#
+# Unlike Ground_rocks.png/Water_coasts.png (Underworld's vendor mega-sheets,
+# not laid out as autotile pieces at all), each Lumiara sheet IS a clean 4x4
+# grid of sixteen fully-opaque 16x16 cells - verified by a full-sheet scan,
+# every cell 256/256 px opaque, no exceptions. But the CONTENT is still not
+# the engine's 3x3 directional blob format: each sheet is one painterly scene
+# (an irregular terrain-B shape scattered over a terrain-A background) cut
+# into a grid for delivery, not sixteen individually-authored edge pieces. So
+# specific cells are curated by hand exactly the way Underworld's are (see
+# that block above) - a handful of "pure A", "pure B" and "boundary" cells,
+# with the boundary ones reused across every blob_slice slot rather than
+# matched to a real direction, same simplification Underworld's
+# grass_edge/olive_edge/water_edge/rock_ring already document.
+#
+# Three sheets, three GT_* roles, matching the plan's three transition pairs:
+#   tileset_grass_to_cobblestone -> ground_base (grass) + dirt_fill (cobble)
+#   tileset_water_to_grass       -> water_fill + water_edge/water_cap border
+#   tileset_chasm_to_grass       -> rock_fill (void) + rock_ring border
+# GT_ROCK reads as "Void Chasm" here, not stone outcrop - the same hollow-ring
+# hazard shape Underworld's toxic rock wall reuses, just re-skinned. No new
+# GT_* value and no new TileSet field (the plan's "cobble_edge" does not map
+# to any existing render_world pass - see main.c's tile_lum_* comment): only
+# rendering is biome-specific, per CLAUDE.md's Collision vs Render rule.
+$imgLumCobble = Get-PixelData $LumCobblePng
+$imgLumWater  = Get-PixelData $LumWaterPng
+$imgLumChasm  = Get-PixelData $LumChasmPng
+function Get-LumTileImg([string]$src) {
+    if ($src -eq 'cobble') { return $imgLumCobble }
+    if ($src -eq 'water')  { return $imgLumWater }
+    return $imgLumChasm
+}
+$LumTileCells = @(
+    @{ n = 'LUM_GRASS_A';       src = 'cobble'; c = 0; r = 0 }
+    @{ n = 'LUM_GRASS_B';       src = 'cobble'; c = 3; r = 0 }
+    @{ n = 'LUM_GRASS_C';       src = 'cobble'; c = 0; r = 3 }
+    @{ n = 'LUM_GRASS_D';       src = 'cobble'; c = 3; r = 3 }
+    # Cobble/water/void picks are the CALMEST cells of their region of each
+    # sheet, chosen by a full 16-cell dither scan rather than by eye. The
+    # first pass here picked c2,r1 for cobble (44.7, the single noisiest cell
+    # in that sheet) and c2,r0/c2,r3 for water - both of which carry a big
+    # flower motif that tiled into an obvious repeating grid across the
+    # water. The calm interior cells below cost nothing and fix both.
+    @{ n = 'LUM_COBBLE_A';      src = 'cobble'; c = 1; r = 2 }
+    @{ n = 'LUM_COBBLE_B';      src = 'cobble'; c = 2; r = 2 }
+    @{ n = 'LUM_GRASSEDGE';     src = 'cobble'; c = 2; r = 0 }
+    @{ n = 'LUM_OLIVEEDGE';     src = 'cobble'; c = 1; r = 3 }
+    @{ n = 'LUM_WATER_A';       src = 'water';  c = 2; r = 1 }
+    @{ n = 'LUM_WATER_B';       src = 'water';  c = 1; r = 1 }
+    @{ n = 'LUM_WATER_C';       src = 'water';  c = 2; r = 2 }
+    @{ n = 'LUM_WATER_D';       src = 'water';  c = 3; r = 1 }
+    @{ n = 'LUM_WBORDER_NW';    src = 'water';  c = 0; r = 0 }
+    @{ n = 'LUM_WBORDER_N';     src = 'water';  c = 0; r = 2 }
+    @{ n = 'LUM_WBORDER_NE';    src = 'water';  c = 3; r = 0 }
+    @{ n = 'LUM_VOID_A';        src = 'chasm';  c = 2; r = 1 }
+    @{ n = 'LUM_VOID_B';        src = 'chasm';  c = 1; r = 1 }
+    @{ n = 'LUM_VOIDBORDER_NW'; src = 'chasm';  c = 0; r = 0 }
+    @{ n = 'LUM_VOIDBORDER_N';  src = 'chasm';  c = 3; r = 0 }
+    @{ n = 'LUM_VOIDBORDER_NE'; src = 'chasm';  c = 3; r = 3 }
+)
+
+# ---- Lumiara decorations ---------------------------------------------------
+# Every file here is its own pre-cropped PNG (like Underworld's
+# Objects_separately), so no curated-rect bookkeeping is needed. Landmark
+# entities (tree, monolith) come from TopDown/; curated props and "ethereal
+# fauna" come from the flat assets/Lumiara/ files.
+#
+# LUM_PORTAL is the odd one out and is last on purpose: it is NOT a prop and
+# no prop_art slot references it. It is the Area 2 -> Area 3 gate, drawn by
+# props_build's own portal branch, and it lives in this list only because the
+# list is already the "one PNG, decoration anchor, through the Lumiara
+# palette" path - which is exactly what a portal standing on a tile needs.
+# Being appended AFTER LUM_STAG keeps draw_atlas's decoration sweep
+# (ART_LUM_TREE..ART_LUM_STAG) unchanged.
+#
+# Deliberately excluded: dreamgate_portal.png is the same gate drawn in
+# ISOMETRIC projection (stairs receding to one side) and would read as tilted
+# in a top-down world, so the TopDown/ variant is the one baked; and
+# dream_tree_large / mana_crystal_monolith are higher-resolution duplicates of
+# assets already baked from TopDown/ - the same class of exclusion as
+# Underworld's Lich_shadow*/Ruin_shadow* (no slot needs a second copy).
+$LumObjects = @(
+    @{ n = 'LUM_TREE';      f = 'TopDown\topdown_dream_tree.png' }
+    @{ n = 'LUM_MONOLITH';  f = 'TopDown\topdown_mana_monolith.png' }
+    @{ n = 'LUM_BUSH';      f = 'flora_purple_mushrooms.png' }
+    @{ n = 'LUM_MUSHROOM';  f = 'flora_crystal_flower.png' }
+    @{ n = 'LUM_BENCH';     f = 'stone_bench_mossy.png' }
+    @{ n = 'LUM_ARCHWAY';   f = 'archway_ruined_runic.png' }
+    @{ n = 'LUM_STATUE';    f = 'statue_guardian_gargoyle.png' }
+    @{ n = 'LUM_CHEST';     f = 'runic_chest.png' }
+    @{ n = 'LUM_URN';       f = 'relic_urn.png' }
+    @{ n = 'LUM_SIGNPOST';  f = 'signpost_wayfinding.png' }
+    @{ n = 'LUM_LANTERN';   f = 'lantern_post_purple.png' }
+    @{ n = 'LUM_BANNER';    f = 'banner_faded_kingdom.png' }
+    @{ n = 'LUM_JELLYFISH'; f = 'fauna_dream_jellyfish.png' }
+    @{ n = 'LUM_MANTA';     f = 'fauna_sky_manta.png' }
+    @{ n = 'LUM_FOX';       f = 'fauna_spirit_fox.png' }
+    @{ n = 'LUM_STAG';      f = 'fauna_star_stag.png' }
+    @{ n = 'LUM_PORTAL';    f = 'TopDown\topdown_dreamgate_portal.png' }
+)
+
+# ---- Lumiara palette build ------------------------------------------------
+# One histogram pass over EXACTLY the pixels the two loops below will bake
+# (same source images, same regions), so the quantized map has an entry for
+# every opaque pixel actually baked - a mismatch between this scan and the
+# bake below would surface as a hard "no quantized mapping" throw from the
+# tint closure rather than a silently wrong colour.
+$LumHist = @{}
+# Tile cells are calmed FIRST and the histogram is taken from the result, so
+# the quantizer allocates its buckets to the colours that actually ship rather
+# than to speckle that is about to be filtered away.
+$LumTileToned = @{}
+foreach ($t in $LumTileCells) {
+    $cell = Get-CellRGBA (Get-LumTileImg $t.src) ($t.c * $TILE) ($t.r * $TILE) $TILE $TILE
+    $cell = Invoke-LumGroundTone $cell
+    $LumTileToned[$t.n] = $cell
+    Get-CellHistogram $cell $LumHist
+}
+$LumObjImgs = @{}
+foreach ($o in $LumObjects) {
+    $path = Join-Path $LumDir $o.f
+    $img = Get-PixelData $path
+    $LumObjImgs[$o.n] = $img
+    $box = Get-OpaqueBox $img 0 0 $img.W $img.H
+    if ($null -eq $box) { throw ("bake: {0} is fully transparent" -f $o.f) }
+    Get-OpaqueHistogram $img $box.X $box.Y $box.W $box.H $LumHist
+}
+$LumColorMap = Get-MedianCutMap $LumHist $LUM_PALETTE_BUDGET
+$LumTint = {
+    param($r, $g, $b)
+    $key = "$r,$g,$b"
+    if (-not $LumColorMap.ContainsKey($key)) {
+        throw "bake: Lumiara pixel $key has no quantized mapping - histogram pass missed it"
+    }
+    $LumColorMap[$key]
+}.GetNewClosure()
+if (-not $Quiet) {
+    Write-Host ("  lum palette {0} source colours -> {1} quantized (budget {2})" -f `
+        $LumHist.Count, (($LumColorMap.Values | ForEach-Object { "$($_[0]),$($_[1]),$($_[2])" } | Sort-Object -Unique).Count), $LUM_PALETTE_BUDGET)
+}
+
+foreach ($t in $LumTileCells) {
+    $idx = Get-IndexArrayFromCell $LumTileToned[$t.n] $LumColorMap
+    Add-Sprite $t.n $idx $TILE $TILE 0 0
+}
+if (-not $Quiet) {
+    Write-Host ("  lum tiles   {0} cells (calmed: smooth {1}, flatten {2}, dim {3}, desat {4})" -f `
+        $LumTileCells.Count, $LUM_TILE_SMOOTH, $LUM_TILE_FLATTEN, $LUM_TILE_DIM, $LUM_TILE_DESAT)
+}
+
+foreach ($o in $LumObjects) {
+    $img = $LumObjImgs[$o.n]
+    $box = Get-OpaqueBox $img 0 0 $img.W $img.H
+    $idx = Get-IndexArray $img $box.X $box.Y $box.W $box.H $LumTint
+    Add-Sprite $o.n $idx $box.W $box.H ([int][Math]::Floor($box.W / 2)) $box.H
+}
+if (-not $Quiet) { Write-Host ("  lum objects {0} decorations, one PNG each" -f $LumObjects.Count) }
 
 # --- character --- (must stay last - see the NOTE ON ORDER above)
 $charLowestFoot = -1

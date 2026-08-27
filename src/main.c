@@ -492,11 +492,11 @@ static int arg_int(int argc, char **argv, const char *name, int fallback)
 
 enum { GT_GRASS = 0, GT_OLIVE, GT_DIRT, GT_WATER, GT_ROCK, GT_COUNT };
 
-/* Two areas, one shared vocabulary. GT_* and TERRAIN_* stay biome-agnostic -
+/* Three areas, one shared vocabulary. GT_* and TERRAIN_* stay biome-agnostic -
  * only rendering (render_world's tile tables) and props (prop_art) are
  * selected by biome, so world generation, gating and tile_blocked need no
- * biome branch at all. See UNDERWORLD_BIOME_PLAN.md for why. */
-enum { BIOME_FOREST = 0, BIOME_UNDERWORLD = 1, BIOME_COUNT };
+ * biome branch at all. See LUMIARA_BIOME_PLAN.md for why. */
+enum { BIOME_FOREST = 0, BIOME_UNDERWORLD = 1, BIOME_LUMIARA = 2, BIOME_COUNT };
 
 /* ---- Regions and abilities ----------------------------------------------
  *
@@ -563,7 +563,8 @@ typedef struct {
     int spawn_region;
     int spawn_tile;
     Uint8 biome;       /* BIOME_* - render/prop selector only, set by world_gen */
-    int   portal_tile; /* Area 1 only: where the exit to Area 2 stands */
+    int   portal_tile; /* Where this area's exit onward stands (unused in
+                          * Lumiara - Area 3 is terminal) */
 } World;
 
 /* BFS working set. One struct so a caller allocates it once; far too big for a
@@ -786,6 +787,36 @@ static const float SYNTH_VOICE_UW[SYNTH_STEPS] = {
     130.81f, 0.0f, 164.81f, 0.0f,  196.00f, 0.0f, 174.61f, 0.0f
 };
 
+/* Lumiara: the drone rises to E4 - above Forest's C2 AND Underworld's A1,
+ * rather than continuing the downward octave trend - a dream realm reached at
+ * the end of a descent should not sound like the bottom of one. The
+ * progression is E major - B major - F#minor - C#minor (I-V-ii-vi), the
+ * brightest voicing of the three biomes on purpose: airy major fifths where
+ * Forest leans major-ish and Underworld is uniformly minor. Unverified by ear
+ * per this project's convention (see the Underworld comment above); verified
+ * only as a third structurally distinct table reachable solely from
+ * BIOME_LUMIARA. */
+static const float SYNTH_BASE_LUM[1] = { 329.63f };   /* E4 drone */
+
+static const float SYNTH_STRINGS_LUM[SYNTH_STEPS] = {
+    659.26f, 987.77f, 783.99f, 659.26f,   /* E: E5, B5, G#5, E5   */
+    493.88f, 739.99f, 587.33f, 493.88f,   /* B: B4, F#5, D5, B4   */
+    369.99f, 554.37f, 440.00f, 369.99f,   /* F#m: F#4, C#5, A4, F#4 */
+    277.18f, 415.30f, 329.63f, 277.18f    /* C#m: C#4, G#4, E4, C#4 */
+};
+static const float SYNTH_PAD_LUM[SYNTH_STEPS] = {
+    659.26f, 0.0f, 0.0f, 0.0f,  493.88f, 0.0f, 0.0f, 0.0f,
+    369.99f, 0.0f, 0.0f, 0.0f,  277.18f, 0.0f, 0.0f, 0.0f
+};
+static const float SYNTH_BELLS_LUM[SYNTH_STEPS] = {
+    0.0f, 0.0f, 1318.51f, 0.0f,  0.0f, 987.77f, 0.0f, 0.0f,
+    0.0f, 0.0f, 1479.98f, 0.0f,  0.0f, 1108.73f, 0.0f, 0.0f
+};
+static const float SYNTH_VOICE_LUM[SYNTH_STEPS] = {
+    329.63f, 0.0f, 415.30f, 0.0f,  493.88f, 440.00f, 415.30f, 391.99f,
+    329.63f, 0.0f, 415.30f, 0.0f,  493.88f, 0.0f, 440.00f, 0.0f
+};
+
 typedef struct {
     Wave         wave;
     const float *pat;
@@ -812,6 +843,13 @@ static const LayerCfg LAYER_CFG_TABLE[BIOME_COUNT][NUM_LAYERS] = {
         { W_SINE, SYNTH_PAD_UW,     16, 0.13f, 0.20f, 0.0f, 0.30f },
         { W_SINE, SYNTH_BELLS_UW,   16, 0.16f, 0.0f,  1.5f, 0.60f },
         { W_SINE, SYNTH_VOICE_UW,   16, 0.20f, 1.00f, 0.0f, 0.45f }
+    },
+    {
+        { W_SAW,  SYNTH_BASE_LUM,    1,  0.30f, 0.50f, 0.0f, 0.12f },
+        { W_SAW,  SYNTH_STRINGS_LUM, 16, 0.16f, 0.33f, 0.0f, 0.20f },
+        { W_SINE, SYNTH_PAD_LUM,     16, 0.13f, 0.20f, 0.0f, 0.30f },
+        { W_SINE, SYNTH_BELLS_LUM,   16, 0.16f, 0.0f,  1.5f, 0.60f },
+        { W_SINE, SYNTH_VOICE_LUM,   16, 0.20f, 1.00f, 0.0f, 0.45f }
     }
 };
 
@@ -1322,6 +1360,66 @@ static const short tile_uw_rock_ring[9] = {
 };
 static const short tile_uw_rock_fill[2] = { ART_UW_ROCKWALL_A, ART_UW_ROCKWALL_B };
 
+/* ---- Lumiara tile tables ---------------------------------------------------
+ *
+ * Same shapes as Forest/Underworld above, same reason: render_world stays
+ * untouched, only WHICH table tileset_for hands back changes. Curated cells
+ * from tools/bake.ps1's "Lumiara tiles" block, which explains the two things
+ * that make this table simpler to read than it looks:
+ *
+ * 1. GT_DIRT reads as "Cobblestone Path" and GT_ROCK reads as "Void Chasm" -
+ *    there is no cobblestone-specific edge field in TileSet (the plan named
+ *    one; it does not exist because render_world has no pass that would use
+ *    it) and no new GT_* value. Cobblestone rides the existing dirt_fill slot
+ *    exactly the way Underworld's rubble does, and the Void Chasm rides
+ *    rock_ring/rock_fill exactly the way Underworld's toxic rock wall does -
+ *    both are pre-existing hazard/path roles being re-skinned, not new
+ *    mechanics.
+ * 2. The three source sheets are painterly, not authored as directional blob
+ *    pieces (see bake.ps1), so grass_edge/olive_edge/water_edge/rock_ring
+ *    below reuse a small handful of curated cells across every blob_slice
+ *    slot rather than a real per-direction mapping - the same simplification
+ *    Underworld's own tables already document, and for the same reason: a
+ *    cosmetic boundary reading blockier than a true 3x3 wrap is a look, not a
+ *    bug; the tile actually being solid where it draws solid is what matters.
+ */
+static const short tile_lum_ground_base[4] = {
+    ART_LUM_GRASS_A, ART_LUM_GRASS_B, ART_LUM_GRASS_C, ART_LUM_GRASS_D
+};
+static const short tile_lum_dirt_fill[6] = {
+    ART_LUM_COBBLE_A, ART_LUM_COBBLE_B, ART_LUM_COBBLE_A,
+    ART_LUM_COBBLE_B, ART_LUM_COBBLE_A, ART_LUM_COBBLE_B
+};
+static const short tile_lum_water_fill[10] = {
+    ART_LUM_WATER_A, ART_LUM_WATER_B, ART_LUM_WATER_C, ART_LUM_WATER_D,
+    ART_LUM_WATER_A, ART_LUM_WATER_B, ART_LUM_WATER_C, ART_LUM_WATER_D,
+    ART_LUM_WATER_A, ART_LUM_WATER_B
+};
+static const short tile_lum_grass_edge[9] = {
+    ART_LUM_GRASSEDGE, ART_LUM_GRASSEDGE, ART_LUM_GRASSEDGE,
+    ART_LUM_GRASSEDGE, ART_LUM_GRASSEDGE, ART_LUM_GRASSEDGE,
+    ART_LUM_GRASSEDGE, ART_LUM_GRASSEDGE, ART_LUM_GRASSEDGE
+};
+static const short tile_lum_olive_edge[9] = {
+    ART_LUM_OLIVEEDGE, ART_LUM_OLIVEEDGE, ART_LUM_OLIVEEDGE,
+    ART_LUM_OLIVEEDGE, ART_LUM_OLIVEEDGE, ART_LUM_OLIVEEDGE,
+    ART_LUM_OLIVEEDGE, ART_LUM_OLIVEEDGE, ART_LUM_OLIVEEDGE
+};
+static const short tile_lum_water_cap[3] = {
+    ART_LUM_WBORDER_N, ART_LUM_WBORDER_NE, ART_LUM_WBORDER_NW
+};
+static const short tile_lum_water_edge[9] = {
+    ART_LUM_WBORDER_NW, ART_LUM_WBORDER_N, ART_LUM_WBORDER_NE,
+    ART_LUM_WBORDER_NW, ART_LUM_WBORDER_N, ART_LUM_WBORDER_NE,
+    ART_LUM_WBORDER_NW, ART_LUM_WBORDER_N, ART_LUM_WBORDER_NE
+};
+static const short tile_lum_rock_ring[9] = {
+    ART_LUM_VOIDBORDER_NW, ART_LUM_VOIDBORDER_N, ART_LUM_VOIDBORDER_NE,
+    ART_LUM_VOIDBORDER_NW, ART_NONE,              ART_LUM_VOIDBORDER_NE,
+    ART_LUM_VOIDBORDER_NW, ART_LUM_VOIDBORDER_N, ART_LUM_VOIDBORDER_NE
+};
+static const short tile_lum_rock_fill[2] = { ART_LUM_VOID_A, ART_LUM_VOID_B };
+
 /* Selects which set of tables render_world (and the tile-opacity self-tests)
  * read from, indexed by World.biome. One indirection point instead of a
  * biome branch at every one of the ~11 call sites below. */
@@ -1345,10 +1443,16 @@ static const TileSet TILESET_UNDERWORLD = {
     tile_uw_ground_base, tile_uw_dirt_fill, tile_uw_water_fill, tile_uw_grass_edge, tile_uw_olive_edge,
     tile_uw_water_cap, tile_uw_water_edge, tile_uw_rock_ring, tile_uw_rock_fill
 };
+static const TileSet TILESET_LUMIARA = {
+    tile_lum_ground_base, tile_lum_dirt_fill, tile_lum_water_fill, tile_lum_grass_edge, tile_lum_olive_edge,
+    tile_lum_water_cap, tile_lum_water_edge, tile_lum_rock_ring, tile_lum_rock_fill
+};
 
 static const TileSet *tileset_for(Uint8 biome)
 {
-    return biome == BIOME_FOREST ? &TILESET_FOREST : &TILESET_UNDERWORLD;
+    if (biome == BIOME_FOREST) return &TILESET_FOREST;
+    if (biome == BIOME_UNDERWORLD) return &TILESET_UNDERWORLD;
+    return &TILESET_LUMIARA;
 }
 
 static int terr_at(const World *w, int tx, int ty)
@@ -2519,9 +2623,10 @@ static void world_spawn(World *w, Scratch *sc)
  * by a ring search outward from spawn_tile, never the spawn tile itself (she
  * would otherwise spawn standing on it every game). Deterministic and RNG-free
  * - render-only, so it needs none of world_gen's collision guarantees, only a
- * valid fallback. Called for both biomes; unused (never drawn, never checked)
- * outside BIOME_FOREST, but always left valid rather than only set "when
- * needed" - see the no-garbage-fields rule this file follows for World. */
+ * valid fallback. Called for every biome; unused (never drawn, never checked)
+ * in BIOME_LUMIARA - Area 3 is terminal, so its own portal_tile just sits
+ * there unused - but always left valid rather than only set "when needed" -
+ * see the no-garbage-fields rule this file follows for World. */
 static void world_place_portal(World *w)
 {
     int sx, sy, r;
@@ -2694,6 +2799,21 @@ static const short art_mushrooms_uw[] = { ART_UW_CRYSTAL_1, ART_UW_CRYSTAL_2, AR
 static const short art_tufts_uw[]     = { ART_UW_TUFT_1, ART_UW_TUFT_2, ART_UW_TUFT_3, ART_UW_TUFT_4 };
 static const short art_reeds_uw[]     = { ART_UW_REED_1, ART_UW_REED_2, ART_UW_REED_3 };
 
+/* Lumiara analogues, same PROP_* slots. Only one canopy asset was delivered
+ * (topdown_dream_tree.png), so TREE and PINE share it rather than one going
+ * unused - PROP_PINE is picked on 1/4 of canopy rolls (see prop_at), and a
+ * repeated tree is a variety loss, not a missing-art bug. See
+ * tools/bake.ps1's "Lumiara decorations" block for the source files. */
+static const short art_trees_lum[]     = { ART_LUM_TREE };
+static const short art_pines_lum[]     = { ART_LUM_TREE };
+static const short art_bushes_lum[]    = { ART_LUM_BUSH };
+static const short art_logs_lum[]      = { ART_LUM_BENCH, ART_LUM_ARCHWAY };
+static const short art_rocks_lum[]     = { ART_LUM_MONOLITH, ART_LUM_STATUE };
+static const short art_stones_lum[]    = { ART_LUM_CHEST, ART_LUM_URN };
+static const short art_mushrooms_lum[] = { ART_LUM_MUSHROOM };
+static const short art_tufts_lum[]     = { ART_LUM_SIGNPOST, ART_LUM_LANTERN, ART_LUM_BANNER };
+static const short art_reeds_lum[]     = { ART_LUM_JELLYFISH, ART_LUM_MANTA, ART_LUM_FOX, ART_LUM_STAG };
+
 #define PA(t) { t, (int)(sizeof t / sizeof *t) }
 static const PropArt prop_art[BIOME_COUNT][PROP_COUNT] = {
     {
@@ -2705,9 +2825,92 @@ static const PropArt prop_art[BIOME_COUNT][PROP_COUNT] = {
         { NULL, 0 },
         PA(art_trees_uw), PA(art_pines_uw), PA(art_bushes_uw), PA(art_logs_uw), PA(art_rocks_uw),
         PA(art_stones_uw), PA(art_mushrooms_uw), PA(art_tufts_uw), PA(art_reeds_uw)
+    },
+    {
+        { NULL, 0 },
+        PA(art_trees_lum), PA(art_pines_lum), PA(art_bushes_lum), PA(art_logs_lum), PA(art_rocks_lum),
+        PA(art_stones_lum), PA(art_mushrooms_lum), PA(art_tufts_lum), PA(art_reeds_lum)
     }
 };
 #undef PA
+
+/* ---- Prop density normalisation -------------------------------------------
+ *
+ * prop_at's rates are biome-agnostic and were tuned against FOREST's art,
+ * where PROP_STONE is a pebble (13.8 x 10.8 px mean box) and PROP_TUFT a grass
+ * tuft (14 x 21). Those two slots fire often precisely BECAUSE what they place
+ * is tiny. Point a biome with larger art at the same slots and the same rate
+ * stops meaning the same thing. Measured mean sprite box per slot, against
+ * Forest:
+ *
+ *     PROP_STONE   Forest  149 px^2   Underworld  737 (4.9x)   Lumiara 1306 (8.8x)
+ *     PROP_TUFT    Forest  294        Underworld  432 (1.5x)   Lumiara 1264 (4.3x)
+ *     PROP_ROCK    Forest  552        Underworld 2098 (3.8x)   Lumiara 1728 (3.1x)
+ *     PROP_LOG     Forest 1225       Underworld 2299 (1.9x)   Lumiara 2391 (2.0x)
+ *
+ * so Lumiara was placing chests, urns, lantern posts and banners at pebble and
+ * grass-tuft frequency, and they piled into each other on screen.
+ *
+ * The fix keeps ONE set of authored rates and thins the RESULT per biome, by
+ * the ratio of footprints, so each biome lands near Forest's prop area per
+ * unit of ground - the density that was actually art-directed. Derived from
+ * ART_SPRITES at runtime rather than hand-tuned, so swapping a prop PNG for a
+ * bigger or smaller one re-balances on the next bake with nothing to remember.
+ * That is not hypothetical: the art that prompted this was itself a mid-project
+ * swap, and the replacement monolith grew from a 24x38 box to 42x48.
+ *
+ * Render-only, like every other thing in this file that touches props: it
+ * changes which sprites are pushed into the draw list and nothing else, so
+ * solid[][], reachability and every completability proof are untouched.
+ *
+ * Forest is the reference and therefore always keeps 64/64 - its rendering
+ * stays bit-identical to before this existed, which is what keeps
+ * --mockup-test's pixel census (calibrated on Forest art) meaningful.
+ */
+#define PROP_ROLL_N   64   /* prop_at's presence roll is 6 bits; this matches it */
+#define PROP_KEEP_MIN  6   /* a thinned slot still appears, just rarely */
+
+static Uint8 prop_keep[BIOME_COUNT][PROP_COUNT];
+static int   prop_keep_ready;
+
+/* Mean sprite box over one slot's art. The BOX, not the opaque-pixel count:
+ * two props read as crowded when their boxes overlap, and w*h is already in
+ * ART_SPRITES, so this needs no RLE decode on the render path. */
+static int prop_art_box(const PropArt *pa)
+{
+    long total = 0;
+    int i;
+
+    if (!pa->ids || pa->n <= 0)
+        return 0;
+    for (i = 0; i < pa->n; i++) {
+        const ArtSprite *sp = &ART_SPRITES[pa->ids[i]];
+        total += (long)sp->w * (long)sp->h;
+    }
+    return (int)(total / pa->n);
+}
+
+static void prop_keep_build(void)
+{
+    int b, k;
+
+    for (k = 0; k < PROP_COUNT; k++) {
+        int ref = prop_art_box(&prop_art[BIOME_FOREST][k]);
+        for (b = 0; b < BIOME_COUNT; b++) {
+            int box = prop_art_box(&prop_art[b][k]);
+            int keep = PROP_ROLL_N;
+            /* Only ever THINS. A biome whose art is smaller than Forest's keeps
+             * the authored rate rather than being made denser to compensate -
+             * the rates are a designed ceiling, not a budget to spend. */
+            if (ref > 0 && box > ref)
+                keep = (ref * PROP_ROLL_N + box / 2) / box;
+            if (keep < PROP_KEEP_MIN) keep = PROP_KEEP_MIN;
+            if (keep > PROP_ROLL_N)   keep = PROP_ROLL_N;
+            prop_keep[b][k] = (Uint8)keep;
+        }
+    }
+    prop_keep_ready = 1;
+}
 
 /* The tallest prop is 98 px, so a prop anchored this many tiles BELOW the
  * visible bottom can still reach into frame. Culling that ignores this clips
@@ -3153,6 +3356,11 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
     dl->n = 0;
     dl->dropped = 0;
 
+    /* Derived from the art itself, so it is built once from ART_SPRITES rather
+     * than carried as a hand-maintained table - see prop_keep_build. */
+    if (!prop_keep_ready)
+        prop_keep_build();
+
     if (tx0 < 0) tx0 = 0;
     if (ty0 < 0) ty0 = 0;
     if (tx1 > WORLD_W) tx1 = WORLD_W;
@@ -3169,6 +3377,13 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
             pa = &prop_art[w->biome][kind];
             if (pa->n <= 0)
                 continue;
+            /* Bits 14-19 for the density thin: disjoint from the presence roll
+             * (bits 8-13) and the variant pick (24+), so "how often" stays
+             * independent of both "whether" and "which". Applied here rather
+             * than inside prop_at so prop_at keeps meaning "what belongs on
+             * this tile" - only whether it is DRAWN is biome-scaled. */
+            if (((h >> 14) & 63u) >= (Uint32)prop_keep[w->biome][kind])
+                continue;
             /* Bits 24+ for the variant: the low bits already chose presence,
              * and reusing them would correlate which tree with whether a tree. */
             art = pa->ids[(h >> 24) % (Uint32)pa->n];
@@ -3178,16 +3393,29 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
         }
     }
 
-    /* The Area 1 exit. Biome-gated rather than area-gated - World does not
-     * know about Game.area, and does not need to: portal_tile is computed for
-     * both biomes (see world_place_portal) but only ever drawn in the Forest,
-     * which is exactly where it is ever meaningful. Same 6-frame cycle rate
-     * as draw_atlas's preview. */
-    if (w->portal_tile >= 0 && w->biome == BIOME_FOREST) {
+    /* The exit onward, drawn in whichever area still HAS one - and drawn as
+     * the gate it actually is, rather than as one shared sprite:
+     *
+     *   Forest     -> the GREEN swirl (ART_UW_PORTAL_*), the Area 1 -> Area 2
+     *                 gate. Six authored frames, so it animates. The "UW" in
+     *                 the name is legacy: this is the generic
+     *                 Dimensional_Portal asset, not Underworld-specific art.
+     *   Underworld -> the DREAMGATE (ART_LUM_PORTAL), the Area 2 -> Area 3
+     *                 gate. ONE authored frame, so it is drawn static - there
+     *                 is no cycle to run, and advancing a frame counter over a
+     *                 single sprite would be a no-op dressed up as animation.
+     *
+     * Biome-gated rather than area-gated - World does not know about
+     * Game.area and does not need to: portal_tile is computed for every biome
+     * (see world_place_portal) but only ever drawn where a gate is meaningful,
+     * which is everywhere except Lumiara - Area 3 is terminal. */
+    if (w->portal_tile >= 0 && (w->biome == BIOME_FOREST || w->biome == BIOME_UNDERWORLD)) {
         int ptx = w->portal_tile % WORLD_W, pty = w->portal_tile / WORLD_W;
         if (ptx >= tx0 && ptx < tx1 && pty >= ty0 && pty < ty1) {
-            int frame = (int)(clock * 6.0f) % 6;
-            draw_list_push(dl, ART_UW_PORTAL_A + frame,
+            int art = ART_LUM_PORTAL;
+            if (w->biome == BIOME_FOREST)
+                art = ART_UW_PORTAL_A + ((int)(clock * 6.0f) % 6);
+            draw_list_push(dl, art,
                            ptx * TILE + TILE / 2 - cam_x,
                            pty * TILE + TILE - cam_y, 0, tile_level(w, ptx, pty));
         }
@@ -3452,16 +3680,21 @@ typedef struct {
     Uint64 seed;
     int    frags_restored;
     int    souls_restored;
-    Uint8  area;      /* 1 or 2 - which area ents[]/frags/souls describe now */
+    Uint8  area;      /* 1, 2 or 3 - which area ents[]/frags/souls describe now */
     Uint32 restored;  /* persistent across an area switch: bits 0-9 area 1,
-                        * bits 10-19 area 2. ents[] only ever holds the ACTIVE
-                        * area's 10 entities, so this is what carries the
-                        * other area's progress while it is not loaded. */
+                        * bits 10-19 area 2, bits 20-29 area 3. ents[] only
+                        * ever holds the ACTIVE area's 10 entities, so this is
+                        * what carries the other areas' progress while they
+                        * are not loaded. */
 } Game;
 
-/* Area 2's world is a deterministic salt of the root seed, not a second random
- * source - same seed, same salt, same world, every time. */
+/* Area 2 and Area 3's worlds are each a deterministic salt of the root seed,
+ * not a second random source - same seed, same salt, same world, every
+ * time. Distinct 64-bit constants (not the plan doc's 0xDEADBEEF/0xCAFEBABE -
+ * those are documentation, not what the code ever used): a shared salt would
+ * make Area 3 a re-skin of Area 2's exact layout instead of its own world. */
 #define AREA2_SEED_SALT 0x9E3779B97F4A7C15ULL
+#define AREA3_SEED_SALT 0xFF51AFD7ED558CCDULL
 
 /* Generate the world for ONE area and stand the player in it. The ONLY path
  * from a seed to a playable state for either area - a fresh start, a load and
@@ -3478,8 +3711,12 @@ typedef struct {
  * narrative payoff was judged not worth the risk. */
 static void game_init_area(Game *g, Scratch *sc, Uint64 seed, Uint8 area)
 {
-    Uint64 area_seed = (area == 1) ? seed : (seed ^ AREA2_SEED_SALT);
-    Uint8  biome      = (area == 1) ? BIOME_FOREST : BIOME_UNDERWORLD;
+    Uint64 area_seed = (area == 1) ? seed
+                      : (area == 2) ? (seed ^ AREA2_SEED_SALT)
+                      : (seed ^ AREA3_SEED_SALT);
+    Uint8  biome      = (area == 1) ? BIOME_FOREST
+                       : (area == 2) ? BIOME_UNDERWORLD
+                       : BIOME_LUMIARA;
 
     SDL_zero(g->p);
     g->seed = seed;
@@ -3539,13 +3776,14 @@ static int area_complete(const Game *g)
 #define SAVE_SIZE     28
 #define SAVE_FILENAME "wayfarer.sav"
 
-/* Byte 24-27's restored mask now spans 20 bits: 0-9 Area 1's ENTITY_COUNT
- * entities, 10-19 Area 2's. Both are always in scope regardless of which area
- * is currently active, because ents[] only ever holds the ACTIVE area's 10 -
- * see Game.restored. */
+/* Byte 24-27's restored mask now spans 30 bits: 0-9 Area 1's ENTITY_COUNT
+ * entities, 10-19 Area 2's, 20-29 Area 3's. All three are always in scope
+ * regardless of which area is currently active, because ents[] only ever
+ * holds the ACTIVE area's 10 - see Game.restored. */
 #define SAVE_AREA1_BITS  ((Uint32)((1u << ENTITY_COUNT) - 1u))
 #define SAVE_AREA2_SHIFT ENTITY_COUNT
-#define SAVE_ALL_BITS    ((Uint32)((1u << (2 * ENTITY_COUNT)) - 1u))
+#define SAVE_AREA3_SHIFT (2 * ENTITY_COUNT)
+#define SAVE_ALL_BITS    ((Uint32)((1u << (3 * ENTITY_COUNT)) - 1u))
 
 static void save_put32(Uint8 *p, Uint32 v)
 {
@@ -3581,13 +3819,15 @@ static float save_getf32(const Uint8 *p)
 static int game_save(const Game *g, const char *path)
 {
     Uint8 buf[SAVE_SIZE];
-    /* g->restored already carries the INACTIVE area's bits (folded in by
-     * game_transition_to_area2 when it switched away); only the ACTIVE area's
+    /* g->restored already carries the INACTIVE areas' bits (folded in by
+     * game_transition_to_area when it switched away); only the ACTIVE area's
      * slice needs deriving fresh from the live ents[] here, at its own bit
-     * offset, same as game_save always has. */
+     * offset, same as game_save always has. keep_mask is everything EXCEPT
+     * the active area's own slice - not "the other area", now that there are
+     * two others - so the active slice can be safely OR'd back in fresh. */
     Uint32 active = 0, restored, fx, fy;
-    Uint32 shift = (g->area == 1) ? 0 : SAVE_AREA2_SHIFT;
-    Uint32 keep_mask = (g->area == 1) ? (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT) : SAVE_AREA1_BITS;
+    Uint32 shift = (g->area == 1) ? 0 : (g->area == 2) ? SAVE_AREA2_SHIFT : SAVE_AREA3_SHIFT;
+    Uint32 keep_mask = SAVE_ALL_BITS & ~(SAVE_AREA1_BITS << shift);
     SDL_RWops *rw;
     int i;
 
@@ -3657,18 +3897,24 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
 
     if (buf[0] != SAVE_MAGIC_0 || buf[1] != SAVE_MAGIC_1) return -1;
     if (buf[2] != SAVE_VERSION)                           return -1;
-    if (buf[3] != 1 && buf[3] != 2)                       return -1;
+    if (buf[3] != 1 && buf[3] != 2 && buf[3] != 3)        return -1;
     if (buf[21] != 0 || buf[22] != 0 || buf[23] != 0)     return -1;
     area = buf[3];
 
     restored = save_get32(buf + 24);
     if (restored & ~SAVE_ALL_BITS) return -1;
     /* Free integrity check that falls straight out of the gameplay invariant
-     * the portal enforces live: you cannot BE in Area 2 unless Area 1 is 100%
-     * restored (that is what unlocks the portal), and you cannot have left
-     * Area 1 with spurious Area 2 progress already on the books. */
-    if (area == 1 && (restored & (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT))) return -1;
-    if (area == 2 && (restored & SAVE_AREA1_BITS) != SAVE_AREA1_BITS)    return -1;
+     * the portal enforces live: you cannot BE in Area N unless every earlier
+     * area is 100% restored (that is what unlocks each portal), and you
+     * cannot have left an area with spurious LATER-area progress already on
+     * the books - progress can only ever be ahead of where you currently are
+     * by exactly the areas you have already finished and left. */
+    if (area == 1 && (restored & ((SAVE_AREA1_BITS << SAVE_AREA2_SHIFT) |
+                                   (SAVE_AREA1_BITS << SAVE_AREA3_SHIFT)))) return -1;
+    if (area == 2 && ((restored & SAVE_AREA1_BITS) != SAVE_AREA1_BITS ||
+                       (restored & (SAVE_AREA1_BITS << SAVE_AREA3_SHIFT)))) return -1;
+    if (area == 3 && (restored & (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))
+                   != (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))  return -1;
 
     abilities = buf[20];
     if (abilities & (Uint8)~(Uint8)ABIL_ALL) return -1;
@@ -3690,7 +3936,7 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
         return -1;
     game_init_area(tmp, sc, seed, area);
 
-    shift = (area == 1) ? 0 : SAVE_AREA2_SHIFT;
+    shift = (area == 1) ? 0 : (area == 2) ? SAVE_AREA2_SHIFT : SAVE_AREA3_SHIFT;
     active = (restored >> shift) & SAVE_AREA1_BITS;
     for (i = 0; i < ENTITY_COUNT; i++)
         if (active & (1u << i))
@@ -3885,8 +4131,10 @@ static void mm_draw(SDL_Surface *fb, const Game *g)
      * landmark, not a pickup, and deserves to read as more significant than
      * a fragment or soul marker. Shown regardless of area_complete - once
      * she has seen it, its position is not new information; only whether
-     * she can use it yet is, and that is what the HUD banner is for. */
-    if (g->area == 1 && g->w.portal_tile >= 0 &&
+     * she can use it yet is, and that is what the HUD banner is for. Areas 1
+     * and 2 each have one (their own exit onward); Area 3 is terminal and
+     * its portal_tile is never drawn, so this never fires for it. */
+    if ((g->area == 1 || g->area == 2) && g->w.portal_tile >= 0 &&
         g->w.reveal[g->w.portal_tile / WORLD_W][g->w.portal_tile % WORLD_W] >= 24) {
         mm_marker(fb, g->w.portal_tile, SDL_MapRGB(fb->format, 0xb0, 0x6a, 0xff), 3);
     }
@@ -3934,8 +4182,12 @@ static void hud_draw(SDL_Surface *fb, const Game *g)
     }
 
     if (hud.win_left > 0) {
-        const char *l1 = (g->area == 1) ? "the forest remembers" : "the underworld remembers";
-        const char *l2 = (g->area == 1) ? "the portal opens"     : "all is restored";
+        const char *l1 = (g->area == 1) ? "the forest remembers"
+                        : (g->area == 2) ? "the underworld remembers"
+                        : "the lumiara remembers";
+        /* Areas 1 and 2 each open onto a portal; Area 3 is terminal, so its
+         * completion banner is the only one that says "all is restored". */
+        const char *l2 = (g->area == 1 || g->area == 2) ? "the portal opens" : "all is restored";
         Uint32 c = SDL_MapRGB(fb->format, 0xff, 0xf0, 0xc0);
         draw_text_shadow(fb, (fb->w - text_w(l1)) / 2, fb->h / 2 - 20, l1, c);
         draw_text_shadow(fb, (fb->w - text_w(l2)) / 2, fb->h / 2 - 20 + FONT_LINE, l2, c);
@@ -4021,36 +4273,47 @@ static void game_reseed(Game *g, Scratch *sc, Audio *a, Uint64 seed)
     audio_request_reset(a, seed, 0, 0, BIOME_FOREST);
 }
 
-/* Step through the portal: fold Area 1's live ents[] into the persistent
- * restored mask, then generate Area 2 the exact same way game_init generates
- * Area 1 - see game_init_area. One-way by design (no Area 2 -> Area 1
- * portal): the design is symmetric enough that a return trip would be nearly
- * free to add later (same function, area=1), but it is a second interactive
- * object, HUD affordance and test surface the source plan does not ask for. */
-static void game_transition_to_area2(Game *g, Scratch *sc)
+/* Step through a portal: fold the area being LEFT's live ents[] into the
+ * persistent restored mask at its own bit offset, then generate the next
+ * area the exact same way game_init generates Area 1 - see game_init_area.
+ * Generalized over which area is being left (g->area), not hardcoded to
+ * "area 1's bits" - with three areas, "keep the other area, overwrite mine"
+ * has no single "the other area" any more, and would corrupt whichever area
+ * is neither the one being left nor the one being entered. Same class of fix
+ * as game_save's shift/keep_mask above, same reason.
+ *
+ * One-way by design (no return portal from a later area to an earlier one):
+ * the design is symmetric enough that a return trip would be nearly free to
+ * add later (same function, an earlier area argument), but it is a second
+ * interactive object, HUD affordance and test surface the source plan does
+ * not ask for. */
+static void game_transition_to_area(Game *g, Scratch *sc, Uint8 next_area)
 {
     int i;
-    Uint32 area1_bits = 0;
+    Uint32 shift = (g->area == 1) ? 0 : (g->area == 2) ? SAVE_AREA2_SHIFT : SAVE_AREA3_SHIFT;
+    Uint32 live_bits = 0;
 
     for (i = 0; i < ENTITY_COUNT; i++)
         if (g->ents[i].restored)
-            area1_bits |= 1u << i;
-    g->restored = (g->restored & (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)) | area1_bits;
-    game_init_area(g, sc, g->seed, 2);
+            live_bits |= 1u << i;
+    g->restored = (g->restored & ~(SAVE_AREA1_BITS << shift)) | (live_bits << shift);
+    game_init_area(g, sc, g->seed, next_area);
     hud.mm_dirty  = 1;
     hud.win_shown = 0;
     hud.win_left  = 0;
 }
 
-/* The portal, checked alongside try_interact on the same key: only once Area 1
- * is area_complete (the portal "lights up" - see hud_draw's banner) and only
- * within the same INTERACT_RADIUS entities use. Returns 1 if the step was
- * taken, 0 otherwise, mirroring try_interact's shape. */
+/* The portal, checked alongside try_interact on the same key: only once the
+ * current area is area_complete (the portal "lights up" - see hud_draw's
+ * banner) and only within the same INTERACT_RADIUS entities use. Area 3 has
+ * no portal of its own to use (it is terminal - see try_interact's caller),
+ * so only areas 1 and 2 reach this. Returns 1 if the step was taken, 0
+ * otherwise, mirroring try_interact's shape. */
 static int try_use_portal(Game *g, Scratch *sc, Audio *a)
 {
     float ex, ey, dx, dy;
 
-    if (g->area != 1 || g->w.portal_tile < 0 || !area_complete(g))
+    if ((g->area != 1 && g->area != 2) || g->w.portal_tile < 0 || !area_complete(g))
         return 0;
     ex = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
     ey = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
@@ -4058,12 +4321,19 @@ static int try_use_portal(Game *g, Scratch *sc, Audio *a)
     dy = ey - g->p.y;
     if (dx * dx + dy * dy > INTERACT_RADIUS * INTERACT_RADIUS)
         return 0;
-    game_transition_to_area2(g, sc);
-    /* Root seed, not the Area 2 world-generation salt: F9's own reload of an
-     * Area 2 save reseeds audio from the FILE's root seed the same way, so
-     * this stays the one seed audio ever sees, whichever area is active. */
-    audio_request_reset(a, g->seed, 0, 0, BIOME_UNDERWORLD);
-    hud_toast("the underworld opens");
+    if (g->area == 1) {
+        game_transition_to_area(g, sc, 2);
+        /* Root seed, not the Area 2 world-generation salt: F9's own reload of
+         * an Area 2 save reseeds audio from the FILE's root seed the same
+         * way, so this stays the one seed audio ever sees, whichever area is
+         * active. */
+        audio_request_reset(a, g->seed, 0, 0, BIOME_UNDERWORLD);
+        hud_toast("the underworld opens");
+    } else {
+        game_transition_to_area(g, sc, 3);
+        audio_request_reset(a, g->seed, 0, 0, BIOME_LUMIARA);
+        hud_toast("the lumiara opens");
+    }
     return 1;
 }
 
@@ -4365,6 +4635,73 @@ static int sprite_selftest(void)
         printf("          %ld px from %ld RLE bytes (%.2fx), %d palette colours\n",
                px_total, rle_total, (double)px_total / (double)rle_total, ART_PAL_N);
         printf("          char anchor gap takes %d distinct values (cell-relative: >1)\n", gaps);
+    }
+
+    /* PROP DENSITY NORMALISATION.
+     *
+     * The rates in prop_at are Forest's, and only stay correct for another
+     * biome if that biome's art is a comparable size - which is exactly what
+     * stopped being true when Lumiara put chests and lantern posts in the
+     * pebble and grass-tuft slots. See prop_keep_build. */
+    {
+        static const char *pname[PROP_COUNT] = {
+            "none", "tree", "pine", "bush", "log", "rock",
+            "stone", "mushroom", "tuft", "reed"
+        };
+        int k, b, thinned = 0, ref, box;
+
+        prop_keep_build();
+
+        /* Forest is the reference, so it must come back completely untouched -
+         * if it ever thins, --mockup-test's Forest-calibrated pixel census is
+         * silently measuring a different world than the one it was tuned on. */
+        for (k = 0; k < PROP_COUNT; k++) {
+            if (prop_art[BIOME_FOREST][k].n <= 0) continue;
+            if (prop_keep[BIOME_FOREST][k] != PROP_ROLL_N) {
+                printf("  prop density: Forest slot %s keeps %d of %d -"
+                       " the reference biome must never be thinned\n",
+                       pname[k], prop_keep[BIOME_FOREST][k], PROP_ROLL_N);
+                fails++;
+            }
+        }
+        for (b = 0; b < BIOME_COUNT; b++)
+            for (k = 0; k < PROP_COUNT; k++)
+                if (prop_art[b][k].n > 0 && prop_keep[b][k] < PROP_ROLL_N)
+                    thinned++;
+
+        /* NEGATIVE CONTROL: the rule has to DISCRIMINATE, not just thin
+         * everything. Lumiara's PROP_STONE is the largest overshoot in the
+         * build and must come back thinned; Forest's own PROP_STONE, measured
+         * by the identical code path, must come back untouched. One of those
+         * failing means the derivation is keyed on something other than
+         * relative footprint. */
+        ref = prop_art_box(&prop_art[BIOME_FOREST][PROP_STONE]);
+        box = prop_art_box(&prop_art[BIOME_LUMIARA][PROP_STONE]);
+        if (ref <= 0 || box <= ref) {
+            printf("  prop density negative control FAILED: Lumiara PROP_STONE"
+                   " (%d px^2) is not larger than Forest's (%d), so this check"
+                   " cannot demonstrate thinning\n", box, ref);
+            fails++;
+        } else if (prop_keep[BIOME_LUMIARA][PROP_STONE] >= PROP_ROLL_N) {
+            printf("  prop density: Lumiara PROP_STONE is %.1fx Forest's box"
+                   " but was not thinned\n", (double)box / (double)ref);
+            fails++;
+        } else {
+            printf("sprite  : prop density - Lumiara %s is %.1fx Forest's box"
+                   " -> keeps %d of %d, while Forest keeps %d of %d\n",
+                   pname[PROP_STONE], (double)box / (double)ref,
+                   prop_keep[BIOME_LUMIARA][PROP_STONE], PROP_ROLL_N,
+                   prop_keep[BIOME_FOREST][PROP_STONE], PROP_ROLL_N);
+        }
+        printf("sprite  : prop density - %d of %d populated slots thinned;"
+               " keep/64 by biome:\n", thinned, BIOME_COUNT * (PROP_COUNT - 1));
+        for (b = 0; b < BIOME_COUNT; b++) {
+            printf("          %-10s",
+                   b == BIOME_FOREST ? "forest" : b == BIOME_UNDERWORLD ? "underworld" : "lumiara");
+            for (k = 1; k < PROP_COUNT; k++)
+                printf(" %s %d", pname[k], prop_art[b][k].n > 0 ? prop_keep[b][k] : PROP_ROLL_N);
+            printf("\n");
+        }
     }
 
     printf("sprite  : %s\n", fails ? "FAIL" : "PASS");
@@ -4906,19 +5243,20 @@ static int reach_selftest(int seeds, Uint64 base)
 
     if (!w || !sc) { printf("reach   : out of memory\n"); SDL_free(w); SDL_free(sc); return 1; }
 
-    /* Both areas: Area 2's world is BIOME_UNDERWORLD generated from the exact
-     * seed derivation game_init_area uses (seed ^ AREA2_SEED_SALT), so this
-     * exercises the same worlds the portal actually leads to, not a
-     * standalone approximation of them. world_solvable and place_entities are
-     * already generic over ENTITY_COUNT, ABIL_* and world_gen (see their own
+    /* All three areas: Area 2 and Area 3's worlds are BIOME_UNDERWORLD and
+     * BIOME_LUMIARA generated from the exact seed derivation game_init_area
+     * uses (seed ^ AREA2_SEED_SALT / AREA3_SEED_SALT), so this exercises the
+     * same worlds the portals actually lead to, not a standalone
+     * approximation of them. world_solvable and place_entities are already
+     * generic over ENTITY_COUNT, ABIL_* and world_gen (see their own
      * comments), so this loop needed no change beyond the outer area pass. */
     {
     int area;
-    for (area = 1; area <= 2; area++) {
-    Uint8 biome = (area == 1) ? BIOME_FOREST : BIOME_UNDERWORLD;
+    for (area = 1; area <= 3; area++) {
+    Uint8 biome = (area == 1) ? BIOME_FOREST : (area == 2) ? BIOME_UNDERWORLD : BIOME_LUMIARA;
     for (s = 0; s < seeds; s++) {
         Uint64 seed = base + (Uint64)s;
-        Uint64 area_seed = (area == 1) ? seed : (seed ^ AREA2_SEED_SALT);
+        Uint64 area_seed = (area == 1) ? seed : (area == 2) ? (seed ^ AREA2_SEED_SALT) : (seed ^ AREA3_SEED_SALT);
         int attempts = world_gen(w, sc, ents, area_seed, biome);
         int restored = 0, i;
 
@@ -5051,14 +5389,14 @@ static int play_selftest(int seeds, Uint64 base)
 
     if (!w || !sc) { printf("play    : out of memory\n"); SDL_free(w); SDL_free(sc); return 1; }
 
-    /* Both areas, same seed derivation game_init_area uses - see reach_selftest. */
+    /* All three areas, same seed derivation game_init_area uses - see reach_selftest. */
     {
     int area;
-    for (area = 1; area <= 2; area++) {
-    Uint8 biome = (area == 1) ? BIOME_FOREST : BIOME_UNDERWORLD;
+    for (area = 1; area <= 3; area++) {
+    Uint8 biome = (area == 1) ? BIOME_FOREST : (area == 2) ? BIOME_UNDERWORLD : BIOME_LUMIARA;
     for (s = 0; s < seeds; s++) {
         Uint64 seed = base + (Uint64)s;
-        Uint64 area_seed = (area == 1) ? seed : (seed ^ AREA2_SEED_SALT);
+        Uint64 area_seed = (area == 1) ? seed : (area == 2) ? (seed ^ AREA2_SEED_SALT) : (seed ^ AREA3_SEED_SALT);
         Player p;
         int frags = 0, souls = 0;
         long step;
@@ -5689,7 +6027,8 @@ static int tile_selftest(void)
     int biome;
     for (biome = 0; biome < BIOME_COUNT; biome++) {
     const TileSet *ts = tileset_for((Uint8)biome);
-    const char *bname = biome == BIOME_FOREST ? "forest" : "underworld";
+    const char *bname = biome == BIOME_FOREST ? "forest"
+                       : biome == BIOME_UNDERWORLD ? "underworld" : "lumiara";
 
     world_stub(w, 1);
     w->biome = (Uint8)biome;
@@ -5747,13 +6086,15 @@ static int tile_selftest(void)
         int k, worst = 0, ctl;
         /* Forest's rock_ring[0] carries real transparency by construction (a
          * corner slice of a hollow-centre ring) and works as its own negative
-         * control. Underworld's water_edge/rock_ring[0] does not - both share
-         * ACID_NW, one of only three cells of the source motif confirmed
-         * fully opaque (see the table's own comment) - so any known-porous
-         * Underworld sprite serves instead; a decoration's interior gaps are
-         * exactly that, by construction of Get-OpaqueBox trimming to the
-         * silhouette's bounding box rather than its filled area. */
-        int ctl_sprite = (biome == BIOME_FOREST) ? tile_rock_ring[0] : ART_UW_CRYSTAL_4;
+         * control. Underworld's and Lumiara's water_edge/rock_ring[0] do not -
+         * both biomes' curated cells are 16x16 tile-grid crops, verified
+         * fully opaque at bake time (see each table's own comment) - so any
+         * known-porous DECORATION sprite serves instead; a decoration's
+         * interior gaps are exactly that, by construction of Get-OpaqueBox
+         * trimming to the silhouette's bounding box rather than its filled
+         * area. ART_LUM_STAG's antlers and legs leave plenty of its box empty. */
+        int ctl_sprite = (biome == BIOME_FOREST) ? tile_rock_ring[0]
+                        : (biome == BIOME_UNDERWORLD) ? ART_UW_CRYSTAL_4 : ART_LUM_STAG;
         for (k = 0; k < 2; k++) {
             int trans = sprite_transparent_px(&ART_SPRITES[ts->rock_fill[k]]);
             if (trans > worst) worst = trans;
@@ -6377,7 +6718,8 @@ static int hud_selftest(Uint64 base)
             "a soul is remembered  3/3", "you remember the light",
             "the water is too deep", "could not write the save file",
             "the forest remembers", "the portal opens",
-            "the underworld remembers", "all is restored"
+            "the underworld remembers", "the lumiara remembers",
+            "the lumiara opens", "all is restored"
         };
         for (i = 0; i < (int)(sizeof(lines) / sizeof(lines[0])); i++)
             if (text_w(lines[i]) > LOGICAL_W - 8) {
@@ -6632,12 +6974,12 @@ static int save_selftest(Uint64 base)
             printf("FAIL  save: could not read the file back for the controls\n");
             fails++;
         } else {
-            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[10];
+            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[12];
             int nctl = 0;
 
             save_snap(again, &before);
 
-            for (i = 0; i < 10; i++) {
+            for (i = 0; i < 12; i++) {
                 SDL_memcpy(ctl[i].buf, good, SAVE_SIZE);
                 ctl[i].len = SAVE_SIZE;
             }
@@ -6658,6 +7000,17 @@ static int save_selftest(Uint64 base)
             ctl[nctl].name = "area 1 file, spurious area 2 bits";
             save_put32(ctl[nctl].buf + 24, save_get32(good + 24) | (1u << ENTITY_COUNT));
             nctl++;
+            /* One area further: area 1 progress can no more carry Area 3 bits
+             * than Area 2 ones - a save cannot hold progress in an area it
+             * has not reached yet, regardless of which later area. */
+            ctl[nctl].name = "area 1 file, spurious area 3 bits";
+            save_put32(ctl[nctl].buf + 24, save_get32(good + 24) | (1u << SAVE_AREA3_SHIFT));
+            nctl++;
+            /* Same invariant as "area 2 file, area 1 incomplete" above, one
+             * area further: you cannot BE in Area 3 unless BOTH earlier areas
+             * are fully restored, and `good` has neither. */
+            ctl[nctl].name = "area 3 file, area 1 and area 2 incomplete";
+            ctl[nctl].buf[3] = 3; nctl++;
             /* Not a crash risk - collision always masks with & - but a
              * hand-edited save must not grant abilities never earned. */
             ctl[nctl].name = "abilities outside the legal mask";
@@ -6744,7 +7097,7 @@ static int save_selftest(Uint64 base)
                 printf("FAIL  save: area 1 did not reach area_complete for the area 2 positive path\n");
                 fails++;
             } else {
-                game_transition_to_area2(g2, sc);
+                game_transition_to_area(g2, sc, 2);
                 for (i = 0; i < 2; i++)
                     if (g2->ents[i].tile >= 0) game_restore(g2, i);
                 for (i = 0; i < g2->w.region_count; i++)
@@ -6771,6 +7124,65 @@ static int save_selftest(Uint64 base)
             }
             remove(path);
             SDL_free(g2);
+        }
+    }
+
+    /* Area 3 positive path: the same shape as the Area 2 path above, one area
+     * further - drive Area 1 AND Area 2 to area_complete, transition through
+     * both portals exactly the way try_use_portal does, restore three of
+     * Area 3's own entities, and confirm a save/load round trip keeps ALL
+     * THREE slices of the mask intact. This is what actually exercises
+     * game_save's generalized keep_mask (a naive 2-area-style "keep the other
+     * one" ternary extended to 3 would corrupt Area 2's already-frozen bits
+     * here specifically, since Area 2 is neither the area being left nor the
+     * one being entered) and game_transition_to_area's generalized fold. */
+    {
+        Game *g3 = (Game *)SDL_malloc(sizeof(Game));
+        if (g3) {
+            game_init(g3, sc, base);
+            for (i = 0; i < ENTITY_COUNT; i++)
+                if (g3->ents[i].tile >= 0) game_restore(g3, i);
+            if (!area_complete(g3)) {
+                printf("FAIL  save: area 1 did not reach area_complete for the area 3 positive path\n");
+                fails++;
+            } else {
+                game_transition_to_area(g3, sc, 2);
+                for (i = 0; i < ENTITY_COUNT; i++)
+                    if (g3->ents[i].tile >= 0) game_restore(g3, i);
+                if (!area_complete(g3)) {
+                    printf("FAIL  save: area 2 did not reach area_complete for the area 3 positive path\n");
+                    fails++;
+                } else {
+                    game_transition_to_area(g3, sc, 3);
+                    for (i = 0; i < 3; i++)
+                        if (g3->ents[i].tile >= 0) game_restore(g3, i);
+                    for (i = 0; i < g3->w.region_count; i++)
+                        g3->w.regions[i].restoration = g3->w.regions[i].restore_to;
+                    if (game_save(g3, path) != 0 || game_load(again, sc, path, &ls) != 0) {
+                        printf("FAIL  save: area 3 game did not round-trip\n");
+                        fails++;
+                    } else if (again->area != 3) {
+                        printf("FAIL  save: loaded area 3 save reports area %d\n", (int)again->area);
+                        fails++;
+                    } else {
+                        int area1_ok = (again->restored & SAVE_AREA1_BITS) == SAVE_AREA1_BITS;
+                        int area2_ok = (again->restored & (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT))
+                                     == (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT);
+                        int area3_ok = again->ents[0].restored && again->ents[1].restored && again->ents[2].restored;
+                        int k;
+                        for (k = 3; k < ENTITY_COUNT && area3_ok; k++)
+                            if (again->ents[k].restored) area3_ok = 0;
+                        if (!area1_ok || !area2_ok || !area3_ok) {
+                            printf("FAIL  save: area 3 round trip lost area 1, area 2 or area 3 progress\n");
+                            fails++;
+                        } else {
+                            printf("save    : area 3 round trip PASS, all three areas' progress intact\n");
+                        }
+                    }
+                }
+            }
+            remove(path);
+            SDL_free(g3);
         }
     }
 
@@ -7023,7 +7435,8 @@ static int audio_selftest(int argc, char **argv, int ms)
  * decodes to the right PIXEL COUNT; only the screen proves it decodes to the
  * right picture. Replaced by the real tile renderer in phase 2.
  *
- * Pages: 1 tileset grid, 2 decorations, 3 character frames, 4 the fog ramp. */
+ * Pages: 1 tileset grid, 2 decorations, 3 character frames, 4 the fog ramp,
+ * 5 Underworld art, 6 Lumiara art (page arg is -1-based; see atlas_page). */
 static void draw_atlas(SDL_Surface *fb, int page, float t)
 {
     Uint32 bg = SDL_MapRGB(fb->format, 0x2a, 0x2a, 0x32);
@@ -7094,7 +7507,7 @@ static void draw_atlas(SDL_Surface *fb, int page, float t)
             draw_sprite(fb, ART_TREE_B, LOGICAL_W / 2, 100, lv);
             draw_sprite(fb, ART_PINE_A, LOGICAL_W / 2 + 80, 100, lv);
         }
-    } else {
+    } else if (page == 4) {
         /* Underworld curated tiles, decorations and the portal, laid out the
          * same way pages 0/1 check Forest art - a visual check on curation
          * picked with tools/inspect-grid.ps1, not a gameplay path. */
@@ -7118,7 +7531,44 @@ static void draw_atlas(SDL_Surface *fb, int page, float t)
             int frame = (int)(t * 6.0f) % 6;
             draw_sprite(fb, ART_UW_PORTAL_A + frame, LOGICAL_W - 40, LOGICAL_H - 20, top);
         }
+    } else {
+        /* Lumiara curated tiles and decorations, same layout again. The
+         * dreamgate (Area 2's exit to Area 3) is previewed bottom-right the
+         * way page 4 previews the green swirl - one frame, not a cycle, so
+         * there is no animation to step through here. */
+        int gx = 8, gy = 8;
+        for (i = ART_LUM_GRASS_A; i <= ART_LUM_VOIDBORDER_NE; i++) {
+            draw_sprite(fb, i, gx, gy, top);
+            gx += TILE + 2;
+            if (gx > LOGICAL_W - TILE) { gx = 8; gy += TILE + 2; }
+        }
+        {
+            int bx = 8, by = 90;
+            fill_rect(fb, 0, by, LOGICAL_W, 1, base);
+            for (i = ART_LUM_TREE; i <= ART_LUM_STAG; i++) {
+                const ArtSprite *sp = &ART_SPRITES[i];
+                if (bx + sp->w > LOGICAL_W) { bx = 8; by += 46; }
+                draw_sprite(fb, i, bx + sp->w / 2, by, top);
+                bx += sp->w + 3;
+            }
+        }
+        draw_sprite(fb, ART_LUM_PORTAL, LOGICAL_W - 40, LOGICAL_H - 8, top);
     }
+}
+
+/* --lit reveals the whole map so the minimap (and every marker gated on
+ * reveal - fragments, souls, the portal) can be looked at without exploring
+ * first. world_gen rebuilds World.reveal from nothing every time a world is
+ * (re)generated - a fresh game, a reseed, a portal transition, a load - so a
+ * one-shot reveal applied only before the main loop starts goes dark again
+ * the moment any of those happen. Factored out so every such call site can
+ * re-apply it, rather than only the first world ever being lit. */
+static void reveal_all(World *w)
+{
+    int lx, ly;
+    for (ly = 0; ly < WORLD_H; ly++)
+        for (lx = 0; lx < WORLD_W; lx++)
+            w->reveal[ly][lx] = 255;
 }
 #endif /* WAYFARER_SELFTEST */
 
@@ -7146,6 +7596,7 @@ int main(int argc, char **argv)
 #if WAYFARER_SELFTEST
     const char *shot = NULL;
     int atlas_page = -1;
+    int lit_mode;
     int i;
 
     /* Dispatched before any window or audio exists, and the process exit code IS
@@ -7182,6 +7633,7 @@ int main(int argc, char **argv)
             shot = argv[i + 1];
     if (arg_flag(argc, argv, "--atlas"))
         atlas_page = arg_int(argc, argv, "--atlas", 0);
+    lit_mode = arg_flag(argc, argv, "--lit");
 #endif
 
     limit = arg_int(argc, argv, "--frames", 0);
@@ -7199,11 +7651,18 @@ int main(int argc, char **argv)
     }
     game_init(g, sc, seed);
 #if WAYFARER_SELFTEST
-    /* Jump straight to Area 2 without playing through Area 1 - for looking at
-     * the Underworld biome itself, the same reason --dev and --lit exist. */
+    /* Jump straight to Area 2 or Area 3 without playing through the areas
+     * before it - for looking at the Underworld or Lumiara biome itself, the
+     * same reason --dev and --lit exist. g->restored stays 0 rather than
+     * being pre-seeded with fake completion bits for the skipped areas: nothing
+     * here checks area_complete or the portal for the jumped-to area, so an
+     * empty mask is simplest and matches what --area2 has always done. */
     if (arg_flag(argc, argv, "--area2")) {
         g->restored = 0;
         game_init_area(g, sc, seed, 2);
+    } else if (arg_flag(argc, argv, "--area3")) {
+        g->restored = 0;
+        game_init_area(g, sc, seed, 3);
     }
 #endif
     prev_px = g->p.x;
@@ -7214,13 +7673,11 @@ int main(int argc, char **argv)
     /* --lit exists so the minimap and the restored palette can be LOOKED AT.
      * Both are almost entirely a function of accumulated fog, so a fresh
      * --frames run shows neither, and every visual bug of consequence in this
-     * project's predecessor was found by looking at the screen. */
-    if (arg_flag(argc, argv, "--lit")) {
-        int lx, ly;
-        for (ly = 0; ly < WORLD_H; ly++)
-            for (lx = 0; lx < WORLD_W; lx++)
-                g->w.reveal[ly][lx] = 255;
-    }
+     * project's predecessor was found by looking at the screen. lit_mode is
+     * remembered (not just applied once here) and re-applied at every point
+     * below that regenerates World.reveal - see reveal_all. */
+    if (lit_mode)
+        reveal_all(&g->w);
 #endif
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
@@ -7302,8 +7759,14 @@ int main(int argc, char **argv)
                     break;
                 case SDLK_e:
                 case SDLK_SPACE:
-                    if (try_interact(g, &audio) < 0)
+                    if (try_interact(g, &audio) < 0) {
+#if WAYFARER_SELFTEST
+                        if (try_use_portal(g, sc, &audio) && lit_mode)
+                            reveal_all(&g->w);
+#else
                         (void)try_use_portal(g, sc, &audio);
+#endif
+                    }
                     break;
                 case SDLK_F5:
                     hud_toast(game_save(g, SAVE_FILENAME) == 0
@@ -7328,6 +7791,10 @@ int main(int argc, char **argv)
                     if (fwd)          seed++;
                     else if (seed > 1) seed--;
                     game_reseed(g, sc, &audio, seed);
+#if WAYFARER_SELFTEST
+                    if (lit_mode)
+                        reveal_all(&g->w);
+#endif
                     /* She is somewhere else entirely now, so the interpolator
                      * must not draw a frame on the way from where she was. */
                     prev_px = g->p.x;
@@ -7340,6 +7807,10 @@ int main(int argc, char **argv)
                     Uint64 ls = seed;
                     if (game_load(g, sc, SAVE_FILENAME, &ls) == 0) {
                         seed = ls;
+#if WAYFARER_SELFTEST
+                        if (lit_mode)
+                            reveal_all(&g->w);
+#endif
                         prev_px = g->p.x;
                         prev_py = g->p.y;
                         hud.mm_dirty = 1;
@@ -7348,7 +7819,8 @@ int main(int argc, char **argv)
                          * loaded counts and biome rather than back at silence
                          * or the wrong area's register. */
                         audio_request_reset(&audio, ls, g->frags_restored, g->souls_restored,
-                                            g->area == 1 ? BIOME_FOREST : BIOME_UNDERWORLD);
+                                            g->area == 1 ? BIOME_FOREST
+                                            : g->area == 2 ? BIOME_UNDERWORLD : BIOME_LUMIARA);
                         hud_toast("loaded");
                     } else {
                         hud_toast("no save to load");
@@ -7357,7 +7829,7 @@ int main(int argc, char **argv)
                 }
 #if WAYFARER_SELFTEST
                 case SDLK_TAB:
-                    atlas_page = (atlas_page + 1) % 6 - 1;  /* -1 = the world */
+                    atlas_page = (atlas_page + 1) % 7 - 1;  /* -1 = the world */
                     break;
 #endif
                 default:
