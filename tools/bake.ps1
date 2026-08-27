@@ -829,12 +829,21 @@ $LumTileCells = @(
 # Being appended AFTER LUM_STAG keeps draw_atlas's decoration sweep
 # (ART_LUM_TREE..ART_LUM_STAG) unchanged.
 #
-# Deliberately excluded: dreamgate_portal.png is the same gate drawn in
-# ISOMETRIC projection (stairs receding to one side) and would read as tilted
-# in a top-down world, so the TopDown/ variant is the one baked; and
-# dream_tree_large / mana_crystal_monolith are higher-resolution duplicates of
-# assets already baked from TopDown/ - the same class of exclusion as
-# Underworld's Lich_shadow*/Ruin_shadow* (no slot needs a second copy).
+# Deliberately excluded: every ISOMETRIC source has been retired to
+# Lumiara\_isometric_archive\ (dreamgate_portal, mana_crystal_monolith and the
+# seven tile_*_block cubes) - they were drawn in 2:1 dimetric projection with a
+# diamond footprint and would read as tilted in a top-down world. The TopDown\
+# variants are what this list bakes. dream_tree_large stays in place: it is a
+# front elevation, not isometric, but it is a higher-resolution duplicate of
+# topdown_dream_tree - the same class of exclusion as Underworld's
+# Lich_shadow*/Ruin_shadow* (no slot needs a second copy).
+#
+# TopDown\topdown_stone_stairs.png and TopDown\topdown_waterfall_cliff.png are
+# the top-down replacements for the archived stairs/waterfall cubes, which were
+# the only two archived terrains the three Wang tilesets do NOT already cover.
+# They are deliberately NOT in this list: no render pass in main.c draws them,
+# and per CLAUDE.md a baked sprite with no caller is dead shipped bytes. Add
+# them here in the same commit that adds the code that draws them.
 $LumObjects = @(
     @{ n = 'LUM_TREE';      f = 'TopDown\topdown_dream_tree.png' }
     @{ n = 'LUM_MONOLITH';  f = 'TopDown\topdown_mana_monolith.png' }
