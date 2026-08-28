@@ -46,6 +46,14 @@ $ASSETS  = Join-Path $ROOT 'assets'
 $OutFile = Join-Path $ROOT 'src\art_data.h'
 
 $TilesetPng = Join-Path $ASSETS 'Fantasy Forest\Tiles\Tileset.png'
+# The same 8x15 grid, delivered a second time with a 1px gutter around every
+# cell (137x256 = 8*16+9 by 15*16+16). Not baked from - the gutter would put a
+# +1 stride into every crop for nothing - but CHECKED against, cell for cell,
+# below. Two copies of one art set is exactly the situation where the shipped
+# one quietly stops matching the one an artist is editing, and a tileset is the
+# hardest place to notice: a wrong cell is one 16x16 square somewhere in a
+# forest. Currently identical, verified: 120 cells, 0 differing bytes.
+$TilesetPaddedPng = Join-Path $ASSETS 'Fantasy Forest\Tiles\Tileset1xPadding.png'
 $DecorPng   = Join-Path $ASSETS 'Fantasy Forest\Decorations\Decorations.png'
 $CharDir    = Join-Path $ASSETS 'Character'
 
@@ -547,6 +555,48 @@ if (-not $Quiet) { Write-Host "bake: reading sources" -ForegroundColor Cyan }
 $img = Get-PixelData $TilesetPng
 if ($img.W -ne ($TilesCols * $TILE) -or $img.H -ne ($TilesRows * $TILE)) {
     throw ("bake: tileset expected {0}x{1}, got {2}x{3}" -f ($TilesCols*$TILE), ($TilesRows*$TILE), $img.W, $img.H)
+}
+
+# PROVENANCE. Every cell baked below must be byte-identical to the same cell of
+# the padded delivery, so "the shipped tiles are the delivered tiles" is a
+# re-run rather than a promise. The gutter is 1px around and between, so cell
+# (c,r) starts at (1 + c*17, 1 + r*17) there against (c*16, r*16) here.
+#
+# Compared on all four channels including alpha: a cell whose transparency
+# moved is a cell whose SHAPE moved, and shape is what the autotile tables are
+# indexing. Reported as a count with the first offender named, rather than
+# failing on the first byte - "cell c6,r13 and 3 others differ" says an edit
+# happened to one region; "1 byte differs" could be anything.
+$imgPad = Get-PixelData $TilesetPaddedPng
+$padStep = $TILE + 1
+if ($imgPad.W -ne ($TilesCols * $padStep + 1) -or $imgPad.H -ne ($TilesRows * $padStep + 1)) {
+    throw ("bake: padded tileset expected {0}x{1}, got {2}x{3}" -f `
+        ($TilesCols*$padStep+1), ($TilesRows*$padStep+1), $imgPad.W, $imgPad.H)
+}
+$padMismatch = 0
+$padFirst = ''
+for ($r = 0; $r -lt $TilesRows; $r++) {
+    for ($c = 0; $c -lt $TilesCols; $c++) {
+        $bad = 0
+        for ($y = 0; $y -lt $TILE; $y++) {
+            $o1 = ($r * $TILE + $y) * $img.Stride + ($c * $TILE) * 4
+            $o2 = (1 + $r * $padStep + $y) * $imgPad.Stride + (1 + $c * $padStep) * 4
+            for ($k = 0; $k -lt ($TILE * 4); $k++) {
+                if ($img.B[$o1 + $k] -ne $imgPad.B[$o2 + $k]) { $bad++ }
+            }
+        }
+        if ($bad -gt 0) {
+            $padMismatch++
+            if (-not $padFirst) { $padFirst = "c{0},r{1} ({2} bytes)" -f $c, $r, $bad }
+        }
+    }
+}
+if ($padMismatch -gt 0) {
+    throw ("bake: {0} of {1} tileset cells differ between Tileset.png and Tileset1xPadding.png - first {2}. The two deliveries of this sheet have diverged; reconcile them before baking." -f `
+        $padMismatch, ($TilesCols * $TilesRows), $padFirst)
+}
+if (-not $Quiet) {
+    Write-Host ("  provenance  {0} cells identical in Tileset.png and Tileset1xPadding.png" -f ($TilesCols * $TilesRows))
 }
 $tileCount = 0
 # 28 of the 120 cells are empty, so sprite indices are NOT row*8+col - the enum

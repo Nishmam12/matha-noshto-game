@@ -554,6 +554,22 @@ typedef struct {
      * change rather than a re-argument. */
     Uint8 solid[WORLD_H][WORLD_W];
     Uint8 region[WORLD_H][WORLD_W];  /* REGION_NONE where solid or unreachable */
+    /* RENDER-ONLY, and deliberately a second array rather than a widening of
+     * the one above: which region's restoration LIGHTS a tile, as opposed to
+     * which region OWNS it for collision and reachability.
+     *
+     * They differ on exactly the tiles that cannot be walked on. `region` is
+     * filled by bfs_open, which never leaves the open tiles, so every pond and
+     * every rock - the whole border ring included - is REGION_NONE there, and a
+     * REGION_NONE tile gets no restoration contribution at all. That is why a
+     * restored area used to keep its ponds and its map edge grey while the
+     * grass around them came back to full colour: the water was not fogged, it
+     * was never eligible to be un-fogged.
+     *
+     * Derived, never authored: regions_light rebuilds it from `region` inside
+     * regions_relink, so it cannot drift from the partition. Nothing that
+     * decides what blocks her may read it - see the rule on the field above. */
+    Uint8 litreg[WORLD_H][WORLD_W];
     /* Fog. 0 = unseen and colourless, 255 = fully restored. A Uint8 rather than
      * a float: it indexes the 32-level fog LUT directly as reveal >> 3, and
      * saves 48 KB of working set at 128x128. */
@@ -1243,12 +1259,39 @@ static const short tile_dirt_fill[6] = {
     ART_TILE_C6_R1, ART_TILE_C7_R1,
     ART_TILE_C6_R2, ART_TILE_C7_R2
 };
-static const short tile_water_fill[10] = {  /* includes the lily-pad variants */
-    ART_TILE_C6_R10, ART_TILE_C7_R10,
-    ART_TILE_C6_R11, ART_TILE_C7_R11,
-    ART_TILE_C6_R12, ART_TILE_C7_R12,
-    ART_TILE_C6_R13, ART_TILE_C7_R13,
-    ART_TILE_C6_R14, ART_TILE_C7_R14
+/* OPEN WATER, and nothing else. The pond interior is water and lilies; every
+ * other thing the sheet draws on water belongs to a rim, not to a fill.
+ *
+ * The sheet's bottom-right 2x2 block is the only pure-water art in it, and it
+ * is the whole of what this table may name. Cols 6-7 of rows 10-12 read as six
+ * more open-water variants and are NOT - they are the ROCK-IN-WATER motifs that
+ * belong to the pond rim, and each carries two kinds of contamination that a
+ * base fill has no way to hide. Per-cell census of the 256 px, against the
+ * sheet's own authored ground and stone colours:
+ *
+ *     cell    land px   rock px          cell    land px   rock px
+ *     c6r10      1        11             c6r13      0         0
+ *     c7r10      1        17             c7r13      0         0
+ *     c6r11      1        21             c6r14      0         0
+ *     c7r11      1        26             c7r14      0         0
+ *     c6r12      2        38
+ *     c7r12      2        37
+ *
+ * The rock pixels are boulders sitting in open water three tiles from any bank.
+ * The land pixels are worse and are the reported bug: they are the CORNERS
+ * where the source cell's own grass/dirt surround survives the crop, so every
+ * such tile painted a grey-green notch into the middle of a pond - the same
+ * failure as a sprite carrying its authoring background, just one tile at a
+ * time. --tile-test now measures both, and rejects the six cells by name.
+ *
+ * Ten slots for four cells, so the mix is chosen rather than merely uniform:
+ * eight open-water and two lily, holding the lily rate at the 2-in-10 the ten
+ * distinct cells used to give. A pond where a third of the tiles carry a pad
+ * reads as a lily farm. */
+static const short tile_water_fill[10] = {
+    ART_TILE_C6_R13, ART_TILE_C6_R14, ART_TILE_C6_R13, ART_TILE_C7_R13,
+    ART_TILE_C6_R14, ART_TILE_C6_R13, ART_TILE_C6_R14, ART_TILE_C7_R14,
+    ART_TILE_C6_R13, ART_TILE_C6_R14
 };
 /* Grass over dirt: transparent outside, so it paints a ragged grass edge onto
  * whatever is beneath. That is why dirt is laid down first for a grass cell
@@ -1281,19 +1324,65 @@ static const short tile_rock_ring[9] = {
     ART_TILE_C3_R4, ART_NONE,       ART_TILE_C5_R4,
     ART_TILE_C3_R5, ART_TILE_C4_R5, ART_TILE_C5_R5
 };
-/* ...and what to lay under that hollow. Row 7 cols 6-7 are the only fully
- * OPAQUE cells in the sheet's rock block - stone rubble, no transparency - so
- * they are the only two that can serve as a base. Everything else in the block
- * is rim art with a transparent land side.
+/* ...and what to lay under that hollow: stone rubble, near-opaque, so an
+ * outcrop's interior is stone rather than whatever ground was laid first.
  *
- * It has to be stone rather than any ground tile. Grass under a permanently
- * solid cell reads as a clearing she should be able to walk into, and dirt -
- * tried first - reads worse still: an outcrop's interior is a hard-edged brown
- * RECTANGLE against green, because the rim art covers a rim cell only partly
- * and the fill's straight edge shows through the rest. Stone under stone is the
- * only fill whose seam with the rim art is invisible. --tile-test asserts the
- * opacity, alongside the other three base tables. */
-static const short tile_rock_fill[2] = { ART_TILE_C6_R7, ART_TILE_C7_R7 };
+ * The sheet draws this rubble TWICE - once standing in grass at rows 3-4 and
+ * once in dirt at rows 6-7 - and about a third of each cell is that ground,
+ * not stone: 84 green px of 248 opaque at c6r4, 80 brown px of 244 at c6r7.
+ * That third is not a detail. Rows 6-7 were used here while tile_rock_ring
+ * above uses the GRASS ring from rows 3-5, so every outcrop laid ~80 px of
+ * brown per cell underneath a green-margined rim, on green grass - the
+ * hard-edged brown RECTANGLE the ring comment used to describe as a reason to
+ * avoid a dirt BASE. The base was never the whole of it; the rubble carried
+ * its own dirt in.
+ *
+ * Rows 3-4 are the matching pair for the ring already in use, and the choice
+ * is not arbitrary: gt_leafy already counts GT_ROCK as leafy ground, which is
+ * the codebase saying an outcrop stands in grass. The grass_edge pass then
+ * draws the real grass/dirt boundary onto any rock cell that touches dirt, so
+ * an outcrop at the edge of a path still transitions properly without this
+ * table needing a second context. They are also slightly MORE opaque than the
+ * cells they replace - 8 and 10 transparent px against 12 and 11 - so the
+ * underlay's own job is unaffected. --tile-test asserts that opacity, and now
+ * also asserts that the rubble and the ring agree on their ground. */
+static const short tile_rock_fill[2] = { ART_TILE_C6_R4, ART_TILE_C7_R4 };
+
+/* The map's edge, which is a CLIFF and not an outcrop - see world_border.
+ *
+ * The two side-rim cells of the same grass-context block, and they are the
+ * right ones for a measured reason rather than a felt one. Counting the sheet's
+ * own stone colours over each candidate cell, out of 256:
+ *
+ *     cell            opaque   dark   light   grass    role
+ *     c6r4 / c7r4      248/246  101/113  63/51  84/82   the outcrop BODY
+ *     c4r5 (S rim)     243       60      99     84
+ *     c3r4 (W rim)     139       68      31     40
+ *     c5r4 (E rim)     139      101       0     38
+ *     c4r3 (N rim)      78        6       0     72
+ *
+ * where "dark" is the cool stone (76,48,52 / 49,19,33 / 69,77,89) and "light"
+ * the warm highlight (125,85,85 / 175,144,116). The body cells are half again
+ * as wide and carry two to three times the pale highlight, which is exactly
+ * what made the border read as a broad beige band instead of a dark ridge -
+ * measured against the reference render, whose edge column is 63% grass with a
+ * thin cool seam through it and almost no light stone at all.
+ *
+ * c5r4 is the ONE cell that is both properties at once: 101 dark px, zero pale,
+ * and 139 of 256 covered - comfortably over SOLID_MIN_OBSTACLE_PX, so the edge
+ * stays visibly solid and --tile-test's invisible-wall check is not being
+ * traded away for a thinner line.
+ *
+ * Both slots hold it, and that is a finding rather than a shortcut. The first
+ * version of this table paired c5r4 with the W rim c3r4 for variety, and the
+ * pale-highlight check rejected c3r4 on its 31 pale pixels - the same defect
+ * this table exists to fix, at a fifth the dose, which is exactly the sort of
+ * thing an eye approves and a measurement does not. The N rim is out on the
+ * other property: 78 px is under the coverage floor and 72 of them are grass,
+ * so a top border drawn from it would be a wall made mostly of meadow. A second
+ * dark cell can take slot 1 whenever the sheet gains one; until then the edge
+ * of the world reads as one continuous cliff face, which is what it is. */
+static const short tile_rock_cliff[2] = { ART_TILE_C5_R4, ART_TILE_C5_R4 };
 
 /* ---- Underworld tile tables -----------------------------------------------
  *
@@ -1433,19 +1522,27 @@ typedef struct {
     const short *water_edge;
     const short *rock_ring;
     const short *rock_fill;
+    /* What the map's edge ring is drawn from, as distinct from an outcrop.
+     * Underworld and Lumiara point theirs back at rock_fill: both of those
+     * fills measure 0 transparent px, so their edges already read as unbroken
+     * wall and there is nothing for a separate cliff table to improve. Forest
+     * is the biome whose outcrop art is a rim around a hollow, and therefore
+     * the only one where "edge of the world" and "lump of stone" need to be
+     * drawn differently. */
+    const short *rock_cliff;
 } TileSet;
 
 static const TileSet TILESET_FOREST = {
     tile_grass_base, tile_dirt_fill, tile_water_fill, tile_grass_edge, tile_olive_edge,
-    tile_water_cap, tile_water_edge, tile_rock_ring, tile_rock_fill
+    tile_water_cap, tile_water_edge, tile_rock_ring, tile_rock_fill, tile_rock_cliff
 };
 static const TileSet TILESET_UNDERWORLD = {
     tile_uw_ground_base, tile_uw_dirt_fill, tile_uw_water_fill, tile_uw_grass_edge, tile_uw_olive_edge,
-    tile_uw_water_cap, tile_uw_water_edge, tile_uw_rock_ring, tile_uw_rock_fill
+    tile_uw_water_cap, tile_uw_water_edge, tile_uw_rock_ring, tile_uw_rock_fill, tile_uw_rock_fill
 };
 static const TileSet TILESET_LUMIARA = {
     tile_lum_ground_base, tile_lum_dirt_fill, tile_lum_water_fill, tile_lum_grass_edge, tile_lum_olive_edge,
-    tile_lum_water_cap, tile_lum_water_edge, tile_lum_rock_ring, tile_lum_rock_fill
+    tile_lum_water_cap, tile_lum_water_edge, tile_lum_rock_ring, tile_lum_rock_fill, tile_lum_rock_fill
 };
 
 static const TileSet *tileset_for(Uint8 biome)
@@ -1478,6 +1575,19 @@ static int blob_slice(int n_same, int s_same, int e_same, int w_same)
  * dirt edge. This predicate is the one place that decision lives. */
 static int gt_leafy(int t) { return t == GT_GRASS || t == GT_OLIVE || t == GT_ROCK; }
 
+/* The forced one-tile ring at the edge of the map (see world_stub).
+ *
+ * It is GT_ROCK like an outcrop and it is drawn nothing like one, which is why
+ * this is a predicate rather than a terrain test. An outcrop is a lump of stone
+ * standing IN the meadow and is drawn as a rim around a hollow; the border is
+ * the edge of the world, a continuous cliff face with nothing behind it. Given
+ * outcrop art it came out as a wide band of pale rubble - the "wrong rock" - so
+ * the two are drawn from different tables, and only this says which is which. */
+static int world_border(int tx, int ty)
+{
+    return tx == 0 || ty == 0 || tx == WORLD_W - 1 || ty == WORLD_H - 1;
+}
+
 /* Is this cell surrounded on all four axes by its own material?
  *
  * That is exactly blob_slice's CENTRE index, and the centre is the one slice
@@ -1490,6 +1600,7 @@ static int blob_interior(const World *w, int tx, int ty, int t)
     return terr_at(w, tx - 1, ty) == t && terr_at(w, tx + 1, ty) == t &&
            terr_at(w, tx, ty - 1) == t && terr_at(w, tx, ty + 1) == t;
 }
+
 
 /* ---- Collision ----------------------------------------------------------
  *
@@ -1688,13 +1799,64 @@ static void bfs_open(const World *w, const int *sources, int nsrc,
     }
 }
 
+/* Which region's restoration lights each tile - see World.litreg.
+ *
+ * One multi-source BFS seeded from every tile that already HAS a region,
+ * expanding into the REGION_NONE ones, so each of those takes the label of the
+ * nearest owned tile. A pond's middle gets the region of its nearest bank; a
+ * border-ring tile gets the region of the land just inside it.
+ *
+ * Nearest-owned rather than "any neighbour that has one", because a pond is
+ * wider than one tile: the middle of the pond in the reported screenshot is
+ * four tiles from the nearest bank, so a neighbour test would have lit its rim
+ * and left its centre grey - a worse artifact than the uniform grey it
+ * replaced. A BFS costs one pass and is right at any size.
+ *
+ * Tiles that already have a region keep it, unchanged: this only ever fills in
+ * the gaps, so on the walkable map litreg and region are the same array. */
+static void regions_light(World *w, Scratch *sc)
+{
+    int *dist = sc->dist, *queue = sc->queue;
+    int head = 0, tail = 0, i;
+
+    for (i = 0; i < WORLD_W * WORLD_H; i++) {
+        Uint8 r = w->region[i / WORLD_W][i % WORLD_W];
+        w->litreg[i / WORLD_W][i % WORLD_W] = r;
+        dist[i] = (r == REGION_NONE) ? -1 : 0;
+        if (r != REGION_NONE)
+            queue[tail++] = i;
+    }
+    while (head < tail) {
+        static const int dx[4] = { 1, -1, 0, 0 };
+        static const int dy[4] = { 0, 0, 1, -1 };
+        int idx = queue[head++];
+        int x = idx % WORLD_W, y = idx / WORLD_W, d;
+        for (d = 0; d < 4; d++) {
+            int nx = x + dx[d], ny = y + dy[d], n;
+            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H) continue;
+            n = ny * WORLD_W + nx;
+            if (dist[n] >= 0) continue;
+            /* Unlike tile_neighbours this walks THROUGH solid tiles - reaching
+             * them is the entire purpose. Nothing here writes solid[][] or
+             * region[][], so collision cannot be affected by it. */
+            dist[n] = dist[idx] + 1;
+            w->litreg[ny][nx] = w->litreg[y][x];
+            queue[tail++] = n;
+        }
+    }
+}
+
 /* Derive each region's tile count and the adjacency graph from region[][].
  *
  * Split out of regions_build because the gate ridges below cut tiles OUT of the
  * partition after it is built, and the graph has to be re-derived from what is
  * left. Two copies of this loop would be two definitions of "which regions
- * touch", and the whole gating proof rests on that answer being one thing. */
-static void regions_relink(World *w)
+ * touch", and the whole gating proof rests on that answer being one thing.
+ *
+ * The lighting labels are rebuilt here for exactly that reason: this is the one
+ * place the partition is re-derived, so hanging litreg off it is what keeps the
+ * two from ever describing different maps. */
+static void regions_relink(World *w, Scratch *sc)
 {
     int x, y, i;
 
@@ -1729,6 +1891,7 @@ static void regions_relink(World *w)
             }
         }
     }
+    regions_light(w, sc);
 }
 
 /* Farthest-point sampling on PATH distance, not straight-line distance: the
@@ -1751,8 +1914,11 @@ static void regions_build(World *w, Scratch *sc)
     }
     for (y = 0; y < WORLD_H; y++)
         for (x = 0; x < WORLD_W; x++)
-            w->region[y][x] = REGION_NONE;
+            w->region[y][x] = w->litreg[y][x] = REGION_NONE;
 
+    /* A world with no spawn has no partition, so it has no lighting labels
+     * either - both arrays are already cleared above, which is what
+     * tile_level's REGION_NONE branch expects. */
     if (w->spawn_tile < 0) { w->region_count = 0; w->spawn_region = -1; return; }
     sources[nsrc++] = w->spawn_tile;
 
@@ -1772,7 +1938,7 @@ static void regions_build(World *w, Scratch *sc)
     for (y = 0; y < WORLD_H; y++)
         for (x = 0; x < WORLD_W; x++)
             w->region[y][x] = sc->owner[y * WORLD_W + x];
-    regions_relink(w);
+    regions_relink(w, sc);
     w->spawn_region = w->region[w->spawn_tile / WORLD_W][w->spawn_tile % WORLD_W];
 }
 
@@ -2356,7 +2522,13 @@ static void reveal_around(World *w, float px, float py, float dt)
 /* The fog level a tile renders at: 0..FOG_LEVELS-1. */
 static int tile_level(const World *w, int tx, int ty)
 {
-    Uint8 rg = w->region[ty][tx];
+    /* litreg, NOT region: a pond and the map's rock edge are solid, so they are
+     * REGION_NONE in the collision partition and would take no restoration at
+     * all. Reading the LIGHTING label instead is what lets a restored area
+     * bring its water and its cliffs back with the grass, rather than leaving
+     * them pinned at the sight ceiling looking permanently fogged. See
+     * World.litreg. */
+    Uint8 rg = w->litreg[ty][tx];
     int sight = w->reveal[ty][tx];
     int restored = 0;
 
@@ -2419,6 +2591,41 @@ static void apply_restore(World *w, Entity *ents, Player *p, int i,
 #define LAT3_W 49   /* fine: ~2.6 tiles per cell, so boundaries wobble at tile scale */
 #define LAT3_H 49
 
+/* ---- Why rock is a threshold and not a ridge ------------------------------
+ *
+ * MEASURED AND REJECTED, recorded so the next person does not re-run it.
+ *
+ * The mockup's stone reads as thin winding seams, one tile across, curving
+ * around open grass; a one-sided threshold on a smooth field gives the whole
+ * cap of a hill in that field, which is a compact blob. The obvious fix is to
+ * make rock a BAND between two nearby contours - a level set has the right
+ * shape by construction - and it does not work here. Six (band, octave-mix)
+ * combinations were generated and looked at; none produced a seam. Two
+ * findings, both from the census a few lines below:
+ *
+ *     rock field            ground rock%   enclosed%   LONE%
+ *     rk > 0.751 (shipped)       8.4          13.9       0.9
+ *     0.751 < rk < 0.800         6.1           0.9       8.9
+ *
+ * A "lone" cell is an outcrop tile with no rock neighbour at all, and the band
+ * multiplies them by ten. That is not a cosmetic count: the rock ring has no
+ * art for one tile of stone, so it draws the blob's top-left CORNER - 12 px of
+ * rim - over a full rubble square, and the cell reads as a solid block with no
+ * edge sitting on open grass. It is the same defect the pond's 2x2 rule exists
+ * to prevent for water, and the band trades the chunky-blob look for about 710
+ * of them per eight worlds.
+ *
+ * The deeper reason is that the ART cannot draw a seam whatever the terrain
+ * does. tile_rock_ring is a 3x3 blob set for a compact outcrop with a hollow
+ * middle, and tile_rock_fill covers every rock cell to within ~10 px, so a
+ * one-tile-wide ridge renders as a CHAIN OF SOLID BLOCKS no matter how
+ * elegantly the field was cut. Getting the mockup's seams needs ridge art -
+ * end caps and curved connectors - that this sheet does not contain; it is an
+ * art request, not a generation parameter.
+ *
+ * So the threshold stays, and the census below now reports enclosed and lone
+ * so any future attempt at this can be judged in one run instead of six. */
+
 static void world_stub(World *w, Uint64 seed)
 {
     float lat_olive[LAT2_W * LAT2_H];
@@ -2470,7 +2677,7 @@ static void world_stub(World *w, Uint64 seed)
              * are never covered by canopy while grass often is, so water reads
              * larger on screen than its share of tiles. */
             if (wt < 0.252f)      t = GT_WATER;  /* low-frequency: rounded ponds */
-            else if (rk > 0.751f) t = GT_ROCK;   /* outcrops; Climb terrain later */
+            else if (rk > 0.751f) t = GT_ROCK;   /* outcrops; see the note above */
             else if (o > 0.690f)  t = GT_OLIVE;
             w->terr[y][x] = (Uint8)t;
 
@@ -2577,6 +2784,15 @@ static void world_stub(World *w, Uint64 seed)
         w->solid[y][0] = 1;              w->terr[y][0] = GT_ROCK;
         w->solid[y][WORLD_W - 1] = 1;    w->terr[y][WORLD_W - 1] = GT_ROCK;
     }
+
+    /* No partition yet - regions_build is a separate step, and several tests
+     * deliberately stop here. Clearing both label arrays makes that a DEFINED
+     * state rather than whatever the buffer held: tile_level reads one of them
+     * on every tile it draws, and an uninitialised byte there indexes
+     * regions[] with a value up to 255 against an array of REGION_COUNT. */
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++)
+            w->region[y][x] = w->litreg[y][x] = REGION_NONE;
 }
 
 /* Pick the spawn: the centre-most tile of the LARGEST open component. Largest
@@ -2665,7 +2881,7 @@ static int gate_try(World *w, Scratch *sc, Rng *rng, Entity *ents, Uint64 seed)
 {
     gate_ridges(w, seed);
     gate_repair(w);
-    regions_relink(w);
+    regions_relink(w, sc);
     if (!regions_intact(w, sc))
         return 0;
     place_entities(w, rng, ents);
@@ -2778,6 +2994,51 @@ static const short art_bushes[]    = { ART_BUSH_LARGE_A, ART_BUSH_LARGE_B,
 static const short art_logs[]      = { ART_LOG_A, ART_LOG_B };
 static const short art_rocks[]     = { ART_ROCK_A, ART_ROCK_B, ART_ROCK_C };
 static const short art_stones[]    = { ART_STONE_A, ART_STONE_B, ART_STONE_C, ART_PEBBLES };
+/* ---- Ground context ------------------------------------------------------
+ *
+ * Decorations.png draws its rocks and stones THREE TIMES over: once standing
+ * in grass, once in dirt, and once with no ground under them at all. The three
+ * share an identical stone body - measured, the pixel histograms of the rock
+ * itself are the same to the pixel - and differ ONLY in the skirt of ground
+ * around the base. Which one is correct is therefore not a matter of variety
+ * at all; it is decided entirely by what the tile under it is.
+ *
+ * Picking among them by hash, which is what the flat tables above do, put a
+ * grass-skirted boulder on bare dirt and a dirt-skirted one on grass, roughly
+ * two times in three. That is the same class of bug as a sprite carrying its
+ * authoring background into the frame: the art is right and the placement is
+ * wrong. Measured skirt pixels, against the sheet's own ground colours:
+ *
+ *     ROCK_A   37 green    0 brown      STONE_A   19 green    0 brown
+ *     ROCK_B    0 green   49 brown      STONE_B    0 green   24 brown
+ *     ROCK_C    0 green    0 brown      STONE_C     0 green    0 brown
+ *                                       PEBBLES     0 green    0 brown
+ *
+ * PEBBLES has no skirt either, so it stays available on every ground rather
+ * than being reserved to one - it is the only variety left once the skirt is
+ * no longer free to vary.
+ *
+ * GC_BARE is GT_ROCK: outcrop interiors, and the map's border ring. Both are
+ * permanently solid and neither has soil in it, so the skirtless variant is the
+ * only one that does not paint a patch of ground she can never stand on. */
+enum { GC_GREEN = 0, GC_BROWN, GC_BARE, GC_COUNT };
+
+static int ground_class(int t)
+{
+    if (t == GT_DIRT) return GC_BROWN;
+    /* Rock and water both mean "no soil here". Water never carries a prop -
+     * prop_at returns PROP_NONE on it - but answering for it anyway keeps this
+     * a total function of GT_*, so a later caller cannot fall off the end. */
+    if (t == GT_ROCK || t == GT_WATER) return GC_BARE;
+    return GC_GREEN;   /* GT_GRASS, GT_OLIVE - olive is grass, see gt_leafy */
+}
+
+static const short art_rocks_green[]  = { ART_ROCK_A };
+static const short art_rocks_brown[]  = { ART_ROCK_B };
+static const short art_rocks_bare[]   = { ART_ROCK_C };
+static const short art_stones_green[] = { ART_STONE_A, ART_PEBBLES };
+static const short art_stones_brown[] = { ART_STONE_B, ART_PEBBLES };
+static const short art_stones_bare[]  = { ART_STONE_C, ART_PEBBLES };
 static const short art_mushrooms[] = { ART_MUSHROOM_BIG_A, ART_MUSHROOM_BIG_B, ART_MUSHROOM_BIG_C,
                                        ART_MUSHROOM_MED_A, ART_MUSHROOM_MED_B, ART_MUSHROOM_MED_C,
                                        ART_MUSHROOM_TINY_A, ART_MUSHROOM_TINY_B, ART_MUSHROOM_TINY_C };
@@ -2832,7 +3093,30 @@ static const PropArt prop_art[BIOME_COUNT][PROP_COUNT] = {
         PA(art_stones_lum), PA(art_mushrooms_lum), PA(art_tufts_lum), PA(art_reeds_lum)
     }
 };
+
+/* Two rows, not a sparse PROP_COUNT one: rock and stone are the only slots
+ * whose art was authored per ground, and a table that was NULL in eight rows
+ * out of ten would be mostly a claim that nothing else needs this. */
+static const PropArt prop_art_ground[2][GC_COUNT] = {
+    { PA(art_rocks_green),  PA(art_rocks_brown),  PA(art_rocks_bare)  },   /* PROP_ROCK */
+    { PA(art_stones_green), PA(art_stones_brown), PA(art_stones_bare) }    /* PROP_STONE */
+};
 #undef PA
+
+/* The ground-context art for a slot, or NULL where there is none.
+ *
+ * Forest only. Underworld's rocks stand on cave floor and Lumiara's monoliths
+ * on dream cobble - neither sheet was drawn with a ground skirt at all, so
+ * there is no second variant to choose and nothing here to decide. Returning
+ * NULL rather than a one-entry table says that, instead of dressing "there is
+ * only one" up as a choice. */
+static const PropArt *prop_ground_art(int biome, int kind, int gc)
+{
+    if (biome != BIOME_FOREST) return NULL;
+    if (kind == PROP_ROCK)  return &prop_art_ground[0][gc];
+    if (kind == PROP_STONE) return &prop_art_ground[1][gc];
+    return NULL;
+}
 
 /* ---- Prop density normalisation -------------------------------------------
  *
@@ -3160,7 +3444,15 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
     if (ty1 > WORLD_H) ty1 = WORLD_H;
 
     /* Ground. A leafy cell that touches dirt lays DIRT down, so the grass
-     * overlay in the next pass can supply the ragged boundary. */
+     * overlay in the next pass can supply the ragged boundary.
+     *
+     * GT_ROCK takes the leafy path with everything else gt_leafy names, rather
+     * than the dirt one it used to share with GT_DIRT. An outcrop stands IN
+     * grass - that is what gt_leafy has always said, and what the grass ring
+     * and grass rubble in the tile tables above are drawn for - so laying
+     * earth under it contradicted its own art. It matters in Forest only:
+     * Underworld's and Lumiara's rock fills measure 0 transparent px, so no
+     * base under a rock cell is ever visible in those biomes either way. */
     for (ty = ty0; ty < ty1; ty++) {
         for (tx = tx0; tx < tx1; tx++) {
             int t = w->terr[ty][tx];
@@ -3172,12 +3464,7 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
             int dirt = ts->dirt_fill[h % 6u];
             int id;
 
-            if (t == GT_DIRT || t == GT_ROCK) {
-                /* Earth under the rubble, never grass: the rubble carries a
-                 * dozen transparent pixels and its own margins are dirt-brown,
-                 * so on grass those pixels showed as a green seam ruled along
-                 * every tile edge inside the outcrop. On earth they disappear
-                 * into what the art is already drawing. */
+            if (t == GT_DIRT) {
                 id = dirt;
             } else if (t == GT_WATER) {
                 /* ONLY the interior of a pond gets the opaque water fill.
@@ -3222,8 +3509,9 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
              * base they left 57 px of the screen unpainted, which is what
              * --tile-test's coverage check reported. */
             if (t == GT_ROCK)
-                draw_sprite(fb, ts->rock_fill[(h >> 4) & 1u], sx, sy,
-                            tile_level(w, tx, ty));
+                draw_sprite(fb, (world_border(tx, ty) ? ts->rock_cliff
+                                                      : ts->rock_fill)[(h >> 4) & 1u],
+                            sx, sy, tile_level(w, tx, ty));
 
             /* Scattered ground detail over the opaque base, on interior grass
              * only: a dirt-adjacent cell gets its grass from the edge overlay
@@ -3278,6 +3566,13 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
         for (tx = tx0; tx < tx1; tx++) {
             int sx = tx * TILE - cam_x, sy = ty * TILE - cam_y;
             if (w->terr[ty][tx] != GT_ROCK)
+                continue;
+            /* The border ring already drew its cliff and must NOT take an
+             * outcrop rim on top of it. The rim it would be handed is the
+             * blob's NORTH slice, which is 78 px of which 72 are grass - so a
+             * ring pass here would paint meadow back over the top edge of the
+             * world. */
+            if (world_border(tx, ty))
                 continue;
             {
                 int s = blob_slice(terr_at(w, tx, ty - 1) == GT_ROCK,
@@ -3384,6 +3679,18 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
              * this tile" - only whether it is DRAWN is biome-scaled. */
             if (((h >> 14) & 63u) >= (Uint32)prop_keep[w->biome][kind])
                 continue;
+            /* Ground context decides WHICH rock, once the rolls above have
+             * decided whether there is one. Swapped in strictly AFTER the
+             * presence roll and the density thin, and never before them, so
+             * Forest's placement is bit-identical to what it was - and with it
+             * --mockup-test's pixel census, which is calibrated on Forest art.
+             * Only the sprite drawn on an already-chosen tile changes. */
+            {
+                const PropArt *gpa = prop_ground_art(w->biome, kind,
+                                                     ground_class(w->terr[ty][tx]));
+                if (gpa && gpa->n > 0)
+                    pa = gpa;
+            }
             /* Bits 24+ for the variant: the low bits already chose presence,
              * and reusing them would correlate which tree with whether a tree. */
             art = pa->ids[(h >> 24) % (Uint32)pa->n];
@@ -4395,6 +4702,88 @@ static int sprite_transparent_px(const ArtSprite *sp)
 }
 
 
+/* ---- Authored ground colours, and counting them -------------------------
+ *
+ * The Fantasy Forest sheets say what ground a piece of art was drawn ON in the
+ * only way a flat-shaded pixel sheet can: the ground colour is literally in the
+ * sprite, around its base or in the corners the crop did not remove. That makes
+ * "is this the right art for this ground" a MEASURABLE question rather than an
+ * aesthetic one, which is the entire reason these tables exist.
+ *
+ * Taken from Tileset.png's own base fills, not from a palette picker: the three
+ * greens are the bright grass, dark grass and dark olive of tile_grass_base and
+ * tile_olive_edge, and the two browns are tile_dirt_fill's two shades.
+ *
+ * The stone list is deliberately SHORT of the full rock palette. 175,144,116 is
+ * the lightest stone highlight AND the lily flower's petal highlight - three
+ * pixels of it sit in ART_TILE_C7_R13, which is open water - so including it
+ * would make a lily read as a boulder. The four below appear in rock art and
+ * nowhere else in this sheet, measured. */
+typedef struct { unsigned char r, g, b; } ArtRGB;
+
+static const ArtRGB forest_green_rgb[3] = {
+    { 163, 179,  21 }, { 112, 128,  26 }, { 75, 67, 23 }
+};
+static const ArtRGB forest_brown_rgb[2] = {
+    { 164,  97,  43 }, { 122,  63,  32 }
+};
+static const ArtRGB forest_stone_rgb[4] = {
+    {  76,  48,  52 }, { 125,  85,  85 }, { 49, 19, 33 }, { 69, 77, 89 }
+};
+/* The PALE warm highlight of the same stone, split out because it is what
+ * separates the outcrop's sunlit body from a cliff face in shadow. The
+ * reference render's map edge is almost entirely free of these two, and the
+ * band that replaced it was full of them - so this is the measurable form of
+ * "the wrong rock asset is on the border". */
+static const ArtRGB forest_palestone_rgb[2] = {
+    { 125,  85,  85 }, { 175, 144, 116 }
+};
+
+/* Decode a sprite and count how many pixels carry one of the listed colours.
+ *
+ * Resolves colour -> palette index once per call and then compares indices, so
+ * the inner loop stays a table lookup. A colour the global palette does not
+ * contain matches nothing, which is the honest answer: no sprite can be drawing
+ * it. Palette entry k is sprite index k+1 - index 0 is transparent and is not
+ * stored (see fogpal_build, which makes the same +1 step). */
+static int sprite_colour_px(const ArtSprite *sp, const ArtRGB *cols, int n)
+{
+    unsigned char want[256];
+    unsigned int i = sp->data_off, end = sp->data_off + sp->data_len;
+    int total = (int)sp->w * (int)sp->h;
+    int seen = 0, hits = 0, k;
+
+    SDL_memset(want, 0, sizeof want);
+    for (k = 0; k < n; k++) {
+        int p;
+        for (p = 0; p < ART_PAL_N && p < 255; p++) {
+            if (ART_PAL[p * 3] == cols[k].r && ART_PAL[p * 3 + 1] == cols[k].g &&
+                ART_PAL[p * 3 + 2] == cols[k].b) {
+                want[p + 1] = 1;
+                break;
+            }
+        }
+    }
+    if (end > ART_DATA_BYTES) return -1;
+    while (i < end && seen < total) {
+        unsigned int c = ART_DATA[i++], count, j;
+        if (c >= 0x80) {
+            count = (c & 0x7Fu) + 1u;
+            if (i + count > end) break;
+            for (j = 0; j < count && seen < total; j++, seen++)
+                if (want[ART_DATA[i + j]]) hits++;
+            i += count;
+        } else {
+            count = c + 1u;
+            if (i >= end) break;
+            for (j = 0; j < count && seen < total; j++, seen++)
+                if (want[ART_DATA[i]]) hits++;
+            i++;
+        }
+    }
+    return hits;
+}
+
 /* Strict validator, self-test only. Where the shipping decoder CLAMPS so that
  * corrupt data degrades into a visible hole, this REJECTS, and demands exact
  * agreement: a stream must decode to precisely w*h pixels and consume precisely
@@ -5200,7 +5589,7 @@ static int gating_selftest(int seeds, Uint64 base)
             /* The same two steps, in the same order, that gate_try runs. */
             gate_ridges(w, seed);
             gate_repair(w);
-            regions_relink(w);
+            regions_relink(w, sc);
             n = gate_unexplained(w);
             after += n;
             if (n) seeds_bad++;
@@ -5646,6 +6035,50 @@ static int mockup_selftest(void)
     return fails;
 }
 
+/* ---- Rock/stone ground context, measured off the art ---------------------
+ *
+ * Which ground a Forest rock sprite was DRAWN for, read from its own pixels:
+ * a green skirt and no brown means grass art, brown and no green means dirt
+ * art, neither means the skirtless variant. -1 for anything that is not one of
+ * the seven, -2 for a sprite carrying both (which would mean the sheet changed
+ * under us and the whole classification needs re-deriving).
+ *
+ * MEASURED rather than looked up, deliberately. A test that asked
+ * prop_ground_art which ground its own entries were for would agree with
+ * itself no matter what was in the table; asking the PIXELS makes the check an
+ * independent second opinion, and the two only agree if the table is right.
+ *
+ * Cached because sprite_colour_px decodes a whole sprite and the sweep below
+ * asks this tens of thousands of times. */
+static int prop_skirt_class(int art)
+{
+    static const short ids[7] = { ART_ROCK_A, ART_ROCK_B, ART_ROCK_C,
+                                  ART_STONE_A, ART_STONE_B, ART_STONE_C, ART_PEBBLES };
+    static int cached[7];
+    static int ready;
+    int i;
+
+    if (!ready) {
+        for (i = 0; i < 7; i++) {
+            const ArtSprite *sp = &ART_SPRITES[ids[i]];
+            int green = sprite_colour_px(sp, forest_green_rgb, 3);
+            int brown = sprite_colour_px(sp, forest_brown_rgb, 2);
+            cached[i] = (green > 0 && brown > 0) ? -2
+                      : (green > 0) ? GC_GREEN
+                      : (brown > 0) ? GC_BROWN : GC_BARE;
+        }
+        ready = 1;
+    }
+    for (i = 0; i < 7; i++)
+        if (ids[i] == art) return cached[i];
+    return -1;
+}
+
+/* A SKIRTED sprite has to match its ground exactly. A skirtless one is safe on
+ * any ground, which is precisely what lets PEBBLES stay in all three tables
+ * instead of needing two variants that do not exist. */
+static int prop_skirt_ok(int skirt, int gc) { return skirt == GC_BARE || skirt == gc; }
+
 /* The y-sort and the prop-ghosting predicate. */
 static int sort_selftest(void)
 {
@@ -5694,6 +6127,54 @@ static int sort_selftest(void)
             printf("sort    : negative control - order-blind cover test misses %d of %d cases\n",
                    bad, (int)(sizeof cases / sizeof *cases));
         }
+    }
+
+    /* STRUCTURAL: every entry of every ground-context table must actually be
+     * art for that ground, measured off the sprite rather than asserted. */
+    {
+        int gc, slot, k, wrong = 0, ctl = 0;
+        for (gc = 0; gc < GC_COUNT; gc++) {
+            for (slot = 0; slot < 2; slot++) {
+                const PropArt *pa = prop_ground_art(BIOME_FOREST,
+                                                    slot == 0 ? PROP_ROCK : PROP_STONE, gc);
+                if (!pa || pa->n <= 0) {
+                    printf("  ground table for class %d slot %d is empty\n", gc, slot);
+                    fails++;
+                    continue;
+                }
+                for (k = 0; k < pa->n; k++) {
+                    int skirt = prop_skirt_class(pa->ids[k]);
+                    if (!prop_skirt_ok(skirt, gc)) {
+                        printf("  ground class %d entry %d (sprite %d) is %s art\n",
+                               gc, k, pa->ids[k],
+                               skirt == GC_GREEN ? "grass" : skirt == GC_BROWN ? "dirt"
+                             : skirt == -2 ? "mixed-skirt" : "unclassifiable");
+                        fails++;
+                        wrong++;
+                    }
+                }
+            }
+        }
+        /* Negative control: the flat tables this replaced held all three
+         * variants at once, so on any given ground two thirds of what they
+         * could return was art for a DIFFERENT ground. If the predicate cannot
+         * see that, it is not measuring anything. */
+        for (gc = 0; gc < GC_COUNT; gc++) {
+            for (k = 0; k < (int)(sizeof art_rocks / sizeof *art_rocks); k++)
+                if (!prop_skirt_ok(prop_skirt_class(art_rocks[k]), gc)) ctl++;
+            for (k = 0; k < (int)(sizeof art_stones / sizeof *art_stones); k++)
+                if (!prop_skirt_ok(prop_skirt_class(art_stones[k]), gc)) ctl++;
+        }
+        if (ctl == 0) {
+            printf("  ground-context negative control FAILED: the old flat rock"
+                   " tables measured as correct on every ground\n");
+            fails++;
+        } else {
+            printf("sort    : negative control - the flat rock/stone tables offer"
+                   " %d wrong-ground sprites across the 3 grounds\n", ctl);
+        }
+        if (!wrong)
+            printf("sort    : every ground-context rock/stone entry matches its ground\n");
     }
 
     dl = (DrawList *)SDL_malloc(sizeof(DrawList));
@@ -5753,14 +6234,21 @@ static int sort_selftest(void)
     {
         World *w = (World *)SDL_malloc(sizeof(World));
         int worst = 0, s, samples = 0;
+        /* Ground-context tallies, gathered over the same sweep: every rock and
+         * stone actually placed by props_build, checked against the terrain it
+         * was placed on. The structural check above proves the TABLES are
+         * right; this proves they are what the renderer reaches. */
+        long rocks_seen = 0, rocks_bad = 0, rocks_ctl = 0;
         if (w) {
             Player p;
             SDL_zero(p);
             for (s = 0; s < 8; s++) {
                 int cx, cy;
                 world_stub(w, (Uint64)(s + 1));
+                w->biome = BIOME_FOREST;
                 for (cy = 0; cy + LOGICAL_H < WORLD_H * TILE; cy += 61) {
                     for (cx = 0; cx + LOGICAL_W < WORLD_W * TILE; cx += 67) {
+                        int k;
                         p.x = (float)(cx + LOGICAL_W / 2);
                         p.y = (float)(cy + LOGICAL_H / 2);
                         props_build(LOGICAL_W, LOGICAL_H, w, (Uint64)(s + 1),
@@ -5773,11 +6261,64 @@ static int sort_selftest(void)
                             fails++;
                             s = 8; cy = WORLD_H * TILE; break;
                         }
+                        for (k = 0; k < dl->n; k++) {
+                            int skirt = prop_skirt_class(dl->item[k].art);
+                            int tx, ty, gc;
+                            if (skirt == -1) continue;   /* not a rock or a stone */
+                            /* Invert props_build's own placement to recover the
+                             * tile: x = tx*TILE + TILE/2 - cam_x, y = ty*TILE +
+                             * TILE - cam_y. */
+                            tx = (dl->item[k].x + cx - TILE / 2) / TILE;
+                            ty = (dl->item[k].y + cy - TILE) / TILE;
+                            if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H)
+                                continue;
+                            gc = ground_class(w->terr[ty][tx]);
+                            rocks_seen++;
+                            if (!prop_skirt_ok(skirt, gc)) {
+                                if (rocks_bad == 0)
+                                    printf("  seed %d tile %d,%d is ground class %d but"
+                                           " carries sprite %d (%s art)\n",
+                                           s + 1, tx, ty, gc, dl->item[k].art,
+                                           skirt == GC_GREEN ? "grass" : "dirt");
+                                rocks_bad++;
+                            }
+                            /* Negative control on the SAME placements: what the
+                             * old ground-blind pick would have drawn here. */
+                            {
+                                Uint32 h = tile_hash((Uint64)(s + 1), tx, ty);
+                                const short *old = (skirt >= 0 &&
+                                    (dl->item[k].art == ART_ROCK_A ||
+                                     dl->item[k].art == ART_ROCK_B ||
+                                     dl->item[k].art == ART_ROCK_C)) ? art_rocks : art_stones;
+                                int on = (old == art_rocks)
+                                       ? (int)(sizeof art_rocks / sizeof *art_rocks)
+                                       : (int)(sizeof art_stones / sizeof *art_stones);
+                                if (!prop_skirt_ok(prop_skirt_class(old[(h >> 24) % (Uint32)on]), gc))
+                                    rocks_ctl++;
+                            }
+                        }
                     }
                 }
             }
             printf("sort    : worst case %d of %d draw slots over %d camera positions\n",
                    worst, DRAW_MAX, samples);
+            if (rocks_seen == 0) {
+                printf("  ground-context sweep saw no rocks at all - the check"
+                       " proved nothing\n");
+                fails++;
+            } else if (rocks_bad) {
+                printf("  %ld of %ld placed rocks/stones carry the wrong ground\n",
+                       rocks_bad, rocks_seen);
+                fails++;
+            } else if (rocks_ctl == 0) {
+                printf("  ground-context negative control FAILED: the old"
+                       " ground-blind pick was right on all %ld placements\n", rocks_seen);
+                fails++;
+            } else {
+                printf("sort    : %ld placed rocks/stones all match their ground;"
+                       " the old ground-blind pick got %ld of them wrong\n",
+                       rocks_seen, rocks_ctl);
+            }
         }
         SDL_free(w);
     }
@@ -5987,9 +6528,14 @@ static int solid_obstacle_px(const World *w, int tx, int ty, int with_fill)
     }
     if (t == GT_ROCK) {
         int ring;
-        /* Mirrors the renderer: the underlay goes under every rock cell. */
+        /* Mirrors the renderer: the underlay goes under every rock cell, and
+         * the border ring takes the cliff table instead of the outcrop one.
+         * If this stopped mirroring it, the invisible-wall check would be
+         * measuring a tile the screen never shows. */
         if (with_fill)
-            return 256 - sprite_transparent_px(&ART_SPRITES[ts->rock_fill[0]]);
+            return 256 - sprite_transparent_px(
+                &ART_SPRITES[(world_border(tx, ty) ? ts->rock_cliff
+                                                   : ts->rock_fill)[0]]);
         sl = blob_slice(terr_at(w, tx, ty - 1) == GT_ROCK,
                         terr_at(w, tx, ty + 1) == GT_ROCK,
                         terr_at(w, tx + 1, ty) == GT_ROCK,
@@ -6070,6 +6616,169 @@ static int tile_selftest(void)
             printf("  base-opacity negative control FAILED: a detail tile"
                    " measured as fully opaque\n");
             fails++;
+        }
+    }
+
+    /* The pond interior must be OPEN WATER: water and lilies, no stone and no
+     * land. Forest only - it is the one biome whose water fill is authored art
+     * rather than a tinted floor cell (Underworld) or a painterly crop pushed
+     * through the quantizer (Lumiara), so it is the one biome where these exact
+     * source colours mean anything.
+     *
+     * Opacity, which the check above already asserts, cannot see this: a tile
+     * carrying a corner of grass and a boulder is perfectly opaque and
+     * perfectly wrong. It has to be measured in COLOUR, and that measurement is
+     * what names the six rim cells that used to be in this table. */
+    if (biome == BIOME_FOREST) {
+        static const short rejected[6] = {
+            ART_TILE_C6_R10, ART_TILE_C7_R10, ART_TILE_C6_R11,
+            ART_TILE_C7_R11, ART_TILE_C6_R12, ART_TILE_C7_R12
+        };
+        int k, worst_land = 0, worst_stone = 0, caught = 0;
+
+        for (k = 0; k < 10; k++) {
+            const ArtSprite *sp = &ART_SPRITES[ts->water_fill[k]];
+            int land = sprite_colour_px(sp, forest_green_rgb, 3) +
+                       sprite_colour_px(sp, forest_brown_rgb, 2);
+            int stone = sprite_colour_px(sp, forest_stone_rgb, 4);
+            if (land > worst_land)   worst_land = land;
+            if (stone > worst_stone) worst_stone = stone;
+            if (land > 0) {
+                printf("  water fill entry %d paints %d px of LAND colour -"
+                       " a pond would show a grass/dirt notch in open water\n", k, land);
+                fails++;
+            }
+            if (stone > 0) {
+                printf("  water fill entry %d paints %d px of STONE colour -"
+                       " a boulder in the middle of a pond\n", k, stone);
+                fails++;
+            }
+        }
+        /* Negative control, and a pointed one: the six cells this table used to
+         * name must each be REJECTED by the same predicate. A purity check that
+         * has never rejected the art it was written against proves nothing, and
+         * these are not hypothetical bad tiles - they are the ones that shipped. */
+        for (k = 0; k < 6; k++) {
+            const ArtSprite *sp = &ART_SPRITES[rejected[k]];
+            if (sprite_colour_px(sp, forest_green_rgb, 3) +
+                sprite_colour_px(sp, forest_brown_rgb, 2) > 0 &&
+                sprite_colour_px(sp, forest_stone_rgb, 4) > 0)
+                caught++;
+        }
+        if (caught != 6) {
+            printf("  water-purity negative control FAILED: only %d of the 6 rim"
+                   " cells measured as contaminated\n", caught);
+            fails++;
+        } else {
+            printf("tile    : forest water fill is open water (worst %d land px,"
+                   " %d stone px); all 6 rejected rim cells still measure dirty\n",
+                   worst_land, worst_stone);
+        }
+    }
+
+    /* An outcrop's rubble and its rim must have been drawn for the SAME ground.
+     *
+     * The sheet ships both pieces twice, once in grass and once in dirt, and
+     * they sit adjacent in it - so taking the rim from one block and the
+     * rubble from the other is an easy mistake to make and an invisible one to
+     * read in the tables, which name cells by coordinate. On screen it is not
+     * invisible at all: it is ~80 px of the wrong ground per cell, which is the
+     * brown rectangle an outcrop used to stamp on green grass.
+     *
+     * Measured off the art, so this compares the two cells rather than
+     * restating which ones were picked. */
+    if (biome == BIOME_FOREST) {
+        int k, ring_green = 0, ring_brown = 0, fill_green = 0, fill_brown = 0;
+
+        for (k = 0; k < 9; k++) {
+            if (tile_rock_ring[k] == ART_NONE) continue;
+            ring_green += sprite_colour_px(&ART_SPRITES[tile_rock_ring[k]], forest_green_rgb, 3);
+            ring_brown += sprite_colour_px(&ART_SPRITES[tile_rock_ring[k]], forest_brown_rgb, 2);
+        }
+        for (k = 0; k < 2; k++) {
+            fill_green += sprite_colour_px(&ART_SPRITES[ts->rock_fill[k]], forest_green_rgb, 3);
+            fill_brown += sprite_colour_px(&ART_SPRITES[ts->rock_fill[k]], forest_brown_rgb, 2);
+        }
+        if ((ring_green > 0) != (fill_green > 0) || (ring_brown > 0) != (fill_brown > 0)) {
+            printf("  rock rim and rubble disagree on their ground: rim %d green /"
+                   " %d brown px, rubble %d green / %d brown px\n",
+                   ring_green, ring_brown, fill_green, fill_brown);
+            fails++;
+        } else {
+            printf("tile    : forest rock rim and rubble share a ground"
+                   " (rim %d green %d brown, rubble %d green %d brown)\n",
+                   ring_green, ring_brown, fill_green, fill_brown);
+        }
+        /* Negative control: the dirt-context rubble that used to be paired with
+         * this grass rim must be REJECTED against it, or the comparison is not
+         * looking at ground at all. */
+        {
+            static const short dirt_rubble[2] = { ART_TILE_C6_R7, ART_TILE_C7_R7 };
+            int cg = 0, cb = 0;
+            for (k = 0; k < 2; k++) {
+                cg += sprite_colour_px(&ART_SPRITES[dirt_rubble[k]], forest_green_rgb, 3);
+                cb += sprite_colour_px(&ART_SPRITES[dirt_rubble[k]], forest_brown_rgb, 2);
+            }
+            if ((ring_green > 0) == (cg > 0) && (ring_brown > 0) == (cb > 0)) {
+                printf("  rock-ground negative control FAILED: the dirt rubble"
+                       " matched the grass rim\n");
+                fails++;
+            } else {
+                printf("tile    : negative control - the dirt rubble (%d green,"
+                       " %d brown px) is rejected against the grass rim\n", cg, cb);
+            }
+        }
+    }
+
+    /* The map's edge is a cliff, and must be drawn from cliff art.
+     *
+     * Two properties, both measured off the sprites rather than asserted about
+     * them: it has to be DARK - no pale sunlit highlight, which is what made
+     * the old border read as a broad beige band where the reference shows a
+     * thin cool ridge - and it still has to cover enough of its cell to be
+     * visibly solid, because a nicer-looking edge is not worth reintroducing a
+     * wall she cannot see. */
+    if (biome == BIOME_FOREST) {
+        int k, worst_cover = 256, pale = 0, ctl_pale = 0;
+
+        for (k = 0; k < 2; k++) {
+            const ArtSprite *sp = &ART_SPRITES[ts->rock_cliff[k]];
+            int cover = 256 - sprite_transparent_px(sp);
+            int p = sprite_colour_px(sp, forest_palestone_rgb, 2);
+            if (cover < worst_cover) worst_cover = cover;
+            pale += p;
+            if (p > 0) {
+                printf("  cliff cell %d paints %d px of pale highlight - that is"
+                       " outcrop body art, not a cliff face\n", k, p);
+                fails++;
+            }
+            if (cover < SOLID_MIN_OBSTACLE_PX) {
+                printf("  cliff cell %d covers only %d px of 256 (floor %d) -"
+                       " the edge of the map would be a wall she cannot see\n",
+                       k, cover, SOLID_MIN_OBSTACLE_PX);
+                fails++;
+            }
+        }
+        /* Negative control, on both halves at once. The outcrop BODY - the art
+         * the border used to be drawn from - must be rejected by the same pale
+         * test, and the sheet's north rim must be rejected by the same coverage
+         * floor. Those are the two specific wrong answers available here, so
+         * they are the two the check has to be able to refuse. */
+        for (k = 0; k < 2; k++)
+            ctl_pale += sprite_colour_px(&ART_SPRITES[ts->rock_fill[k]],
+                                         forest_palestone_rgb, 2);
+        {
+            int n_rim = 256 - sprite_transparent_px(&ART_SPRITES[ART_TILE_C4_R3]);
+            if (ctl_pale == 0 || n_rim >= SOLID_MIN_OBSTACLE_PX) {
+                printf("  cliff negative control FAILED: outcrop body pale px %d"
+                       " (want > 0), north rim cover %d (want < %d)\n",
+                       ctl_pale, n_rim, SOLID_MIN_OBSTACLE_PX);
+                fails++;
+            } else {
+                printf("tile    : border cliff is dark (%d pale px) and covers %d of 256;"
+                       " controls - outcrop body %d pale px, north rim covers %d\n",
+                       pale, worst_cover, ctl_pale, n_rim);
+            }
         }
     }
 
@@ -6259,20 +6968,72 @@ static int tile_selftest(void)
     {
         static const char *gname[GT_COUNT] = { "grass", "olive", "dirt", "water", "rock" };
         int counts[GT_COUNT], t, s;
+        long rock_tiles = 0, enclosed = 0, lone = 0;
         const int SEEDS = 8;
 
         for (t = 0; t < GT_COUNT; t++) counts[t] = 0;
         for (s = 0; s < SEEDS; s++) {
             world_stub(w, (Uint64)(s + 1));
             for (y = 0; y < WORLD_H; y++)
-                for (x = 0; x < WORLD_W; x++)
+                for (x = 0; x < WORLD_W; x++) {
                     counts[w->terr[y][x]]++;
+                    if (w->terr[y][x] != GT_ROCK) continue;
+                    rock_tiles++;
+                    if (blob_interior(w, x, y, GT_ROCK)) enclosed++;
+                    /* An outcrop cell with no rock neighbour at all. The rock
+                     * ring has no art for "one tile of stone" - it would draw
+                     * the blob's top-left CORNER, 12 px of rim, over a full
+                     * rubble square - so these read as a solid block with no
+                     * edge, which is exactly the defect the pond's 2x2 rule
+                     * exists to prevent for water. Counted here because
+                     * anything that thins the rock field trades outcrop size
+                     * against this, and the trade should be visible. */
+                    if (!(terr_at(w, x - 1, y) == GT_ROCK || terr_at(w, x + 1, y) == GT_ROCK ||
+                          terr_at(w, x, y - 1) == GT_ROCK || terr_at(w, x, y + 1) == GT_ROCK))
+                        lone++;
+                }
         }
         printf("tile    : ground types over %d seeds:", SEEDS);
         for (t = 0; t < GT_COUNT; t++)
             printf(" %s %.1f%%", gname[t],
                    100.0 * counts[t] / (double)(WORLD_W * WORLD_H * SEEDS));
         printf("\n");
+
+        /* Outcrop SHAPE, held between two bounds. Both exist because a rejected
+         * experiment crossed them - see the note above world_stub - and they
+         * are what let the next attempt at ridge-shaped rock be judged in one
+         * run instead of six.
+         *
+         * ENCLOSED is a floor. A cell with rock on all four sides is the only
+         * place prop_at will stand a free-standing boulder, and PROP_ROCK /
+         * PROP_STONE on GT_ROCK are the only callers of the skirtless
+         * ART_ROCK_C / ART_STONE_C. Thin the rock field too far and those three
+         * sprites quietly become dead shipped bytes with nothing to say so.
+         *
+         * LONE is a ceiling, and the sharper of the two. An outcrop tile with
+         * no rock neighbour draws the ring's 12 px top-left corner over a full
+         * rubble square: a solid block with no edge, standing on open grass.
+         * Measured at 0.9% for the shipped field and 8.9% for the band that was
+         * tried, so the limit sits between them, nearer the good end. */
+        if (rock_tiles == 0) {
+            printf("  the census generated no rock at all\n");
+            fails++;
+        } else if (enclosed * 50 < rock_tiles) {       /* under 2% */
+            printf("  only %ld of %ld rock tiles are fully enclosed (%.1f%%) -"
+                   " too few to place ART_ROCK_C on\n",
+                   enclosed, rock_tiles, 100.0 * (double)enclosed / (double)rock_tiles);
+            fails++;
+        } else if (lone * 25 > rock_tiles) {           /* over 4% */
+            printf("  %ld of %ld rock tiles are lone (%.1f%%) - each draws as a"
+                   " solid square with no rim on open grass\n",
+                   lone, rock_tiles, 100.0 * (double)lone / (double)rock_tiles);
+            fails++;
+        } else {
+            printf("tile    : %ld rock tiles: %.1f%% enclosed (floor 2%%),"
+                   " %.1f%% lone (ceiling 4%%)\n", rock_tiles,
+                   100.0 * (double)enclosed / (double)rock_tiles,
+                   100.0 * (double)lone / (double)rock_tiles);
+        }
     }
 
     SDL_free(w);
@@ -6319,6 +7080,132 @@ static int fog_selftest(void)
         printf("fog     : could not build the fog palette\n");
         SDL_FreeSurface(fb);
         return 1;
+    }
+
+    /* ---- Restoration must reach the tiles she cannot walk on ---------------
+     *
+     * A restored area brings its colour back region by region, and restoration
+     * is looked up per tile. Water and rock are solid, so they are REGION_NONE
+     * in the collision partition and used to get NO restoration at all: a
+     * finished area kept grey ponds and a grey map edge in the middle of fully
+     * restored grass. World.litreg exists to answer this question instead, and
+     * these three checks are what hold it to that.
+     *
+     * Run against a REAL generated world rather than a hand-built one - the
+     * property is about the shape ponds and outcrops actually take, and a
+     * fixture would only prove the BFS works on the fixture. */
+    {
+        World *w = (World *)SDL_malloc(sizeof(World));
+        Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+        int s, relabelled = 0, unlit = 0, gaps = 0, solid_gaps = 0;
+        int dim_new = 0, dim_old = 0, worlds = 0, collision_moved = 0;
+
+        if (!w || !sc) {
+            printf("  fog: out of memory for the restoration-lighting check\n");
+            fails++;
+        } else {
+            for (s = 1; s <= 6; s++) {
+                int x, y;
+                Uint8 solid_before[WORLD_H][WORLD_W];
+                Uint8 region_before[WORLD_H][WORLD_W];
+
+                world_stub(w, (Uint64)s);
+                world_spawn(w, sc);
+                regions_build(w, sc);
+                if (w->region_count <= 0) continue;
+                worlds++;
+                /* Sight contributes nothing, so what is measured below is the
+                 * restoration channel ALONE - which is the channel that was
+                 * broken and the one --lit was hiding. */
+                SDL_memset(w->reveal, 0, sizeof w->reveal);
+                for (k = 0; k < w->region_count; k++)
+                    w->regions[k].restoration = 1.0f;
+
+                SDL_memcpy(solid_before, w->solid, sizeof solid_before);
+                SDL_memcpy(region_before, w->region, sizeof region_before);
+
+                for (y = 0; y < WORLD_H; y++) {
+                    for (x = 0; x < WORLD_W; x++) {
+                        Uint8 rg = w->region[y][x], lr = w->litreg[y][x];
+                        int old_restored, old_level;
+                        /* (a) an owned tile must keep its own label: this fills
+                         * gaps, it does not repartition the map. */
+                        if (rg != REGION_NONE && lr != rg) relabelled++;
+                        /* (a) and every tile must end up lit by something. */
+                        if (lr == REGION_NONE) unlit++;
+                        /* Negative control input: how much the OLD field left
+                         * unanswered, and how much of that was solid. */
+                        if (rg == REGION_NONE) {
+                            gaps++;
+                            if (w->solid[y][x]) solid_gaps++;
+                        }
+                        /* (b) behavioural, on the real function. */
+                        if (tile_level(w, x, y) != FOG_LEVELS - 1) dim_new++;
+                        /* ...against exactly what tile_level used to compute. */
+                        old_restored = (rg == REGION_NONE) ? 0
+                                     : (int)(w->regions[rg].restoration * 255.0f);
+                        old_level = old_restored >> 3;
+                        if (old_level != FOG_LEVELS - 1 && w->solid[y][x]) dim_old++;
+                    }
+                }
+                /* (c) RENDER-ONLY, asserted rather than promised: re-running the
+                 * lighting pass must not move one byte of what decides
+                 * collision. */
+                regions_light(w, sc);
+                if (SDL_memcmp(solid_before, w->solid, sizeof solid_before) != 0 ||
+                    SDL_memcmp(region_before, w->region, sizeof region_before) != 0)
+                    collision_moved++;
+            }
+
+            if (worlds == 0) {
+                printf("  fog: no world generated a partition, so the"
+                       " restoration-lighting check proved nothing\n");
+                fails++;
+            }
+            if (relabelled) {
+                printf("  %d owned tile(s) had their region relabelled by the"
+                       " lighting pass\n", relabelled);
+                fails++;
+            }
+            if (unlit) {
+                printf("  %d tile(s) have no lighting region, so restoration"
+                       " can never reach them\n", unlit);
+                fails++;
+            }
+            if (dim_new) {
+                printf("  %d tile(s) stay below full colour in a fully restored"
+                       " world\n", dim_new);
+                fails++;
+            }
+            if (collision_moved) {
+                printf("  the lighting pass moved solid[][] or region[][] in %d"
+                       " world(s) - it is not render-only\n", collision_moved);
+                fails++;
+            }
+            /* Negative control, and the specific one that matters: the OLD rule
+             * must be caught failing, on solid tiles, by the same measurement.
+             * If it is not, this test would have passed against the bug. */
+            if (dim_old == 0 || solid_gaps == 0) {
+                printf("  restoration-lighting negative control FAILED: reading"
+                       " region[][] left %d solid tiles dim and %d unlabelled -"
+                       " both must be non-zero\n", dim_old, solid_gaps);
+                fails++;
+            } else {
+                printf("fog     : negative control - the old region[][] rule leaves"
+                       " %d solid tiles dim in a restored world (%d of %d unlabelled tiles"
+                       " are solid)\n", dim_old, solid_gaps, gaps);
+            }
+            /* Reported only when the checks above actually held. A summary line
+             * that prints beside its own failure is worse than no summary: the
+             * mutation run that proved this test bites also printed "every tile
+             * reaches level 31" directly under the line saying 15480 did not. */
+            if (!fails)
+                printf("fog     : %d worlds fully restored: every tile reaches level %d,"
+                       " no owned tile relabelled, collision untouched\n",
+                       worlds, FOG_LEVELS - 1);
+        }
+        SDL_free(w);
+        SDL_free(sc);
     }
 
     for (lv = 0; lv < FOG_LEVELS; lv++) {
@@ -7597,6 +8484,7 @@ int main(int argc, char **argv)
     const char *shot = NULL;
     int atlas_page = -1;
     int lit_mode;
+    int cam_tx, cam_ty;
     int i;
 
     /* Dispatched before any window or audio exists, and the process exit code IS
@@ -7634,6 +8522,20 @@ int main(int argc, char **argv)
     if (arg_flag(argc, argv, "--atlas"))
         atlas_page = arg_int(argc, argv, "--atlas", 0);
     lit_mode = arg_flag(argc, argv, "--lit");
+    /* --camx/--camy: park the camera on a named TILE instead of on her.
+     *
+     * She spawns in the middle of the largest open component, so a --frames run
+     * can only ever photograph that one neighbourhood - and the map BORDER, the
+     * one place the ground is guaranteed to be rock, is the furthest thing from
+     * it. Terrain bugs at the edge of the map were therefore unphotographable,
+     * which is the same "some states only a screenshot can settle" problem
+     * --lit, --dev and --solidmap each exist to solve.
+     *
+     * The camera only, deliberately: nothing about the simulation, her
+     * position, or what gets saved changes, so a shot taken this way is of the
+     * same world an ordinary run would produce. -1 means "follow her". */
+    cam_tx = arg_int(argc, argv, "--camx", -1);
+    cam_ty = arg_int(argc, argv, "--camy", -1);
 #endif
 
     limit = arg_int(argc, argv, "--frames", 0);
@@ -7678,6 +8580,25 @@ int main(int argc, char **argv)
      * below that regenerates World.reveal - see reveal_all. */
     if (lit_mode)
         reveal_all(&g->w);
+    /* --restored: every region fully restored, WITHOUT touching reveal.
+     *
+     * Separate from --lit on purpose, and the separation is the point. Fog has
+     * two independent channels - sight, which walking accumulates and which
+     * caps at SIGHT_MAX, and restoration, which a fragment sets region-wide -
+     * and --lit saturates SIGHT, which pins tile_level at maximum for every
+     * tile on the map and hides whatever the restoration channel is doing.
+     * A whole round of pond screenshots was taken under --lit and could not
+     * have shown the bug this flag exists to photograph: water and rock
+     * staying dim in a fully restored region. Looking at the screen only
+     * settles things if the flag you look through is not painting over the
+     * thing you are looking for. */
+    if (arg_flag(argc, argv, "--restored")) {
+        int ri;
+        for (ri = 0; ri < g->w.region_count; ri++) {
+            g->w.regions[ri].restoration = 1.0f;
+            g->w.regions[ri].restore_to  = 1.0f;
+        }
+    }
 #endif
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
@@ -7939,6 +8860,12 @@ int main(int argc, char **argv)
 
             camera_follow(rp.x, rp.y, draw->w, draw->h, &cam_x, &cam_y);
 #if WAYFARER_SELFTEST
+            /* Same clamp as following her, so a tile near an edge still frames
+             * the way the game would ever show it. */
+            if (cam_tx >= 0 || cam_ty >= 0)
+                camera_follow(cam_tx >= 0 ? (float)(cam_tx * TILE + TILE / 2) : rp.x,
+                              cam_ty >= 0 ? (float)(cam_ty * TILE + TILE / 2) : rp.y,
+                              draw->w, draw->h, &cam_x, &cam_y);
             if (atlas_page >= 0) {
                 draw_atlas(draw, atlas_page, clock);
             } else
