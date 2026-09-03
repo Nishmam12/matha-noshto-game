@@ -20,6 +20,12 @@
 #include <SDL.h>
 #include "art_data.h"
 
+/* The one non-SDL runtime header in the shipping build. SDL2 has no wall clock
+ * that survives a process exit - SDL_GetTicks is since-init - and a save slot
+ * list has to be able to say which save is the most recent one. time() is C89
+ * and is the whole of what is used from here. */
+#include <time.h>
+
 #if WAYFARER_SELFTEST
 #include <stdio.h>
 #endif
@@ -4760,9 +4766,29 @@ static int area_complete(const Game *g)
  * moves when a change would otherwise corrupt something is a version field
  * nobody can reason about. v1 saves are rejected, not migrated: there is one
  * construction path from a file to a game, and a migration would be a second. */
-#define SAVE_VERSION  2
-#define SAVE_SIZE     28
-#define SAVE_FILENAME "wayfarer.sav"
+#define SAVE_VERSION  3
+#define SAVE_SIZE     36
+/* Six slots, probed by name. SDL2 has no directory-listing API at all, so a
+ * fixed set of filenames is the only way to enumerate saves without dropping to
+ * platform-specific code - and a fixed set is what the rest of this file is
+ * made of anyway. Six is what fits the 270 px screen as one page with no
+ * scrolling, which is worth more than a longer list nobody can see the end of.
+ * Numbered from 1 in the filename and on screen, from 0 in the array. */
+#define SAVE_SLOTS    6
+#define SAVE_PATH_MAX 32
+
+/* Bytes 28-35: when this save was written, as seconds from time().
+ *
+ * Stored because "continue" has to mean the most recent save and nothing else
+ * in the file can order two saves against each other. Deliberately NOT used for
+ * anything but ordering: a clock that is wrong, or that went backwards between
+ * two saves, puts them in a surprising order and does nothing worse - no save
+ * is rejected for its timestamp beyond being zero, which is what a failed
+ * time() looks like and would silently sort as "oldest forever". */
+static void save_slot_path(char *dst, size_t cap, int slot)
+{
+    SDL_snprintf(dst, cap, "wayfarer%d.sav", slot + 1);
+}
 
 /* Byte 21: three legal bits, one per area. */
 #define SAVE_MAPS_BITS 0x07u
@@ -4841,6 +4867,16 @@ static int game_save(const Game *g, const char *path)
     buf[22] = 0;
     buf[23] = 0;
     save_put32(buf + 24, restored);
+    /* 0 is what a failed time() looks like, and a 0 here would sort this save
+     * as older than every other one forever. 1 is a lie about WHEN, but it is
+     * only ever compared, never displayed, so the lie costs an ordering nobody
+     * can rely on anyway on a machine whose clock does not work. */
+    {
+        time_t now = time(NULL);
+        Uint64 stamp = (now == (time_t)-1) ? 1u : (Uint64)now;
+        if (stamp == 0) stamp = 1u;
+        save_put64(buf + 28, stamp);
+    }
 
     rw = SDL_RWFromFile(path, "wb");
     if (!rw)
@@ -4905,30 +4941,109 @@ static int save_header_ok(const Uint8 *buf)
         !(px < (float)WORLD_W * TILE) || !(py < (float)WORLD_H * TILE))
         return -1;
 
+    /* The only thing asked of the timestamp: that it is not zero. Any real
+     * value is accepted, however implausible - see the note at SAVE_SLOTS. */
+    if (save_get64(buf + 28) == 0)
+        return -1;
+
     return 0;
 }
 
-/* Is there a save the menu can honestly offer to load? Header-only, so the root
- * menu can ask it every time it is built without generating a world. It is
- * deliberately not the whole of game_load - a header can be sound and the file
- * still be rejected later for standing her inside a wall - but the header is
- * exactly the part that separates "no save" from "a save", and a stale offer
- * for that one remaining case is a far smaller wrong than an offer made for any
- * stray byte on disk. Takes a path like game_save/game_load, so the test can
- * drive a scratch file rather than the player's own. */
-static int save_exists(const char *path)
-{
-    Uint8 buf[SAVE_SIZE];
-    SDL_RWops *rw = SDL_RWFromFile(path, "rb");
-    size_t got;
+/* What the menu knows about one slot WITHOUT regenerating its world.
+ *
+ * Everything here is read straight out of the 36-byte header, which is what
+ * keeps a six-slot list cheap enough to build: six small reads when the menu
+ * opens, and none at all while it is on screen.
+ *
+ * `done` is the count of restored entities in the save's OWN area, not a
+ * fragments-and-souls split. Which entity is a soul is a property of the
+ * generated world, not of the mask, so telling the two apart from a header
+ * alone is impossible - and storing the split in the file would be storing a
+ * derived value that nothing could check the mask against. A single honest
+ * count beats two numbers that might disagree with the save they describe. */
+typedef struct {
+    int    used;
+    Uint8  area;    /* 1..3    */
+    int    done;    /* 0..ENTITY_COUNT restored in that area */
+    Uint64 stamp;
+} SaveSlot;
 
-    if (!rw)
-        return 0;
-    got = SDL_RWread(rw, buf, 1, SAVE_SIZE);
-    SDL_RWclose(rw);
-    if (got != (size_t)SAVE_SIZE)
-        return 0;
-    return save_header_ok(buf) == 0;
+static int save_popcount32(Uint32 v)
+{
+    int n = 0;
+    while (v) { v &= v - 1u; n++; }
+    return n;
+}
+
+/* Read every slot's header into `out`. Called when the menu opens and after
+ * anything that writes a save - never per frame: the rows are rebuilt at 60 Hz
+ * while the menu is up, and six file reads a frame to answer a question that
+ * cannot change without one of those events would be a syscall storm in the
+ * render path. Returns how many slots are in use. */
+static int save_scan(SaveSlot *out)
+{
+    char path[SAVE_PATH_MAX];
+    Uint8 buf[SAVE_SIZE];
+    int i, used = 0;
+
+    SDL_memset(out, 0, sizeof(SaveSlot) * SAVE_SLOTS);
+    for (i = 0; i < SAVE_SLOTS; i++) {
+        SDL_RWops *rw;
+        Uint32 restored, shift;
+
+        save_slot_path(path, sizeof(path), i);
+        rw = SDL_RWFromFile(path, "rb");
+        if (!rw)
+            continue;
+        if (SDL_RWread(rw, buf, 1, SAVE_SIZE) != (size_t)SAVE_SIZE) {
+            SDL_RWclose(rw);
+            continue;
+        }
+        SDL_RWclose(rw);
+        /* The SAME judgement game_load makes, so a slot is listed as usable
+         * exactly when it is - a row lit by a file that then refuses to load
+         * reads as the game being broken rather than as an empty slot. */
+        if (save_header_ok(buf) != 0)
+            continue;
+
+        out[i].used  = 1;
+        out[i].area  = buf[3];
+        out[i].stamp = save_get64(buf + 28);
+        restored = save_get32(buf + 24);
+        shift = (Uint32)(out[i].area - 1) * (Uint32)ENTITY_COUNT;
+        out[i].done = save_popcount32((restored >> shift) & SAVE_AREA1_BITS);
+        used++;
+    }
+    return used;
+}
+
+/* The most recently written slot, or -1 if there are none. This is the whole
+ * of what "continue" means. Ties go to the lower slot, which only happens when
+ * two saves share a second. */
+static int save_newest(const SaveSlot *slots)
+{
+    int i, best = -1;
+
+    for (i = 0; i < SAVE_SLOTS; i++) {
+        if (!slots[i].used)
+            continue;
+        if (best < 0 || slots[i].stamp > slots[best].stamp)
+            best = i;
+    }
+    return best;
+}
+
+/* The lowest slot with no save in it, or -1 when every slot is taken. A new
+ * game takes this one; when there is none, the player is asked which save to
+ * replace rather than one being chosen for them. */
+static int save_first_free(const SaveSlot *slots)
+{
+    int i;
+
+    for (i = 0; i < SAVE_SLOTS; i++)
+        if (!slots[i].used)
+            return i;
+    return -1;
 }
 
 /* Regenerate from the saved seed, then replay the deltas. Returns 0 on success.
@@ -5399,8 +5514,8 @@ static void hud_draw(SDL_Surface *fb, const Game *g)
  *
  * One screen serving two jobs, because they are the same screen: the title the
  * game opens on, and the pause screen Escape brings up. The only difference is
- * one row's wording, so `started` is the whole of the state that separates
- * them - two screens would be two things to keep in step.
+ * a couple of rows' wording, so `started` is the whole of the state that
+ * separates them - two screens would be two things to keep in step.
  *
  * OPAQUE, and it replaces the world rather than covering it, exactly as the map
  * screen does. There is no alpha blend anywhere in this project and a dimming
@@ -5412,7 +5527,8 @@ static void hud_draw(SDL_Surface *fb, const Game *g)
  * that list, moving the selection indexes that list, and activating indexes
  * that list, so a row cannot be drawn in one place and acted on in another -
  * the same reason synth_add_frag is a function rather than two copies of the
- * unlock ladder.
+ * unlock ladder. menu_build is pure: everything it reads arrives in a MenuCtx,
+ * so the tests drive every page with no window open.
  *
  * Labels may only use characters the 5x7 table actually fills. '(', ')', '[',
  * ']', '+', '*', '%', '_', '#', '&' and '"' are all-zero rows in FONT_5X7 and
@@ -5423,9 +5539,16 @@ static void hud_draw(SDL_Surface *fb, const Game *g)
 typedef enum {
     MENU_NONE = 0,   /* playing; nothing intercepts input */
     MENU_ROOT,
+    MENU_SLOTS,      /* the six saves, for loading or for replacing */
+    MENU_CONFIRM,    /* "replace save 3?" - the only destructive step */
     MENU_SETTINGS,
     MENU_CONTROLS
 } MenuPage;
+
+/* Why the slot list is up. The same page reads a save or chooses one to throw
+ * away, and the difference is entirely in which rows can be picked - so it is
+ * one page with a mode rather than two pages that would drift apart. */
+enum { SLOTS_LOAD = 0, SLOTS_NEW };
 
 /* What activating a row means, as a value. menu_act is pure and returns one of
  * these; main() is what owns the window, the audio device, the world and the
@@ -5433,16 +5556,23 @@ typedef enum {
  * the test drive every row with no window open and no world generated. */
 typedef enum {
     MA_NONE = 0,     /* out of range, a disabled row, or a value row */
-    MA_START,        /* start game / resume - close the menu, play */
-    MA_LOAD,
+    MA_START,        /* resume - close the menu, carry on */
+    MA_CONTINUE,     /* load the most recently written save */
+    MA_NEWGAME,
+    MA_SAVE,         /* write the slot being played */
+    MA_LOADPAGE,     /* open the slot list to read one */
+    MA_SLOT,         /* act on rows[i].slot, according to the mode */
+    MA_YES,          /* confirm the replacement */
     MA_SETTINGS,
     MA_CONTROLS,
     MA_BACK,
     MA_QUIT
 } MenuAction;
 
-#define MENU_ROWS_MAX 8
-#define MENU_TEXT_MAX 32
+/* Six slots plus a back row is the longest page, and the settings page is six.
+ * Sized to the largest rather than to a guess, and asserted by the test. */
+#define MENU_ROWS_MAX (SAVE_SLOTS + 1)
+#define MENU_TEXT_MAX 40
 /* 4x puts "wayfarer" at 188 px of the 480 the screen is wide - big enough to be
  * a title rather than a line of HUD, with margin left at the widest label. */
 #define MENU_TITLE_SCALE 4
@@ -5456,6 +5586,7 @@ typedef struct {
     char       text[MENU_TEXT_MAX];
     int        enabled;
     int        adjust;
+    int        slot;    /* which save this row is about, or -1 */
     MenuAction act;
 } MenuRow;
 
@@ -5463,7 +5594,34 @@ static struct {
     MenuPage page;
     int      sel;
     int      started;   /* 0 = title screen, 1 = a game is under way */
+    int      mode;      /* SLOTS_LOAD or SLOTS_NEW, while page is MENU_SLOTS */
+    int      pending;   /* the slot MENU_CONFIRM is asking about */
 } menu;
+
+/* Everything menu_build and menu_draw are allowed to read. Gathered into one
+ * value so both are pure functions of it: the test builds a context by hand and
+ * drives every page without a window, a world, or a save file. */
+typedef struct {
+    MenuPage        page;
+    int             started;
+    int             mode;
+    int             pending;
+    const Settings *cfg;
+    const SaveSlot *slots;
+} MenuCtx;
+
+static MenuCtx menu_ctx(const Settings *cfg, const SaveSlot *slots)
+{
+    MenuCtx c;
+
+    c.page    = menu.page;
+    c.started = menu.started;
+    c.mode    = menu.mode;
+    c.pending = menu.pending;
+    c.cfg     = cfg;
+    c.slots   = slots;
+    return c;
+}
 
 /* The volume bar. Ten cells, '=' filled and '-' empty, both of which the font
  * actually has - a bar drawn from a character the table leaves blank would be
@@ -5479,58 +5637,120 @@ static void menu_bar(char *dst, size_t cap, const char *label, int v)
     SDL_snprintf(dst, cap, "%s %s %d", label, bar, v);
 }
 
-/* Every row of the current page, in order. Pure: it reads the page, the
- * settings and whether a save is loadable, and writes nothing. Returns the
- * count, which is always <= MENU_ROWS_MAX.
- *
- * `save_ok` is passed in rather than read from disk here so that the caller
- * decides how often the file is touched - the menu is rebuilt every frame it is
- * drawn, and stat-ing the save 60 times a second to grey out one row would be
- * a syscall in the render path for no gain. */
-static int menu_build(MenuPage page, const Settings *cfg, int started,
-                      int save_ok, MenuRow *rows)
+static const char *menu_area_name(Uint8 area)
 {
-    int n = 0;
+    return area == 1 ? "forest" : area == 2 ? "underworld" : "lumiara";
+}
+
+/* One slot's row. What a header can honestly say and nothing more: which world
+ * it is in and how much of that world is remembered. `newest` is marked because
+ * it is exactly the save "continue" would take, and a list where that is
+ * invisible makes continue look like it picked one at random. */
+static void menu_slot_text(char *dst, size_t cap, int slot,
+                           const SaveSlot *s, int newest)
+{
+    if (!s->used) {
+        SDL_snprintf(dst, cap, "%d   empty", slot + 1);
+        return;
+    }
+    SDL_snprintf(dst, cap, "%d   %s   %d/%d%s", slot + 1,
+                 menu_area_name(s->area), s->done, ENTITY_COUNT,
+                 newest ? "   newest" : "");
+}
+
+/* Every row of the current page, in order. Pure. Returns the count, which is
+ * always <= MENU_ROWS_MAX. */
+static int menu_build(const MenuCtx *c, MenuRow *rows)
+{
+    int n = 0, i, newest, any;
 
     SDL_memset(rows, 0, sizeof(MenuRow) * MENU_ROWS_MAX);
-    switch (page) {
+    for (i = 0; i < MENU_ROWS_MAX; i++)
+        rows[i].slot = -1;
+
+    newest = save_newest(c->slots);
+    any    = (newest >= 0);
+
+    switch (c->page) {
     case MENU_ROOT:
-        SDL_strlcpy(rows[n].text, started ? "resume" : "start game",
-                    MENU_TEXT_MAX);
-        rows[n].enabled = 1; rows[n].act = MA_START; n++;
-        /* Greyed rather than hidden when there is no save: a row that appears
-         * once a save exists makes the menu change shape under the player, and
-         * a visible-but-dim row says "this is a thing, you have not got one
-         * yet" - which is the true statement. */
+        if (c->started) {
+            SDL_strlcpy(rows[n].text, "resume", MENU_TEXT_MAX);
+            rows[n].enabled = 1; rows[n].act = MA_START; n++;
+            SDL_strlcpy(rows[n].text, "save game", MENU_TEXT_MAX);
+            rows[n].enabled = 1; rows[n].act = MA_SAVE; n++;
+        } else {
+            /* Greyed rather than absent when there is nothing to continue, and
+             * the same for "load game" below. A row that appears only once a
+             * save exists makes the menu change shape under the player between
+             * their first launch and their second; a visible-but-dim row says
+             * "this is a thing, you have not got one yet", which is the true
+             * statement and the one that keeps the list a fixed shape. */
+            SDL_strlcpy(rows[n].text, "continue", MENU_TEXT_MAX);
+            rows[n].enabled = any; rows[n].act = MA_CONTINUE;
+            rows[n].slot = newest; n++;
+        }
         SDL_strlcpy(rows[n].text, "load game", MENU_TEXT_MAX);
-        rows[n].enabled = save_ok; rows[n].act = MA_LOAD; n++;
+        rows[n].enabled = any; rows[n].act = MA_LOADPAGE; n++;
+        SDL_strlcpy(rows[n].text, "new game", MENU_TEXT_MAX);
+        rows[n].enabled = 1; rows[n].act = MA_NEWGAME; n++;
         SDL_strlcpy(rows[n].text, "settings", MENU_TEXT_MAX);
         rows[n].enabled = 1; rows[n].act = MA_SETTINGS; n++;
         SDL_strlcpy(rows[n].text, "quit", MENU_TEXT_MAX);
         rows[n].enabled = 1; rows[n].act = MA_QUIT; n++;
         break;
+
+    case MENU_SLOTS:
+        for (i = 0; i < SAVE_SLOTS; i++) {
+            menu_slot_text(rows[n].text, MENU_TEXT_MAX, i, &c->slots[i],
+                           i == newest);
+            /* Reading needs a save to read; choosing where a new game goes does
+             * not, so an empty slot is pickable in one mode and dead in the
+             * other. That difference IS the mode. */
+            rows[n].enabled = (c->mode == SLOTS_NEW) ? 1 : c->slots[i].used;
+            rows[n].act     = MA_SLOT;
+            rows[n].slot    = i;
+            n++;
+        }
+        SDL_strlcpy(rows[n].text, "back", MENU_TEXT_MAX);
+        rows[n].enabled = 1; rows[n].act = MA_BACK; n++;
+        break;
+
+    case MENU_CONFIRM:
+        /* "no" FIRST, so the caret starts on it. This is the only place in the
+         * game that destroys something the player made, and the default answer
+         * to a question nobody read must be the one that changes nothing. */
+        SDL_strlcpy(rows[n].text, "no, keep it", MENU_TEXT_MAX);
+        rows[n].enabled = 1; rows[n].act = MA_BACK; n++;
+        SDL_strlcpy(rows[n].text, "yes, replace it", MENU_TEXT_MAX);
+        rows[n].enabled = 1; rows[n].act = MA_YES;
+        rows[n].slot = c->pending; n++;
+        break;
+
     case MENU_SETTINGS:
-        menu_bar(rows[n].text, MENU_TEXT_MAX, "music", cfg->music);
+        menu_bar(rows[n].text, MENU_TEXT_MAX, "music", c->cfg->music);
         rows[n].enabled = 1; rows[n].adjust = MADJ_MUSIC; n++;
-        menu_bar(rows[n].text, MENU_TEXT_MAX, "sound", cfg->sfx);
+        menu_bar(rows[n].text, MENU_TEXT_MAX, "sound", c->cfg->sfx);
         rows[n].enabled = 1; rows[n].adjust = MADJ_SFX; n++;
         SDL_snprintf(rows[n].text, MENU_TEXT_MAX, "fullscreen  %s",
-                     cfg->fullscreen ? "on" : "off");
+                     c->cfg->fullscreen ? "on" : "off");
         rows[n].enabled = 1; rows[n].adjust = MADJ_FULLSCREEN; n++;
         /* Dim while fullscreen is on rather than absent: the window scale is
          * still the player's setting, it simply has nothing to size while the
          * display owns the resolution, and saying so beats the row vanishing. */
-        SDL_snprintf(rows[n].text, MENU_TEXT_MAX, "window scale  %d", cfg->scale);
-        rows[n].enabled = !cfg->fullscreen; rows[n].adjust = MADJ_SCALE; n++;
+        SDL_snprintf(rows[n].text, MENU_TEXT_MAX, "window scale  %d",
+                     c->cfg->scale);
+        rows[n].enabled = !c->cfg->fullscreen; rows[n].adjust = MADJ_SCALE; n++;
         SDL_strlcpy(rows[n].text, "controls", MENU_TEXT_MAX);
         rows[n].enabled = 1; rows[n].act = MA_CONTROLS; n++;
         SDL_strlcpy(rows[n].text, "back", MENU_TEXT_MAX);
         rows[n].enabled = 1; rows[n].act = MA_BACK; n++;
         break;
+
     case MENU_CONTROLS:
         SDL_strlcpy(rows[n].text, "back", MENU_TEXT_MAX);
         rows[n].enabled = 1; rows[n].act = MA_BACK; n++;
         break;
+
     case MENU_NONE:
     default:
         break;
@@ -5549,6 +5769,39 @@ static MenuAction menu_act(const MenuRow *rows, int count, int idx)
     if (!rows[idx].enabled)
         return MA_NONE;
     return rows[idx].act;
+}
+
+/* The first row that can actually be picked. Used when a page opens, so the
+ * caret never starts on a dim row - which is what the very first launch would
+ * otherwise show, with "continue" greyed at the top of the list. */
+static int menu_first(const MenuRow *rows, int count)
+{
+    int i;
+
+    for (i = 0; i < count; i++)
+        if (rows[i].enabled)
+            return i;
+    return 0;
+}
+
+/* Open a page with the caret on the first row that can actually be picked.
+ *
+ * Every path that puts a page on screen goes through here - startup, escape,
+ * the load list, the settings pages, and the --menu screenshot flag - because
+ * they all have to answer the same question and answering it in five places is
+ * how four of them end up wrong. The one that WAS wrong is the reason this
+ * exists: --menu set the selection to 0 by hand, so the very screenshot taken
+ * to check the title screen showed a caret resting on a dim "continue" that a
+ * real launch never puts it on. A flag that paints over the thing it was
+ * pointed at is worse than no flag. */
+static void menu_open(MenuPage page, const Settings *cfg, const SaveSlot *slots)
+{
+    MenuRow r[MENU_ROWS_MAX];
+    MenuCtx c;
+
+    menu.page = page;
+    c = menu_ctx(cfg, slots);
+    menu.sel  = menu_first(r, menu_build(&c, r));
 }
 
 /* Move the selection by `step`, wrapping, skipping disabled rows. Bounded by
@@ -5599,9 +5852,6 @@ static void menu_adjust(Settings *cfg, int adjust, int step)
     }
 }
 
-/* The controls list. Here rather than inside menu_draw so the label test can
- * walk it for font holes: it is the longest text in the game and the most
- * likely place for a character the table leaves blank to slip in. */
 /* The three footers, hoisted for the same reason as the control lines: the
  * label test walks them for width and for blank glyphs. Indexed by the enum
  * below so menu_draw picks one rather than spelling them out inline, where the
@@ -5613,62 +5863,80 @@ static const char *const MENU_FOOTERS[MFOOT_COUNT] = {
     "arrows move   enter choose   escape back"
 };
 
+/* The controls list. Here rather than inside menu_draw so the label test can
+ * walk it for font holes: it is the longest text in the game and the most
+ * likely place for a character the table leaves blank to slip in. */
 static const char *const MENU_CONTROL_LINES[] = {
     "wasd or arrows   walk",
     "e or space       interact",
     "m                map",
-    "f5               save",
-    "f9               load",
+    "f5               save this slot",
+    "f9               reload this slot",
     "f11              fullscreen",
     "escape           this menu"
 };
 #define MENU_CONTROL_COUNT \
     ((int)(sizeof(MENU_CONTROL_LINES) / sizeof(MENU_CONTROL_LINES[0])))
 
+/* The heading each page carries under the title. NULL on the root, which has
+ * the game's own name there instead. */
+static const char *menu_heading(const MenuCtx *c)
+{
+    switch (c->page) {
+    case MENU_SLOTS:    return c->mode == SLOTS_NEW ? "replace which save"
+                                                    : "load game";
+    case MENU_CONFIRM:  return "replace this save";
+    case MENU_SETTINGS: return "settings";
+    case MENU_CONTROLS: return "controls";
+    default:            return NULL;
+    }
+}
+
 /* Placed by fb->w/fb->h, never LOGICAL_*: with no backbuffer we draw straight
  * into the window surface at native resolution, and a menu positioned by the
  * logical size would land in the top-left corner of a 1080p screen. Same rule
  * hud_draw and bigmap_draw follow, for the same reason. */
-static void menu_draw(SDL_Surface *fb, const Settings *cfg, int save_ok)
+static void menu_draw(SDL_Surface *fb, const MenuCtx *c)
 {
     Uint32 ink   = SDL_MapRGB(fb->format, 0x10, 0x12, 0x18);
     Uint32 warm  = SDL_MapRGB(fb->format, 0xf0, 0xd8, 0xb0);
     Uint32 pale  = SDL_MapRGB(fb->format, 0x9a, 0xa8, 0xb8);
     Uint32 dim   = SDL_MapRGB(fb->format, 0x78, 0x82, 0x90);
+    Uint32 edge  = SDL_MapRGB(fb->format, 0x6a, 0x5c, 0x44);
     /* Darker than the HUD's dim, which only has to read as "not yet earned"
      * beside a lit one. Here it has to read as "you cannot pick this", against
      * rows that are themselves unlit until the caret reaches them - at the
      * HUD's value an unselected row and a disabled one were near enough
      * identical on screen to be worth nothing. */
     Uint32 off   = SDL_MapRGB(fb->format, 0x4c, 0x54, 0x60);
-    Uint32 edge  = SDL_MapRGB(fb->format, 0x6a, 0x5c, 0x44);
     MenuRow rows[MENU_ROWS_MAX];
+    const char *head;
     int count, i, y, x, maxw = 0;
 
-    if (menu.page == MENU_NONE)
+    if (c->page == MENU_NONE)
         return;
 
-    count = menu_build(menu.page, cfg, menu.started, save_ok, rows);
+    count = menu_build(c, rows);
     fill_rect(fb, 0, 0, fb->w, fb->h, ink);
 
     /* The title only on the root page. On a subpage it would be a second thing
      * competing with the heading for the same glance, and the player already
      * knows what game they are in by then. */
-    if (menu.page == MENU_ROOT) {
+    head = menu_heading(c);
+    if (!head) {
         const char *t = "wayfarer";
         int tw = text_w_scaled(t, MENU_TITLE_SCALE);
-        draw_text_scaled(fb, (fb->w - tw) / 2, fb->h / 6, t, warm,
+        draw_text_scaled(fb, (fb->w - tw) / 2, fb->h / 8, t, warm,
                          MENU_TITLE_SCALE);
-        fill_rect(fb, (fb->w - tw) / 2, fb->h / 6 + FONT_LINE_AT(MENU_TITLE_SCALE),
+        fill_rect(fb, (fb->w - tw) / 2, fb->h / 8 + FONT_LINE_AT(MENU_TITLE_SCALE),
                   tw, 1, edge);
     } else {
-        const char *h = (menu.page == MENU_SETTINGS) ? "settings" : "controls";
-        draw_text_scaled(fb, (fb->w - text_w_scaled(h, 2)) / 2, fb->h / 6, h,
-                         warm, 2);
+        draw_text_scaled(fb, (fb->w - text_w_scaled(head, 2)) / 2, fb->h / 8,
+                         head, warm, 2);
     }
 
     y = fb->h / 2 - (count * MENU_ROW_H) / 2;
-    if (menu.page == MENU_CONTROLS) {
+    if (c->page == MENU_CONTROLS) {
         /* The list sits where the rows would, and `back` follows it. Every line
          * is drawn from the same left edge, so the key column and the action
          * column line up - the whole point of the padding inside the strings. */
@@ -5679,6 +5947,23 @@ static void menu_draw(SDL_Surface *fb, const Settings *cfg, int save_ok)
             ly += FONT_LINE + 2;
         }
         y = ly + FONT_LINE;
+    } else if (c->page == MENU_CONFIRM) {
+        /* Name the save being thrown away, in its own words from the list, so
+         * the answer is given to a specific thing rather than to the word
+         * "yes". Above the rows, where the question belongs. */
+        char what[MENU_TEXT_MAX];
+        int  p = c->pending;
+        if (p >= 0 && p < SAVE_SLOTS) {
+            menu_slot_text(what, sizeof(what), p, &c->slots[p], 0);
+            draw_text(fb, (fb->w - text_w(what)) / 2, fb->h / 3, what, pale);
+            draw_text(fb, (fb->w - text_w("this cannot be undone.")) / 2,
+                      fb->h / 3 + FONT_LINE * 2, "this cannot be undone.", dim);
+        }
+        /* The answers sit clear of the question rather than centred on the
+         * screen: with only two rows the centred block rode up into the
+         * warning, and a yes/no that touches the sentence it answers is a
+         * yes/no somebody clicks without reading. */
+        y = fb->h / 3 + FONT_LINE * 5;
     }
 
     /* The BLOCK is centred and the rows are left-aligned inside it, rather than
@@ -5704,13 +5989,14 @@ static void menu_draw(SDL_Surface *fb, const Settings *cfg, int save_ok)
 
     /* The footer names the keys that work HERE. The map screen states how to
      * close itself for the same reason: a screen that gives no way out reads as
-     * a hang, and this one is the first thing a new player ever sees. */
+     * a hang, and this one is the first thing a new player ever sees.
+     *
+     * Names what escape does HERE, which is three different things across the
+     * pages - and on the title screen it is nothing at all, so it goes
+     * unmentioned rather than being promised and ignored. */
     {
-        /* Names what escape does HERE, which is three different things across
-         * the three pages - and on the title screen it is nothing at all, so it
-         * goes unmentioned rather than being promised and ignored. */
-        const char *f = MENU_FOOTERS[menu.page != MENU_ROOT ? MFOOT_SUB
-                                     : menu.started         ? MFOOT_PAUSED
+        const char *f = MENU_FOOTERS[c->page != MENU_ROOT ? MFOOT_SUB
+                                     : c->started         ? MFOOT_PAUSED
                                      : MFOOT_TITLE];
         draw_text(fb, (fb->w - text_w(f)) / 2, fb->h - FONT_LINE - 8, f, dim);
     }
@@ -10053,24 +10339,76 @@ static int hud_selftest(Uint64 base)
 
 /* ---- --menu-test --------------------------------------------------------
  *
- * The menu is the first screen a player ever sees and the only way out of the
- * game that is not the window's close button, so the things that must not break
- * are: it draws when open and NOTHING when closed, the selection can never
- * leave the list or land on a row that does nothing, a row's action is the
- * action its label promises, the settings file cannot poison the live settings,
- * and every label is made of characters the font actually fills.
+ * The menu is the first screen a player ever sees, the only way out of the game
+ * that is not the window's close button, and now the only thing standing
+ * between six saves and the wrong one being destroyed. So the things that must
+ * not break are: it draws when open and NOTHING when closed, the selection can
+ * never leave the list or land on a row that does nothing, a row's action is
+ * the action its label promises, "continue" takes the most recently written
+ * save and not merely the first one, replacing a save is never done without
+ * being asked, the settings file cannot poison the live settings, and every
+ * label is made of characters the font actually fills.
  *
  * Every check below has a negative control, because a checker that has never
- * rejected anything proves nothing - and two of these controls are exactly the
- * bugs the design invites: a label containing '(' shipping as a blank hole, and
- * a "load game" row lit by a file that cannot actually be loaded.
+ * rejected anything proves nothing - and several of these controls are exactly
+ * the bugs the design invites: a label containing '(' shipping as a blank hole,
+ * a slot row lit by a file that cannot actually be loaded, a "continue" that
+ * looks right only because the newest save happens to be in the lowest slot,
+ * and a confirm whose "no" quietly does the same thing as its "yes".
  */
+
+/* Slot files are written and deleted all over this test. Named through the
+ * shipping save_slot_path so the test cannot drift onto a different set of
+ * files from the ones the game reads. */
+static void menu_test_clear_slots(void)
+{
+    char path[SAVE_PATH_MAX];
+    int i;
+
+    for (i = 0; i < SAVE_SLOTS; i++) {
+        save_slot_path(path, sizeof(path), i);
+        (void)remove(path);
+    }
+}
+
+/* Write a real save into a slot and then force its timestamp, so the ordering
+ * "continue" depends on can be set up deliberately instead of being whatever
+ * two writes a millisecond apart happened to produce. Goes through game_save
+ * first, so what is on disk is a genuine save and only the one field under
+ * test is synthetic. */
+static int menu_test_write_slot(const Game *g, int slot, Uint64 stamp)
+{
+    char path[SAVE_PATH_MAX];
+    Uint8 buf[SAVE_SIZE];
+    SDL_RWops *rw;
+
+    save_slot_path(path, sizeof(path), slot);
+    if (game_save(g, path) != 0)
+        return -1;
+    rw = SDL_RWFromFile(path, "rb");
+    if (!rw) return -1;
+    if (SDL_RWread(rw, buf, 1, SAVE_SIZE) != (size_t)SAVE_SIZE) {
+        SDL_RWclose(rw); return -1;
+    }
+    SDL_RWclose(rw);
+    save_put64(buf + 28, stamp);
+    rw = SDL_RWFromFile(path, "wb");
+    if (!rw) return -1;
+    SDL_RWwrite(rw, buf, 1, SAVE_SIZE);
+    SDL_RWclose(rw);
+    return 0;
+}
+
 static int menu_selftest(void)
 {
     SDL_Surface *fb = test_surface(LOGICAL_W, LOGICAL_H);
-    const char *path = "wayfarer-menutest.tmp";
+    const char *cfgpath = "wayfarer-menutest.tmp";
     Settings cfg, back;
-    MenuRow rows[MENU_ROWS_MAX];
+    SaveSlot slots[SAVE_SLOTS];
+    MenuRow  rows[MENU_ROWS_MAX];
+    MenuCtx  ctx;
+    Game    *g  = NULL;
+    Scratch *sc = NULL;
     int fails = 0, count, i;
 
     if (!fb) {
@@ -10078,113 +10416,272 @@ static int menu_selftest(void)
         return 1;
     }
     cfg_defaults(&cfg);
+    SDL_zero(menu);
+    SDL_memset(slots, 0, sizeof(slots));
+    menu_test_clear_slots();
 
-    /* ---- 1. the root page names what it will do ------------------------- */
-    count = menu_build(MENU_ROOT, &cfg, 0, 1, rows);
-    if (count != 4) {
-        printf("FAIL  menu: root page built %d rows, expected 4\n", count);
+    g  = (Game *)SDL_malloc(sizeof(Game));
+    sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+    if (!g || !sc) {
+        printf("FAIL  menu: could not allocate a world\n");
+        SDL_free(g); SDL_free(sc); SDL_FreeSurface(fb);
+        return 1;
+    }
+    game_init(g, sc, 1);
+
+    /* ---- 1. an empty disk offers nothing to continue or load ------------- */
+    if (save_scan(slots) != 0) {
+        printf("FAIL  menu: slots reported as used with no files on disk\n");
         fails++;
     }
-    {
-        MenuRow started[MENU_ROWS_MAX];
-        int n2 = menu_build(MENU_ROOT, &cfg, 1, 1, started);
-        if (n2 != count || SDL_strcmp(rows[0].text, started[0].text) == 0) {
-            printf("FAIL  menu: row 0 reads \"%s\" both before and during a game;"
-                   " it must say start and resume\n", rows[0].text);
+    if (save_newest(slots) != -1 || save_first_free(slots) != 0) {
+        printf("FAIL  menu: newest %d / first free %d on an empty disk\n",
+               save_newest(slots), save_first_free(slots));
+        fails++;
+    }
+    menu.page = MENU_ROOT; menu.started = 0;
+    ctx = menu_ctx(&cfg, slots);
+    count = menu_build(&ctx, rows);
+    if (count != 5 || rows[0].act != MA_CONTINUE || rows[0].enabled ||
+        rows[1].act != MA_LOADPAGE || rows[1].enabled) {
+        printf("FAIL  menu: a first launch does not offer new game with"
+               " continue and load dim (%d rows)\n", count);
+        fails++;
+    } else {
+        printf("menu    : first launch - \"%s\" and \"%s\" dim, \"%s\" ready\n",
+               rows[0].text, rows[1].text, rows[2].text);
+    }
+    /* The caret must not START on a dim row - the very first thing the player
+     * ever sees would otherwise be a selection that does nothing. */
+    if (menu_first(rows, count) != 2) {
+        printf("FAIL  menu: the caret opens on row %d, which is dim\n",
+               menu_first(rows, count));
+        fails++;
+    }
+
+    /* ---- 2. slots are read back as what was written into them ------------ */
+    if (menu_test_write_slot(g, 2, 5000) != 0 ||
+        menu_test_write_slot(g, 4, 9000) != 0 ||
+        menu_test_write_slot(g, 0, 7000) != 0) {
+        printf("FAIL  menu: could not write the test slots\n");
+        fails++;
+    }
+    if (save_scan(slots) != 3) {
+        printf("FAIL  menu: three slots written, %d scanned\n", save_scan(slots));
+        fails++;
+    }
+    if (!slots[0].used || !slots[2].used || !slots[4].used ||
+        slots[1].used || slots[3].used || slots[5].used) {
+        printf("FAIL  menu: the wrong slots came back used\n");
+        fails++;
+    }
+    if (save_first_free(slots) != 1) {
+        printf("FAIL  menu: first free is %d, expected 1\n",
+               save_first_free(slots));
+        fails++;
+    }
+
+    /* ---- 3. continue takes the NEWEST save, not the lowest slot ---------- */
+    if (save_newest(slots) != 4) {
+        printf("FAIL  menu: newest is slot %d, but slot 5 was stamped latest\n",
+               save_newest(slots) + 1);
+        fails++;
+    } else {
+        printf("menu    : continue takes slot 5, the latest of 1, 3 and 5\n");
+    }
+    /* NEGATIVE CONTROL. Restamp so a DIFFERENT slot is newest. If the answer
+     * does not move, save_newest is reporting slot order - which agrees with
+     * the check above by accident and would send continue to the wrong save
+     * the first time somebody played out of order. */
+    if (menu_test_write_slot(g, 2, 20000) == 0) {
+        (void)save_scan(slots);
+        if (save_newest(slots) != 2) {
+            printf("FAIL  menu: negative control - newest stayed at slot %d"
+                   " after slot 3 was restamped latest; it is ordering by slot,"
+                   " not by time\n", save_newest(slots) + 1);
             fails++;
         } else {
-            printf("menu    : root row 0 is \"%s\" at the title, \"%s\" in play\n",
-                   rows[0].text, started[0].text);
+            printf("menu    : negative control PASS (restamping moves continue"
+                   " to slot 3)\n");
         }
     }
 
-    /* ---- 2. "load game" tracks whether a save can actually be loaded ----- */
-    {
-        Game *g  = (Game *)SDL_malloc(sizeof(Game));
-        Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+    /* ---- 4. the root menu changes once there is something to continue ---- */
+    menu.page = MENU_ROOT; menu.started = 0;
+    ctx = menu_ctx(&cfg, slots);
+    count = menu_build(&ctx, rows);
+    if (!rows[0].enabled || rows[0].act != MA_CONTINUE ||
+        rows[0].slot != save_newest(slots)) {
+        printf("FAIL  menu: continue is not lit, or does not carry the newest"
+               " slot (%d vs %d)\n", rows[0].slot, save_newest(slots));
+        fails++;
+    }
+    if (!rows[1].enabled || rows[1].act != MA_LOADPAGE) {
+        printf("FAIL  menu: load game is not offered with saves on disk\n");
+        fails++;
+    }
+    if (menu_first(rows, count) != 0) {
+        printf("FAIL  menu: the caret does not open on continue\n");
+        fails++;
+    } else {
+        printf("menu    : with saves on disk the root offers"
+               " \"%s\" / \"%s\" / \"%s\"\n",
+               rows[0].text, rows[1].text, rows[2].text);
+    }
+    /* Paused, the same page must offer resume and save instead of continue -
+     * continuing is meaningless while she is standing in the world. */
+    menu.started = 1;
+    ctx = menu_ctx(&cfg, slots);
+    count = menu_build(&ctx, rows);
+    if (rows[0].act != MA_START || rows[1].act != MA_SAVE) {
+        printf("FAIL  menu: the pause menu does not lead with resume and save\n");
+        fails++;
+    } else {
+        printf("menu    : paused, the root leads with \"%s\" and \"%s\"\n",
+               rows[0].text, rows[1].text);
+    }
+    menu.started = 0;
 
-        if (!g || !sc) {
-            printf("FAIL  menu: could not allocate a world for the save case\n");
+    /* ---- 5. the slot list, in both of its modes -------------------------- */
+    menu.page = MENU_SLOTS;
+    menu.mode = SLOTS_LOAD;
+    ctx = menu_ctx(&cfg, slots);
+    count = menu_build(&ctx, rows);
+    if (count != SAVE_SLOTS + 1) {
+        printf("FAIL  menu: the slot list has %d rows, expected %d\n",
+               count, SAVE_SLOTS + 1);
+        fails++;
+    }
+    for (i = 0; i < SAVE_SLOTS; i++) {
+        if (rows[i].slot != i) {
+            printf("FAIL  menu: list row %d carries slot %d\n", i, rows[i].slot);
+            fails++;
+        }
+        /* Reading needs something to read: an empty slot must be dead here. */
+        if (rows[i].enabled != slots[i].used) {
+            printf("FAIL  menu: load mode offers slot %d, which is %s\n",
+                   i + 1, slots[i].used ? "used" : "empty");
+            fails++;
+        }
+    }
+    if (rows[SAVE_SLOTS].act != MA_BACK) {
+        printf("FAIL  menu: the slot list has no way back\n");
+        fails++;
+    }
+    /* NEGATIVE CONTROL for the mode. In SLOTS_NEW every slot is a legitimate
+     * destination, empty or not. If the two modes produced the same rows the
+     * mode would be doing nothing, and "replace which save" would refuse to
+     * offer the saves it exists to replace. */
+    menu.mode = SLOTS_NEW;
+    ctx = menu_ctx(&cfg, slots);
+    count = menu_build(&ctx, rows);
+    {
+        int all = 1;
+        for (i = 0; i < SAVE_SLOTS; i++)
+            if (!rows[i].enabled) all = 0;
+        if (!all) {
+            printf("FAIL  menu: negative control - replace mode still refuses"
+                   " some slots, so the mode changes nothing\n");
             fails++;
         } else {
-            SDL_RWops *rw;
-            Uint8 buf[SAVE_SIZE];
+            printf("menu    : load mode offers 3 of 6 slots, replace mode"
+                   " offers all 6\n");
+        }
+    }
+    menu.mode = SLOTS_LOAD;
 
-            /* An EMPTY file, not a missing one: the case a bare "does the
-             * file exist" check gets wrong. */
+    /* ---- 6. a slot with an unreadable file is not offered ----------------- */
+    {
+        char path[SAVE_PATH_MAX];
+        Uint8 buf[SAVE_SIZE];
+        SDL_RWops *rw;
+
+        save_slot_path(path, sizeof(path), 0);
+        rw = SDL_RWFromFile(path, "rb");
+        if (rw && SDL_RWread(rw, buf, 1, SAVE_SIZE) == (size_t)SAVE_SIZE) {
+            SDL_RWclose(rw);
+            /* NEGATIVE CONTROL. The file is still there and still the right
+             * length - only the version is wrong, which is exactly what every
+             * save on disk from before this change looks like. A list lit by
+             * mere existence would keep offering it and then fail on it. */
+            buf[2] = SAVE_VERSION - 1;
             rw = SDL_RWFromFile(path, "wb");
+            if (rw) { SDL_RWwrite(rw, buf, 1, SAVE_SIZE); SDL_RWclose(rw); }
+            (void)save_scan(slots);
+            if (slots[0].used) {
+                printf("FAIL  menu: negative control - a slot holding a"
+                       " previous-version save is still offered\n");
+                fails++;
+            } else {
+                printf("menu    : negative control PASS (a v%d file in slot 1"
+                       " is not offered)\n", SAVE_VERSION - 1);
+            }
+            /* And put a good save back, so the rest of the test has three. */
+            (void)menu_test_write_slot(g, 0, 7000);
+            (void)save_scan(slots);
+        } else {
             if (rw) SDL_RWclose(rw);
-            count = menu_build(MENU_ROOT, &cfg, 0, save_exists(path), rows);
-            if (rows[1].enabled) {
-                printf("FAIL  menu: load offered for an empty save file\n");
-                fails++;
-            }
-
-            game_init(g, sc, 1);
-            if (game_save(g, path) != 0) {
-                printf("FAIL  menu: could not write the test save\n");
-                fails++;
-            }
-            count = menu_build(MENU_ROOT, &cfg, 0, save_exists(path), rows);
-            if (!rows[1].enabled) {
-                printf("FAIL  menu: load NOT offered for a save that game_save"
-                       " just wrote\n");
-                fails++;
-            } else {
-                printf("menu    : load offered for a real save, refused for an"
-                       " empty file\n");
-            }
-
-            /* NEGATIVE CONTROL. The file still exists and is still 28 bytes -
-             * only the version byte is wrong. A row lit by mere existence would
-             * stay lit here and then fail the moment it was chosen, which reads
-             * as the game being broken rather than as there being no save. */
-            rw = SDL_RWFromFile(path, "rb");
-            if (rw && SDL_RWread(rw, buf, 1, SAVE_SIZE) == SAVE_SIZE) {
-                SDL_RWclose(rw);
-                buf[2] = SAVE_VERSION + 1;
-                rw = SDL_RWFromFile(path, "wb");
-                if (rw) {
-                    SDL_RWwrite(rw, buf, 1, SAVE_SIZE);
-                    SDL_RWclose(rw);
-                }
-                count = menu_build(MENU_ROOT, &cfg, 0, save_exists(path), rows);
-                if (rows[1].enabled) {
-                    printf("FAIL  menu: negative control - load still offered for"
-                           " a file game_load would reject; the row is lit by"
-                           " existence, not by validity\n");
-                    fails++;
-                } else {
-                    printf("menu    : negative control PASS (a 28-byte file with"
-                           " a bad version is not offered)\n");
-                }
-            } else {
-                if (rw) SDL_RWclose(rw);
-                printf("FAIL  menu: could not re-read the test save\n");
-                fails++;
-            }
-            SDL_free(g);
-            SDL_free(sc);
+            printf("FAIL  menu: could not re-read slot 1\n");
+            fails++;
         }
     }
 
-    /* ---- 3. it draws when open, and nothing at all when closed ---------- */
-    SDL_zero(menu);
-    menu.page = MENU_ROOT;
-    menu.sel  = 0;
-    SDL_FillRect(fb, NULL, 0);
-    menu_draw(fb, &cfg, 1);
-    {
-        /* Counted as pixels that are NOT the background, not as pixels that are
-         * lit: the menu fills the whole surface with an ink that is itself
-         * non-black, so count_lit alone returns all 129,600 whether or not a
-         * single glyph rendered - it would pass on an empty screen. What has to
-         * be true is that TEXT reached the surface. */
-        Uint32 ink_c   = SDL_MapRGB(fb->format, 0x10, 0x12, 0x18);
-        int    filled  = count_col(fb, ink_c, 0, 0, fb->w, fb->h);
-        int    open_px = fb->w * fb->h - filled;
-        int    shut_px;
+    /* ---- 7. replacing a save is never done without being asked ----------- */
+    menu.page = MENU_CONFIRM;
+    menu.pending = 2;
+    ctx = menu_ctx(&cfg, slots);
+    count = menu_build(&ctx, rows);
+    if (count != 2) {
+        printf("FAIL  menu: the confirm page has %d rows, expected 2\n", count);
+        fails++;
+    }
+    /* "no" must be FIRST, so the caret starts on it: the default answer to a
+     * question nobody read has to be the one that destroys nothing. */
+    if (rows[0].act != MA_BACK || rows[1].act != MA_YES) {
+        printf("FAIL  menu: the confirm page does not default to keeping the"
+               " save\n");
+        fails++;
+    } else if (menu_first(rows, count) != 0) {
+        printf("FAIL  menu: the confirm caret does not start on \"%s\"\n",
+               rows[0].text);
+        fails++;
+    } else {
+        printf("menu    : replacing asks first, and opens on \"%s\"\n",
+               rows[0].text);
+    }
+    /* NEGATIVE CONTROL: the two answers must not be the same action. A confirm
+     * whose "no" also returns MA_YES would pass every check above. */
+    if (menu_act(rows, count, 0) == menu_act(rows, count, 1)) {
+        printf("FAIL  menu: negative control - yes and no resolve to the same"
+               " action, so the question is decoration\n");
+        fails++;
+    } else {
+        printf("menu    : negative control PASS (yes and no are different"
+               " actions)\n");
+    }
+    if (rows[1].slot != 2) {
+        printf("FAIL  menu: the confirm's yes carries slot %d, not the slot"
+               " being replaced\n", rows[1].slot);
+        fails++;
+    }
+    menu.pending = 0;
 
+    /* ---- 8. it draws when open, and nothing at all when closed ----------- */
+    {
+        Uint32 ink_c = SDL_MapRGB(fb->format, 0x10, 0x12, 0x18);
+        int open_px, filled, shut_px;
+
+        SDL_zero(menu);
+        menu.page = MENU_ROOT;
+        ctx = menu_ctx(&cfg, slots);
+        SDL_FillRect(fb, NULL, 0);
+        menu_draw(fb, &ctx);
+        /* Counted as pixels that are NOT the background, not as pixels that
+         * are lit: the menu fills the whole surface with an ink that is itself
+         * non-black, so count_lit alone returns all 129,600 whether or not a
+         * single glyph rendered - it would pass on an empty screen. */
+        filled  = count_col(fb, ink_c, 0, 0, fb->w, fb->h);
+        open_px = fb->w * fb->h - filled;
         if (filled <= 0) {
             printf("FAIL  menu: an open menu did not fill its background\n");
             fails++;
@@ -10194,40 +10691,61 @@ static int menu_selftest(void)
             fails++;
         }
         /* NEGATIVE CONTROL, driven through the SAME predicate main() gates the
-         * draw with, so it is the shipping path that is being asserted about
-         * and not a test-only one. */
+         * draw with, so it is the shipping path being asserted about. */
         SDL_zero(menu);
         menu.page = MENU_NONE;
+        ctx = menu_ctx(&cfg, slots);
         SDL_FillRect(fb, NULL, 0);
         if (menu.page != MENU_NONE)
-            menu_draw(fb, &cfg, 1);
-        menu_draw(fb, &cfg, 1);   /* and directly, to prove its own early out */
+            menu_draw(fb, &ctx);
+        menu_draw(fb, &ctx);   /* and directly, to prove its own early out */
         shut_px = count_lit(fb, 0, 0, fb->w, fb->h);
         if (shut_px != 0) {
             printf("FAIL  menu: negative control - a closed menu drew %d px\n",
                    shut_px);
             fails++;
         } else {
-            printf("menu    : draws %d px of text over a %d px ground when open,"
-                   " 0 px of anything when closed\n", open_px, filled);
+            printf("menu    : draws %d px of text over a %d px ground when"
+                   " open, 0 px of anything when closed\n", open_px, filled);
+        }
+
+        /* Every page must actually render something. A page that built rows
+         * but drew nothing would slip past the root-only check above. */
+        {
+            static const MenuPage pages[5] = {
+                MENU_ROOT, MENU_SLOTS, MENU_CONFIRM, MENU_SETTINGS, MENU_CONTROLS
+            };
+            int p, blank = 0;
+            for (p = 0; p < 5; p++) {
+                SDL_zero(menu);
+                menu.page = pages[p];
+                ctx = menu_ctx(&cfg, slots);
+                SDL_FillRect(fb, NULL, 0);
+                menu_draw(fb, &ctx);
+                if (fb->w * fb->h - count_col(fb, ink_c, 0, 0, fb->w, fb->h) <= 0)
+                    blank++;
+            }
+            if (blank) {
+                printf("FAIL  menu: %d of 5 pages drew no text\n", blank);
+                fails++;
+            } else {
+                printf("menu    : all 5 pages draw text\n");
+            }
         }
     }
 
-    /* ---- 3b. a message raised while the menu is up is actually shown ----- */
+    /* ---- 9. a message raised while the menu is up is actually shown ------ */
     {
-        /* Text pixels, i.e. everything that is not the background ink - the
-         * same reason check 3 counts that way: the menu paints all 129,600
-         * pixels a non-black colour, so count_lit saturates and would report
-         * no difference whether or not the message rendered. */
         Uint32 ink_c = SDL_MapRGB(fb->format, 0x10, 0x12, 0x18);
         int quiet, loud;
 #define MENU_TEXT_PX() (fb->w * fb->h - count_col(fb, ink_c, 0, 0, fb->w, fb->h))
 
         SDL_zero(menu);
         menu.page = MENU_ROOT;
+        ctx = menu_ctx(&cfg, slots);
         hud.toast_left = 0;
         SDL_FillRect(fb, NULL, 0);
-        menu_draw(fb, &cfg, 1);
+        menu_draw(fb, &ctx);
         quiet = MENU_TEXT_PX();
 
         /* The menu replaces the HUD, so a toast posted here used to be handed
@@ -10236,7 +10754,7 @@ static int menu_selftest(void)
          * the menu open, so this is the only place the player could see it. */
         hud_toast("that save could not be loaded");
         SDL_FillRect(fb, NULL, 0);
-        menu_draw(fb, &cfg, 1);
+        menu_draw(fb, &ctx);
         loud = MENU_TEXT_PX();
 
         if (loud <= quiet) {
@@ -10246,13 +10764,11 @@ static int menu_selftest(void)
         } else {
             printf("menu    : a toast over the menu adds %d px\n", loud - quiet);
         }
-        /* NEGATIVE CONTROL: an EXPIRED toast must not be drawn. Without this
-         * the check above would pass on a menu that draws hud.toast whatever
-         * its remaining time says, and a stale message would sit on the title
-         * screen forever. */
+        /* NEGATIVE CONTROL: an EXPIRED toast must not be drawn, or a stale
+         * message would sit on the title screen forever. */
         hud.toast_left = 0;
         SDL_FillRect(fb, NULL, 0);
-        menu_draw(fb, &cfg, 1);
+        menu_draw(fb, &ctx);
         if (MENU_TEXT_PX() != quiet) {
             printf("FAIL  menu: negative control - an expired toast is still"
                    " drawn over the menu\n");
@@ -10265,13 +10781,19 @@ static int menu_selftest(void)
         SDL_zero(hud);
     }
 
-    /* ---- 4. the selection cannot escape, and never rests on a dead row --- */
+    /* ---- 10. the selection cannot escape, and never rests on a dead row -- */
     {
-        int sel = 0, bad = 0, onto_disabled = 0, step;
+        int sel, bad = 0, onto_disabled = 0, step;
 
-        /* save_ok = 0, so "load game" is disabled and sits in the MIDDLE of the
-         * list - the position that catches a skip implemented as a clamp. */
-        count = menu_build(MENU_ROOT, &cfg, 0, 0, rows);
+        /* The load list with three of six slots empty: the disabled rows are
+         * scattered through the MIDDLE of the list, which is the arrangement
+         * that catches a skip implemented as a clamp. */
+        SDL_zero(menu);
+        menu.page = MENU_SLOTS;
+        menu.mode = SLOTS_LOAD;
+        ctx = menu_ctx(&cfg, slots);
+        count = menu_build(&ctx, rows);
+        sel = menu_first(rows, count);
         for (i = 0; i < 200; i++) {
             step = (i % 3 == 0) ? -1 : 1;
             sel = menu_step(rows, count, sel, step);
@@ -10289,67 +10811,95 @@ static int menu_selftest(void)
         }
         if (!bad && !onto_disabled)
             printf("menu    : 200 moves stayed inside %d rows and never landed"
-                   " on the disabled one\n", count);
+                   " on an empty slot\n", count);
 
         /* It must WRAP, not stop. A clamp would pass everything above. */
-        if (menu_step(rows, count, 0, -1) != count - 1 ||
-            menu_step(rows, count, count - 1, 1) != 0) {
-            printf("FAIL  menu: the selection clamps at the ends instead of"
-                   " wrapping\n");
-            fails++;
-        } else {
-            printf("menu    : wraps at both ends\n");
-        }
-    }
-
-    /* ---- 5. a row does what its label says, and a bad index does nothing - */
-    {
-        count = menu_build(MENU_ROOT, &cfg, 0, 1, rows);
-        if (menu_act(rows, count, 0) != MA_START ||
-            menu_act(rows, count, 1) != MA_LOAD  ||
-            menu_act(rows, count, 2) != MA_SETTINGS ||
-            menu_act(rows, count, 3) != MA_QUIT) {
-            printf("FAIL  menu: a root row's action does not match its label\n");
-            fails++;
-        } else {
-            printf("menu    : every root row's action matches its label\n");
-        }
-        /* NEGATIVE CONTROL. Nothing outside the list may resolve to an action -
-         * MA_QUIT reached by an off-by-one would end the process. */
         {
-            int idx[4]; int n_bad = 0;
-            idx[0] = -1; idx[1] = count; idx[2] = count + 99; idx[3] = -1000;
-            for (i = 0; i < 4; i++)
-                if (menu_act(rows, count, idx[i]) != MA_NONE) n_bad++;
-            /* A disabled row is out of bounds in the same sense. */
-            count = menu_build(MENU_ROOT, &cfg, 0, 0, rows);
-            if (menu_act(rows, count, 1) != MA_NONE) n_bad++;
-            if (n_bad) {
-                printf("FAIL  menu: negative control - %d out-of-range or"
-                       " disabled rows resolved to a real action\n", n_bad);
+            int last = count - 1, first = menu_first(rows, count);
+            if (menu_step(rows, count, first, -1) != last ||
+                menu_step(rows, count, last, 1) != first) {
+                printf("FAIL  menu: the selection clamps at the ends instead"
+                       " of wrapping\n");
                 fails++;
             } else {
-                printf("menu    : negative control PASS (-1, %d, %d and a"
-                       " disabled row all do nothing)\n", count, count + 99);
+                printf("menu    : wraps at both ends\n");
             }
         }
     }
 
-    /* ---- 6. every label is drawable, and fits ---------------------------- */
+    /* ---- 11. a bad index does nothing, on every page --------------------- */
     {
-        static const MenuPage pages[3] = { MENU_ROOT, MENU_SETTINGS, MENU_CONTROLS };
-        int checked = 0, blanks = 0, wide = 0, pi, ri, ci;
+        static const MenuPage pages[5] = {
+            MENU_ROOT, MENU_SLOTS, MENU_CONFIRM, MENU_SETTINGS, MENU_CONTROLS
+        };
+        int p, n_bad = 0;
 
-        for (pi = 0; pi < 3; pi++) {
-            /* Both save states and both fullscreen states, so no label is
-             * missed because it only exists in one of them. */
-            int pass;
-            for (pass = 0; pass < 4; pass++) {
+        for (p = 0; p < 5; p++) {
+            int idx[4];
+            SDL_zero(menu);
+            menu.page = pages[p];
+            ctx = menu_ctx(&cfg, slots);
+            count = menu_build(&ctx, rows);
+            idx[0] = -1; idx[1] = count; idx[2] = count + 99; idx[3] = -1000;
+            for (i = 0; i < 4; i++)
+                if (menu_act(rows, count, idx[i]) != MA_NONE) n_bad++;
+        }
+        /* A disabled row is out of bounds in the same sense: an empty slot in
+         * load mode must not resolve to MA_SLOT and try to read a file that is
+         * not there. */
+        SDL_zero(menu);
+        menu.page = MENU_SLOTS;
+        menu.mode = SLOTS_LOAD;
+        ctx = menu_ctx(&cfg, slots);
+        count = menu_build(&ctx, rows);
+        for (i = 0; i < SAVE_SLOTS; i++)
+            if (!slots[i].used && menu_act(rows, count, i) != MA_NONE) n_bad++;
+        if (n_bad) {
+            printf("FAIL  menu: negative control - %d out-of-range or disabled"
+                   " rows resolved to a real action\n", n_bad);
+            fails++;
+        } else {
+            printf("menu    : negative control PASS (out-of-range indices and"
+                   " empty slots do nothing, on all 5 pages)\n");
+        }
+    }
+
+    /* ---- 12. every label is drawable, and fits --------------------------- */
+    {
+        static const MenuPage pages[5] = {
+            MENU_ROOT, MENU_SLOTS, MENU_CONFIRM, MENU_SETTINGS, MENU_CONTROLS
+        };
+        int checked = 0, blanks = 0, wide = 0, pi, ri, ci, pass;
+
+        for (pi = 0; pi < 5; pi++) {
+            /* Every combination that changes a label: paused or not, both slot
+             * modes, both fullscreen states, and a full disk as well as this
+             * one - so no label escapes because it only exists in one of them. */
+            for (pass = 0; pass < 8; pass++) {
                 Settings v = cfg;
+                SaveSlot  sv[SAVE_SLOTS];
+                int si;
+
                 v.fullscreen = pass & 1;
                 v.music = (pass & 2) ? 0 : VOL_MAX;
                 v.sfx   = (pass & 2) ? 3 : VOL_MAX;
-                count = menu_build(pages[pi], &v, pass & 1, pass & 1, rows);
+                SDL_memcpy(sv, slots, sizeof(sv));
+                if (pass & 4)
+                    for (si = 0; si < SAVE_SLOTS; si++) {
+                        /* The widest a row can be: the longest area name, a
+                         * two-digit total, and the newest marker. */
+                        sv[si].used  = 1;
+                        sv[si].area  = 2;   /* "underworld" */
+                        sv[si].done  = ENTITY_COUNT;
+                        sv[si].stamp = (Uint64)(si + 1);
+                    }
+                SDL_zero(menu);
+                menu.page    = pages[pi];
+                menu.started = pass & 1;
+                menu.mode    = (pass & 2) ? SLOTS_NEW : SLOTS_LOAD;
+                menu.pending = 0;
+                ctx = menu_ctx(&v, sv);
+                count = menu_build(&ctx, rows);
                 for (ri = 0; ri < count; ri++) {
                     checked++;
                     if (text_w(rows[ri].text) > LOGICAL_W - 8) {
@@ -10369,40 +10919,32 @@ static int menu_selftest(void)
                 }
             }
         }
-        for (ri = 0; ri < MFOOT_COUNT; ri++) {
-            checked++;
-            if (text_w(MENU_FOOTERS[ri]) > LOGICAL_W - 8) {
-                printf("FAIL  menu: footer \"%s\" is %d px, wider than the"
-                       " frame\n", MENU_FOOTERS[ri], text_w(MENU_FOOTERS[ri]));
-                wide++;
-            }
-            for (ci = 0; MENU_FOOTERS[ri][ci]; ci++)
-                if (MENU_FOOTERS[ri][ci] != ' ' &&
-                    font_bits((unsigned char)MENU_FOOTERS[ri][ci],
-                              FONT_STRIDE) == 0) {
-                    printf("FAIL  menu: footer \"%s\" contains '%c', which the"
-                           " font draws as nothing\n",
-                           MENU_FOOTERS[ri], MENU_FOOTERS[ri][ci]);
-                    blanks++;
+        /* The headings and footers are drawn text too, and are the one place a
+         * long phrase could quietly overflow. */
+        {
+            static const char *const extra[] = {
+                "load game", "replace which save", "replace this save",
+                "settings", "controls", "this cannot be undone."
+            };
+            int n = (int)(sizeof(extra) / sizeof(extra[0]));
+            for (ri = 0; ri < n + MFOOT_COUNT + MENU_CONTROL_COUNT; ri++) {
+                const char *t = ri < n ? extra[ri]
+                              : ri < n + MFOOT_COUNT ? MENU_FOOTERS[ri - n]
+                              : MENU_CONTROL_LINES[ri - n - MFOOT_COUNT];
+                checked++;
+                if (text_w(t) > LOGICAL_W - 8) {
+                    printf("FAIL  menu: \"%s\" is %d px, wider than the frame\n",
+                           t, text_w(t));
+                    wide++;
                 }
-        }
-        for (ri = 0; ri < MENU_CONTROL_COUNT; ri++) {
-            checked++;
-            if (text_w(MENU_CONTROL_LINES[ri]) > LOGICAL_W - 8) {
-                printf("FAIL  menu: control line \"%s\" is %d px, wider than the"
-                       " frame\n", MENU_CONTROL_LINES[ri],
-                       text_w(MENU_CONTROL_LINES[ri]));
-                wide++;
+                for (ci = 0; t[ci]; ci++)
+                    if (t[ci] != ' ' &&
+                        font_bits((unsigned char)t[ci], FONT_STRIDE) == 0) {
+                        printf("FAIL  menu: \"%s\" contains '%c', which the font"
+                               " draws as nothing\n", t, t[ci]);
+                        blanks++;
+                    }
             }
-            for (ci = 0; MENU_CONTROL_LINES[ri][ci]; ci++)
-                if (MENU_CONTROL_LINES[ri][ci] != ' ' &&
-                    font_bits((unsigned char)MENU_CONTROL_LINES[ri][ci],
-                              FONT_STRIDE) == 0) {
-                    printf("FAIL  menu: control line \"%s\" contains '%c', which"
-                           " the font draws as nothing\n",
-                           MENU_CONTROL_LINES[ri], MENU_CONTROL_LINES[ri][ci]);
-                    blanks++;
-                }
         }
         fails += wide + blanks;
         if (!wide && !blanks)
@@ -10411,8 +10953,7 @@ static int menu_selftest(void)
 
         /* NEGATIVE CONTROL. '(' IS in the table's range and IS all zeroes, so a
          * label using it would draw as a hole and every other check above would
-         * still pass. If this finds nothing, the loop above is measuring
-         * nothing. */
+         * still pass. If this finds nothing, the loop above measures nothing. */
         if (font_bits('(', FONT_STRIDE) != 0) {
             printf("FAIL  menu: negative control - '(' has bits, so the blank"
                    " glyph check cannot catch a label that uses it\n");
@@ -10435,16 +10976,40 @@ static int menu_selftest(void)
         }
     }
 
-    /* ---- 7. the settings file cannot poison the live settings ------------ */
+    /* ---- 13. every row fits the array it is built into -------------------- */
+    {
+        static const MenuPage pages[5] = {
+            MENU_ROOT, MENU_SLOTS, MENU_CONFIRM, MENU_SETTINGS, MENU_CONTROLS
+        };
+        int p, worst = 0;
+        for (p = 0; p < 5; p++) {
+            SDL_zero(menu);
+            menu.page    = pages[p];
+            menu.started = 1;    /* the root's longest form */
+            ctx = menu_ctx(&cfg, slots);
+            count = menu_build(&ctx, rows);
+            if (count > worst) worst = count;
+        }
+        if (worst > MENU_ROWS_MAX) {
+            printf("FAIL  menu: a page builds %d rows into an array of %d\n",
+                   worst, MENU_ROWS_MAX);
+            fails++;
+        } else {
+            printf("menu    : the longest page is %d rows of %d\n",
+                   worst, MENU_ROWS_MAX);
+        }
+    }
+
+    /* ---- 14. the settings file cannot poison the live settings ----------- */
     {
         Settings want;
         want.music = 3; want.sfx = 7; want.fullscreen = 1; want.scale = 4;
-        if (cfg_save(&want, path) != 0) {
+        if (cfg_save(&want, cfgpath) != 0) {
             printf("FAIL  menu: could not write the test settings file\n");
             fails++;
         }
         cfg_defaults(&back);
-        if (cfg_load(&back, path) != 0 ||
+        if (cfg_load(&back, cfgpath) != 0 ||
             back.music != 3 || back.sfx != 7 ||
             back.fullscreen != 1 || back.scale != 4) {
             printf("FAIL  menu: settings did not round trip"
@@ -10476,21 +11041,21 @@ static int menu_selftest(void)
                 SDL_RWops *rw;
                 Settings live = back, before;
 
-                if (cfg_save(&want, path) != 0) continue;
-                rw = SDL_RWFromFile(path, "rb");
+                if (cfg_save(&want, cfgpath) != 0) continue;
+                rw = SDL_RWFromFile(cfgpath, "rb");
                 if (!rw) continue;
                 if (SDL_RWread(rw, buf, 1, CFG_SIZE) != CFG_SIZE) {
                     SDL_RWclose(rw); continue;
                 }
                 SDL_RWclose(rw);
                 buf[bad[i].off] = (Uint8)bad[i].val;
-                rw = SDL_RWFromFile(path, "wb");
+                rw = SDL_RWFromFile(cfgpath, "wb");
                 if (!rw) continue;
                 SDL_RWwrite(rw, buf, 1, CFG_SIZE);
                 SDL_RWclose(rw);
 
                 before = live;
-                if (cfg_load(&live, path) == 0) {
+                if (cfg_load(&live, cfgpath) == 0) {
                     printf("FAIL  menu: accepted a settings file with %s\n",
                            bad[i].what);
                     fails++;
@@ -10511,8 +11076,8 @@ static int menu_selftest(void)
         {
             Settings live;
             cfg_defaults(&live);
-            (void)remove(path);
-            if (cfg_load(&live, path) == 0) {
+            (void)remove(cfgpath);
+            if (cfg_load(&live, cfgpath) == 0) {
                 printf("FAIL  menu: loaded settings from a file that is not"
                        " there\n");
                 fails++;
@@ -10527,7 +11092,7 @@ static int menu_selftest(void)
         }
     }
 
-    /* ---- 8. the volume steps are bounded ---------------------------------- */
+    /* ---- 15. the volume steps are bounded --------------------------------- */
     {
         Settings v = cfg;
         for (i = 0; i < 50; i++) menu_adjust(&v, MADJ_MUSIC, -1);
@@ -10551,7 +11116,7 @@ static int menu_selftest(void)
         }
     }
 
-    /* ---- 9. the volume setting actually reaches the speakers ------------- */
+    /* ---- 16. the volume setting actually reaches the speakers ------------- */
     {
         /* The callback is driven DIRECTLY, with no device open: it is an
          * ordinary function, and calling it here measures the real mix on a
@@ -10561,48 +11126,27 @@ static int menu_selftest(void)
         Audio a;
         float buf[512];
         int   nz_full = 0, nz_mute = 0, nz_sfx = 0;
+        int   pass;
 
-        SDL_zero(a);
-        a.rate     = AUDIO_RATE;
-        a.channels = 2;
-        a.synth.synth_on = 1;
-        a.synth.layers   = (1 << NUM_LAYERS) - 1;
-        a.synth.area     = BIOME_FOREST;
-        SDL_AtomicSet(&a.music_vol, VOL_MAX);
-        SDL_AtomicSet(&a.sfx_vol,   VOL_MAX);
-        audio_cb(&a, (Uint8 *)buf, (int)sizeof(buf));
-        for (i = 0; i < (int)(sizeof(buf) / sizeof(buf[0])); i++)
-            if (buf[i] != 0.0f) nz_full++;
-
-        /* Music silenced, SFX untouched and none firing: the buffer must be
-         * exactly zero. Not "quiet" - a volume of 0 that still leaked would be
-         * a mix that cannot be turned off. */
-        SDL_zero(a);
-        a.rate     = AUDIO_RATE;
-        a.channels = 2;
-        a.synth.synth_on = 1;
-        a.synth.layers   = (1 << NUM_LAYERS) - 1;
-        a.synth.area     = BIOME_FOREST;
-        SDL_AtomicSet(&a.music_vol, 0);
-        SDL_AtomicSet(&a.sfx_vol,   VOL_MAX);
-        audio_cb(&a, (Uint8 *)buf, (int)sizeof(buf));
-        for (i = 0; i < (int)(sizeof(buf) / sizeof(buf[0])); i++)
-            if (buf[i] != 0.0f) nz_mute++;
-
-        /* And the two are INDEPENDENT: with the music silenced, a fired SFX
-         * must still be heard. A single master volume would fail this. */
-        SDL_zero(a);
-        a.rate     = AUDIO_RATE;
-        a.channels = 2;
-        a.synth.synth_on = 1;
-        a.synth.layers   = (1 << NUM_LAYERS) - 1;
-        a.synth.area     = BIOME_FOREST;
-        SDL_AtomicSet(&a.music_vol, 0);
-        SDL_AtomicSet(&a.sfx_vol,   VOL_MAX);
-        sfx_fire(&a, SFX_CHIME);
-        audio_cb(&a, (Uint8 *)buf, (int)sizeof(buf));
-        for (i = 0; i < (int)(sizeof(buf) / sizeof(buf[0])); i++)
-            if (buf[i] != 0.0f) nz_sfx++;
+        for (pass = 0; pass < 3; pass++) {
+            int n = 0;
+            SDL_zero(a);
+            a.rate     = AUDIO_RATE;
+            a.channels = 2;
+            a.synth.synth_on = 1;
+            a.synth.layers   = (1 << NUM_LAYERS) - 1;
+            a.synth.area     = BIOME_FOREST;
+            SDL_AtomicSet(&a.music_vol, pass == 0 ? VOL_MAX : 0);
+            SDL_AtomicSet(&a.sfx_vol,   VOL_MAX);
+            if (pass == 2)
+                sfx_fire(&a, SFX_CHIME);
+            audio_cb(&a, (Uint8 *)buf, (int)sizeof(buf));
+            for (i = 0; i < (int)(sizeof(buf) / sizeof(buf[0])); i++)
+                if (buf[i] != 0.0f) n++;
+            if (pass == 0) nz_full = n;
+            if (pass == 1) nz_mute = n;
+            if (pass == 2) nz_sfx  = n;
+        }
 
         if (nz_mute != 0) {
             printf("FAIL  menu: music volume 0 still produced %d nonzero"
@@ -10630,7 +11174,11 @@ static int menu_selftest(void)
                    (int)(sizeof(buf) / sizeof(buf[0])));
     }
 
-    (void)remove(path);
+    menu_test_clear_slots();
+    (void)remove(cfgpath);
+    SDL_zero(menu);
+    SDL_free(g);
+    SDL_free(sc);
     SDL_FreeSurface(fb);
     printf("menu    : %s\n", fails ? "FAIL" : "PASS");
     return fails;
@@ -10806,12 +11354,18 @@ static int save_selftest(Uint64 base)
             printf("FAIL  save: could not read the file back for the controls\n");
             fails++;
         } else {
-            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[14];
+            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[15];
             int nctl = 0;
 
             save_snap(again, &before);
 
-            for (i = 0; i < 14; i++) {
+            /* Derived from the array, not a literal repeated beside it: the
+             * count was hardcoded at 14 and adding a fifteenth control left it
+             * with an uninitialised length, which showed up as "could not
+             * write" rather than as the control silently not running - but
+             * only because the length happened to be garbage rather than
+             * SAVE_SIZE. */
+            for (i = 0; i < (int)(sizeof(ctl) / sizeof(ctl[0])); i++) {
                 SDL_memcpy(ctl[i].buf, good, SAVE_SIZE);
                 ctl[i].len = SAVE_SIZE;
             }
@@ -10822,6 +11376,14 @@ static int save_selftest(Uint64 base)
              * or v2 ({1,2}), so it stays a clean "not a real area" control. */
             ctl[nctl].name = "wrong area";            ctl[nctl].buf[3] = 0; nctl++;
             ctl[nctl].name = "nonzero reserved byte"; ctl[nctl].buf[22] = 1; nctl++;
+            /* A zero timestamp is what a machine whose clock does not work
+             * would write, and it is the one value that would sort this save
+             * as older than every other one forever - so "continue" could
+             * never reach it however recently it was made. Rejected at the
+             * door rather than tolerated and sorted last: a save that cannot
+             * be the newest one is a save the player will think was lost. */
+            ctl[nctl].name = "zero timestamp";
+            SDL_memset(ctl[nctl].buf + 28, 0, 8); nctl++;
             /* Both fall straight out of the gameplay invariant the portal
              * enforces live: you cannot BE in Area 2 unless Area 1 is fully
              * restored (only 3 of 10 area-1 bits are set on `good`, so this
@@ -11622,12 +12184,17 @@ int main(int argc, char **argv)
     SDL_AudioSpec have;
     int scale, running = 1, frame = 0, limit;
     Settings cfg;
-    /* Whether a save is worth offering. Refreshed when the menu opens and after
-     * anything that changes the file, NOT every frame the menu is drawn: the
-     * row is rebuilt at 60 Hz and stat-ing the save that often would put a
-     * syscall in the render path to answer a question that cannot have changed
-     * without one of those events happening first. */
-    int save_ok = 0;
+    /* What is in each of the six slots. Refreshed when the menu opens and after
+     * anything that writes a save, NOT every frame the menu is drawn: the rows
+     * are rebuilt at 60 Hz and six file reads a frame, to answer a question
+     * that cannot change without one of those events happening first, would be
+     * a syscall storm in the render path. */
+    SaveSlot slots[SAVE_SLOTS];
+    char     slot_path[SAVE_PATH_MAX];
+    /* The slot F5 writes and F9 re-reads: the one she is playing. Fixed when a
+     * new game is begun or a save is loaded, -1 until then - which is where a
+     * --frames run stays, since it never passes through the menu. */
+    int cur_slot = -1;
     /* Has anything the settings file holds changed this session? Only then is
      * the file written on the way out. Without it, every first run would drop a
      * wayfarer.cfg recording whatever scale pick_scale happened to choose on
@@ -11931,11 +12498,14 @@ int main(int argc, char **argv)
      * than having no menu: the shots would keep being taken and keep looking
      * fine. So a --frames run plays straight through, exactly as before, and
      * --menu below is how the menu itself gets photographed. */
+    SDL_memset(slots, 0, sizeof(slots));
     if (!limit) {
-        menu.page    = MENU_ROOT;
-        menu.sel     = 0;
         menu.started = 0;
-        save_ok      = save_exists(SAVE_FILENAME);
+        (void)save_scan(slots);
+        /* On a very first launch the caret lands on "new game", because
+         * "continue" above it is dim - a caret resting on a row that does
+         * nothing is the menu looking broken before a key has been pressed. */
+        menu_open(MENU_ROOT, &cfg, slots);
     }
 #if WAYFARER_SELFTEST
     /* --menu: open the menu for a screenshot, the same favour --map does for
@@ -11944,14 +12514,23 @@ int main(int argc, char **argv)
      * AFTER the --frames suppression above, so it wins over it. */
     if (arg_flag(argc, argv, "--menu")) {
         const char *pg = NULL;
-        menu.page    = MENU_ROOT;
-        menu.sel     = 0;
+        MenuPage page = MENU_ROOT;
         menu.started = arg_flag(argc, argv, "--paused");
-        save_ok      = save_exists(SAVE_FILENAME);
+        (void)save_scan(slots);
         for (i = 1; i < argc - 1; i++)
             if (SDL_strcmp(argv[i], "--menupage") == 0) pg = argv[i + 1];
-        if (pg && SDL_strcmp(pg, "settings") == 0) menu.page = MENU_SETTINGS;
-        if (pg && SDL_strcmp(pg, "controls") == 0) menu.page = MENU_CONTROLS;
+        if (pg && SDL_strcmp(pg, "settings") == 0) page = MENU_SETTINGS;
+        if (pg && SDL_strcmp(pg, "controls") == 0) page = MENU_CONTROLS;
+        if (pg && SDL_strcmp(pg, "load")     == 0) { page = MENU_SLOTS;
+                                                     menu.mode = SLOTS_LOAD; }
+        if (pg && SDL_strcmp(pg, "replace")  == 0) { page = MENU_SLOTS;
+                                                     menu.mode = SLOTS_NEW; }
+        if (pg && SDL_strcmp(pg, "confirm")  == 0) { page = MENU_CONFIRM;
+                                                     menu.pending = 0; }
+        /* Through menu_open, like every other way in: the point of the flag is
+         * to photograph what a player sees, and a selection set by hand here
+         * would be photographing something only the flag can produce. */
+        menu_open(page, &cfg, slots);
     }
 #endif
 
@@ -11972,10 +12551,16 @@ int main(int argc, char **argv)
              * way would run the length of the list on a single press. */
             else if (ev.type == SDL_KEYDOWN && menu.page != MENU_NONE) {
                 MenuRow    rows[MENU_ROWS_MAX];
-                int        count = menu_build(menu.page, &cfg, menu.started,
-                                              save_ok, rows);
+                MenuCtx    ctx   = menu_ctx(&cfg, slots);
+                int        count = menu_build(&ctx, rows);
                 SDL_Keycode k = ev.key.keysym.sym;
                 MenuAction act = MA_NONE;
+                /* Which slot the chosen row was about, and which slot a new
+                 * game should begin in. Collected here rather than acted on
+                 * inside the switch because three different rows can decide to
+                 * begin a new game, and one implementation of "begin" below is
+                 * one place for it to be right. */
+                int act_slot = -1, start_slot = -1, load_slot = -1;
 
                 /* The rows are rebuilt from live state, so the caret can be
                  * left sitting on one that has since been disabled - a load
@@ -12018,6 +12603,8 @@ int main(int argc, char **argv)
                 case SDLK_KP_ENTER:
                 case SDLK_SPACE:
                     act = menu_act(rows, count, menu.sel);
+                    if (menu.sel >= 0 && menu.sel < count)
+                        act_slot = rows[menu.sel].slot;
                     break;
                 case SDLK_ESCAPE:
                     /* Back out one page, and off the root only if there is a
@@ -12050,9 +12637,141 @@ int main(int argc, char **argv)
                     prev_px = g->p.x;
                     prev_py = g->p.y;
                     break;
-                case MA_LOAD: {
+
+                /* Continue is a load of whichever slot was written last, and
+                 * nothing more - the row carries that slot, worked out by the
+                 * same save_newest the list marks "newest" with, so the two can
+                 * never disagree about which save continue would take. */
+                case MA_CONTINUE:
+                    load_slot = act_slot;
+                    break;
+
+                case MA_NEWGAME:
+                    /* The lowest free slot, without asking. Only when there is
+                     * none does the player get a question, and then it is
+                     * "which of these do you want to replace" rather than a
+                     * choice made for them - nothing here overwrites a save
+                     * that was not named. */
+                    start_slot = save_first_free(slots);
+                    if (start_slot < 0) {
+                        menu.mode = SLOTS_NEW;
+                        menu_open(MENU_SLOTS, &cfg, slots);
+                    }
+                    break;
+
+                case MA_LOADPAGE:
+                    /* The mode first: menu_open builds the rows, and in load
+                     * mode which rows are pickable depends on it. */
+                    menu.mode = SLOTS_LOAD;
+                    menu_open(MENU_SLOTS, &cfg, slots);
+                    break;
+
+                case MA_SLOT:
+                    if (menu.mode == SLOTS_LOAD) {
+                        load_slot = act_slot;
+                    } else if (act_slot >= 0 && act_slot < SAVE_SLOTS) {
+                        /* An empty slot is simply taken. A full one is a save
+                         * somebody made, so it gets a question first. */
+                        if (slots[act_slot].used) {
+                            menu.pending = act_slot;
+                            menu_open(MENU_CONFIRM, &cfg, slots);
+                        } else {
+                            start_slot = act_slot;
+                        }
+                    }
+                    break;
+
+                case MA_YES:
+                    start_slot = act_slot;
+                    break;
+
+                case MA_SAVE:
+                    if (cur_slot < 0)
+                        cur_slot = 0;
+                    save_slot_path(slot_path, sizeof(slot_path), cur_slot);
+                    hud_toast(game_save(g, slot_path) == 0
+                              ? "saved" : "could not write the save file");
+                    (void)save_scan(slots);
+                    menu.page    = MENU_NONE;
+                    menu.started = 1;
+                    prev_px = g->p.x;
+                    prev_py = g->p.y;
+                    break;
+
+                case MA_SETTINGS:
+                    menu_open(MENU_SETTINGS, &cfg, slots);
+                    break;
+                case MA_CONTROLS:
+                    menu_open(MENU_CONTROLS, &cfg, slots);
+                    break;
+                case MA_BACK:
+                    if (menu.page == MENU_CONTROLS) {
+                        menu_open(MENU_SETTINGS, &cfg, slots);
+                    } else if (menu.page == MENU_CONFIRM) {
+                        /* Answering "no" goes back to the list, not to the
+                         * root: the player was choosing a slot and has only
+                         * ruled one out. */
+                        menu_open(MENU_SLOTS, &cfg, slots);
+                    } else {
+                        /* Written on the way out of settings: one moment, one
+                         * place for the failure to be reported, instead of a
+                         * file write on every arrow key. */
+                        if (menu.page == MENU_SETTINGS && cfg_dirty) {
+                            if (cfg_save(&cfg, CFG_FILENAME) != 0)
+                                hud_toast("could not write the settings file");
+                            else
+                                cfg_dirty = 0;
+                        }
+                        menu_open(MENU_ROOT, &cfg, slots);
+                    }
+                    break;
+                case MA_QUIT:
+                    running = 0;
+                    break;
+                case MA_NONE:
+                default:
+                    break;
+                }
+
+                /* ---- the two things that actually change the world -------
+                 *
+                 * Both are here, once, rather than inside the switch: three
+                 * different rows can begin a new game (new game with a slot
+                 * free, an empty slot picked from the list, and a confirmed
+                 * replacement) and two can load one (continue and a slot row).
+                 * One copy of each is one place for them to be right. */
+                if (start_slot >= 0 && start_slot < SAVE_SLOTS) {
+                    /* The seed is the session's seed - the one --seed asked
+                     * for, defaulting to 1 - not a fresh random one. A new game
+                     * that reseeded would make --seed mean nothing the moment
+                     * the menu was used, and every test and screenshot recipe
+                     * in the project is anchored to it. Worlds are still
+                     * changed with [ and ]. */
+                    game_reseed(g, sc, &audio, seed);
+#if WAYFARER_SELFTEST
+                    if (lit_mode)
+                        reveal_all(&g->w);
+#endif
+                    prev_px  = g->p.x;
+                    prev_py  = g->p.y;
+                    cur_slot = start_slot;
+                    /* Written immediately, so that "used" means "there is a
+                     * file" everywhere and nothing has to track a slot that is
+                     * spoken for but empty. It is also what makes a confirmed
+                     * replacement real at the moment it is confirmed, instead
+                     * of leaving the old save on disk - and readable by
+                     * continue - until the player happens to press F5. */
+                    save_slot_path(slot_path, sizeof(slot_path), cur_slot);
+                    if (game_save(g, slot_path) != 0)
+                        hud_toast("could not write the save file");
+                    (void)save_scan(slots);
+                    menu.page    = MENU_NONE;
+                    menu.started = 1;
+                }
+                else if (load_slot >= 0 && load_slot < SAVE_SLOTS) {
                     Uint64 ls = seed;
-                    if (game_load(g, sc, SAVE_FILENAME, &ls) == 0) {
+                    save_slot_path(slot_path, sizeof(slot_path), load_slot);
+                    if (game_load(g, sc, slot_path, &ls) == 0) {
                         seed = ls;
 #if WAYFARER_SELFTEST
                         if (lit_mode)
@@ -12064,63 +12783,34 @@ int main(int argc, char **argv)
                         hud.map_open  = 0;
                         hud.bm_dirty  = 1;
                         hud.win_shown = area_complete(g);
+                        /* The music restarts with the world, resumed at the
+                         * loaded counts and biome rather than back at silence
+                         * or the wrong area's register. */
                         audio_request_reset(&audio, ls, g->frags_restored,
                                             g->souls_restored,
                                             g->area == 1 ? BIOME_FOREST
                                             : g->area == 2 ? BIOME_UNDERWORLD
                                             : BIOME_LUMIARA);
                         hud_toast("loaded");
+                        cur_slot     = load_slot;
                         menu.page    = MENU_NONE;
                         menu.started = 1;
                     } else {
-                        /* The row is only offered when save_exists said yes, so
-                         * arriving here means the file passed its header and
-                         * was still refused - stale by the time it was read, or
-                         * standing her in a wall. Say so and re-ask the file
+                        /* The row is only offered when save_scan said the
+                         * header was sound, so arriving here means the file
+                         * passed that and was still refused - it changed under
+                         * us, or it stands her in a wall. Say so and re-scan,
                          * rather than leaving a row that cannot work. */
                         hud_toast("that save could not be loaded");
-                        save_ok = save_exists(SAVE_FILENAME);
-                        /* Move the caret off the row that just went dim, so the
-                         * very next frame does not draw it resting on one. */
-                        count = menu_build(menu.page, &cfg, menu.started,
-                                           save_ok, rows);
-                        if (count > 0 && !rows[menu.sel].enabled)
-                            menu.sel = menu_step(rows, count, menu.sel, 1);
-                    }
-                    break;
-                }
-                case MA_SETTINGS:
-                    menu.page = MENU_SETTINGS;
-                    menu.sel  = 0;
-                    break;
-                case MA_CONTROLS:
-                    menu.page = MENU_CONTROLS;
-                    menu.sel  = 0;
-                    break;
-                case MA_BACK:
-                    if (menu.page == MENU_CONTROLS) {
-                        menu.page = MENU_SETTINGS;
-                        menu.sel  = 0;
-                    } else {
-                        /* Written on the way out of settings: one moment, one
-                         * place for the failure to be reported, instead of a
-                         * file write on every arrow key. */
-                        if (menu.page == MENU_SETTINGS && cfg_dirty) {
-                            if (cfg_save(&cfg, CFG_FILENAME) != 0)
-                                hud_toast("could not write the settings file");
-                            else
-                                cfg_dirty = 0;
+                        (void)save_scan(slots);
+                        {
+                            MenuCtx c = menu_ctx(&cfg, slots);
+                            count = menu_build(&c, rows);
+                            if (count > 0 && menu.sel < count &&
+                                !rows[menu.sel].enabled)
+                                menu.sel = menu_step(rows, count, menu.sel, 1);
                         }
-                        menu.page = MENU_ROOT;
-                        menu.sel  = 0;
                     }
-                    break;
-                case MA_QUIT:
-                    running = 0;
-                    break;
-                case MA_NONE:
-                default:
-                    break;
                 }
             }
             else if (ev.type == SDL_KEYDOWN) {
@@ -12129,10 +12819,9 @@ int main(int argc, char **argv)
                  * to quit outright with no confirmation and no way back, which
                  * is the single thing this whole screen exists to fix. */
                 case SDLK_ESCAPE:
-                    menu.page    = MENU_ROOT;
-                    menu.sel     = 0;
                     menu.started = 1;
-                    save_ok      = save_exists(SAVE_FILENAME);
+                    (void)save_scan(slots);
+                    menu_open(MENU_ROOT, &cfg, slots);
                     break;
                 case SDLK_F11:
                     /* Goes through the setting, so the key and the settings row
@@ -12169,13 +12858,21 @@ int main(int argc, char **argv)
                     }
                     break;
                 case SDLK_F5:
-                    hud_toast(game_save(g, SAVE_FILENAME) == 0
+                    /* Writes the slot she is playing. cur_slot is only ever -1
+                     * on a path that never passed through the menu - a --frames
+                     * run - and slot 1 is then the honest default rather than a
+                     * refusal: the key has always saved, and a run that reached
+                     * here has a game worth saving. */
+                    if (cur_slot < 0)
+                        cur_slot = 0;
+                    save_slot_path(slot_path, sizeof(slot_path), cur_slot);
+                    hud_toast(game_save(g, slot_path) == 0
                               ? "saved" : "could not write the save file");
-                    /* Re-asked here rather than assumed: a successful save is
-                     * the one event that turns "no save" into "a save", and
-                     * asking the file is what keeps the row's answer and the
-                     * file's contents the same answer. */
-                    save_ok = save_exists(SAVE_FILENAME);
+                    /* Re-scanned rather than assumed: a successful save is the
+                     * one event that turns an empty slot into a full one, and
+                     * asking the files is what keeps the list's answer and the
+                     * disk's contents the same answer. */
+                    (void)save_scan(slots);
                     break;
                 /* Step to the next or previous world. Both spellings are here
                  * because both are the obvious one to somebody: ] and [ read as
@@ -12210,7 +12907,15 @@ int main(int argc, char **argv)
                 }
                 case SDLK_F9: {
                     Uint64 ls = seed;
-                    if (game_load(g, sc, SAVE_FILENAME, &ls) == 0) {
+                    /* The pair to F5: it re-reads the slot she is playing, not
+                     * whichever save is newest. A quick-load that jumped to
+                     * some other slot because that one happened to be saved
+                     * more recently would be a different game arriving under
+                     * one keypress. */
+                    if (cur_slot < 0)
+                        cur_slot = 0;
+                    save_slot_path(slot_path, sizeof(slot_path), cur_slot);
+                    if (game_load(g, sc, slot_path, &ls) == 0) {
                         seed = ls;
 #if WAYFARER_SELFTEST
                         if (lit_mode)
@@ -12229,6 +12934,7 @@ int main(int argc, char **argv)
                                             g->area == 1 ? BIOME_FOREST
                                             : g->area == 2 ? BIOME_UNDERWORLD : BIOME_LUMIARA);
                         hud_toast("loaded");
+                        (void)save_scan(slots);
                     } else {
                         hud_toast("no save to load");
                     }
@@ -12396,7 +13102,8 @@ int main(int argc, char **argv)
              * world rather than covering it - rendering a world underneath an
              * opaque menu would be a full frame of work nobody sees. */
             if (menu.page != MENU_NONE) {
-                menu_draw(draw, &cfg, save_ok);
+                MenuCtx c = menu_ctx(&cfg, slots);
+                menu_draw(draw, &c);
             } else {
                 render_world(draw, &g->w, seed, cam_x, cam_y);
                 props_build(draw->w, draw->h, &g->w, seed, cam_x, cam_y, g->ents,

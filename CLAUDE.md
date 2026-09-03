@@ -6,8 +6,8 @@
 - Run All Self-Tests: `powershell -ExecutionPolicy Bypass -File .\tools\run-tests.ps1`
 - Run Single Test: `.\build\wayfarer-selftest.exe --<test-name> [--seeds N] [--seed N]`
 - Look at the map screen: `--map` (grant + open it), `--standon map` (stand on the fragment)
-- Look at the menu: `--menu` (open it), `--paused` (say "resume", not "start game"),
-  `--menupage settings|controls`
+- Look at the menu: `--menu` (open it), `--paused` (the pause form),
+  `--menupage settings|controls|load|replace|confirm`
 - Re-bake art: `powershell -File tools\bake.ps1` — only when `assets\` changes
 
 ## Core Invariants & Rules
@@ -63,6 +63,35 @@
   `&` `"` are all-zero rows and ship as holes — `--menu-test` checks every label against
   `font_bits`, with a control that a label containing `(` is caught.
 - Escape opens the menu; it no longer ends the process. Quitting is a row you choose.
+- **Every path that opens a page goes through `menu_open`**, which puts the caret on the first
+  row that can actually be picked. `--menu` once set the selection by hand and photographed a
+  caret resting on a dim `continue` that no real launch produces — a flag that paints over the
+  thing it was pointed at is worse than no flag.
+- `menu_build` and `menu_draw` are pure functions of a `MenuCtx`, so the tests drive every page
+  with no window, no world and no save files.
+
+## Saves and slots
+- **Six slots**, `wayfarer1.sav` … `wayfarer6.sav`, probed by name. SDL2 has no directory-listing
+  API, so a fixed set of filenames is the only way to enumerate saves without platform code.
+- `save_scan` reads all six headers into a `SaveSlot[]`. Called when the menu opens and after
+  anything that writes a save — **never per frame**: rows are rebuilt at 60 Hz while the menu is
+  up, and six reads a frame would be a syscall storm in the render path.
+- A slot is listed as usable exactly when `save_header_ok` accepts it, which is the same
+  judgement `game_load` makes. A row lit by mere file existence would offer a corrupt or
+  previous-version file and then fail on it, which reads as the game being broken.
+- **`continue` is `save_newest`** — the largest timestamp, not the lowest slot. The list marks
+  that same slot `newest`, from the same function, so the two cannot disagree.
+- **New game writes its save immediately.** That keeps "used" meaning "there is a file"
+  everywhere, and makes a confirmed replacement real at the moment it is confirmed instead of
+  leaving the old save readable by `continue` until the player happens to press F5.
+- New game takes the **lowest free slot** without asking. Only when every slot is full is the
+  player asked, and then it is "replace which save" with a confirm whose caret starts on **no**.
+  Nothing overwrites a save that was not named.
+- A new game keeps the **session's seed** (`--seed`, default 1) rather than reseeding. A new game
+  that reseeded would make `--seed` mean nothing the moment the menu was used, and every test and
+  screenshot recipe is anchored to it. Worlds are still changed with `[` and `]`.
+- F5 writes the slot she is playing and F9 re-reads it — a pair on one slot. A quick-load that
+  jumped to whichever save was newest would be a different game arriving under one keypress.
 
 ## Settings format
 - Its own file (`wayfarer.cfg`), **never** spare save bytes. Bytes 22–23 are reserved-must-be-zero,
@@ -94,6 +123,13 @@
 - Byte 21 is the map-fragment mask (three bits) as of `SAVE_VERSION` 2; bytes 22–23 are still
   reserved and must be zero. Like the restored mask, it cannot carry bits for an area past the one
   the file says she is in.
+- Bytes 24–27 are the restored mask. **Bytes 28–35 are the save's timestamp** (`time()`), added at
+  `SAVE_VERSION` 3 so `continue` can mean the most recent save — nothing else in the file can order
+  two saves against each other. It is only ever compared, never displayed. A **zero** timestamp is
+  rejected: it is what a failed `time()` writes, and it would sort as older than every other save
+  forever, so `continue` could never reach it however recently it was made.
+- v2 saves are **rejected, not migrated**, the same as v1 — one construction path from a file to a
+  game, and a migration would be a second.
 
 ## Art pipeline
 - `src/art_data.h` is **generated** by `tools/bake.ps1` and committed. Never edit by hand.

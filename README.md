@@ -77,9 +77,9 @@ nothing ran. That makes the green claim above checkable against the working tree
 |---|---|
 | `WASD` / arrows | walk |
 | `E` / `Space` | restore the fragment or Soul in reach |
-| `F5` / `F9` | save / load `wayfarer.sav` (written beside the working directory) |
+| `F5` / `F9` | save / reload the slot being played (written beside the working directory) |
 | `F11` | fullscreen |
-| `Esc` | quit |
+| `Esc` | the menu |
 
 `--seed N` picks the world, `--scale N` the window size, `--mute` skips audio entirely. The
 self-test binary adds `--dev` (all abilities), `--lit` (reveal the whole map — the only way to
@@ -169,11 +169,20 @@ two counters, the three ability names with unearned ones dimmed, fading toasts o
 and every refused gate, a completion banner, the seed, and a cached minimap at one pixel per two
 world tiles. `F5` saves, `F9` loads.
 
-The save is 28 bytes: a seed plus the deltas play has made on it. Loading **regenerates** the world
-from the seed and replays the deltas — there is no second construction path that could drift from
-what generation produces. It is the first place outside input reaches this program, and every
-malformed file is rejected *before* the live game is touched: the world is regenerated into
-scratch, the position checked against the regenerated solid map, and only then committed.
+The save is 36 bytes: a seed plus the deltas play has made on it, and the moment it was written.
+Loading **regenerates** the world from the seed and replays the deltas — there is no second
+construction path that could drift from what generation produces. It is the first place outside
+input reaches this program, and every malformed file is rejected *before* the live game is
+touched: the world is regenerated into scratch, the position checked against the regenerated solid
+map, and only then committed.
+
+**Phase 9 — the menu, settings and six save slots.** Complete. A title screen that is also the
+pause screen, with `continue`, `load game`, `new game`, `settings` and `quit`; music and sound
+volumes, fullscreen and window scale, persisted to their own `wayfarer.cfg`; and six save slots in
+`wayfarer1.sav` … `wayfarer6.sav`, listed with the world and the progress each one holds.
+`continue` takes the most recently written of them, which is what the timestamp is for. A new game
+takes the lowest free slot without asking; only when all six are full is the player asked which to
+replace, and that question opens on **no**.
 
 **Not yet built**: the Area 2 gate, ability-gate visuals, the cluster reveal wave, `--trail-test`
 and `--reveal-test`, and the final polish pass (phase 9).
