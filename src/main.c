@@ -1053,6 +1053,13 @@ static const SfxCfg SFX_CFG[NUM_SFX] = {
     { 110.0f,  0.16f, 9.0f, W_SQUARE }  /* denied: a dull, very short thud */
 };
 
+/* The volume scale, shared by the settings screen and the mix below. Ten steps,
+ * not a hundred: the menu row shows the number, and a value the player cannot
+ * step through in a couple of key presses is one they will not adjust. Defined
+ * here rather than beside the other settings because the audio callback is what
+ * has to honour it, and the whole file is one translation unit read top down. */
+#define VOL_MAX 10
+
 /* Master gain on the game mix - NOT on the diagnostic tone, which --audio-test
  * measures at its stated amplitude.
  *
@@ -1062,7 +1069,15 @@ static const SfxCfg SFX_CFG[NUM_SFX] = {
  * [-1,1]" check could never see it because the clamp is what keeps it in range.
  * 0.55 puts the theoretical worst case at 0.93, so the clamp can never engage -
  * and --audio-test --layers now asserts exactly that, by counting samples that
- * reach it while driving every layer and firing all three SFX every 40 ms. */
+ * reach it while driving every layer and firing all three SFX every 40 ms.
+ *
+ * The settings volumes multiply the mix BEFORE this gain and are both in [0,1],
+ * so they can only ever attenuate: 0.93 stays the upper bound whatever the
+ * player picks, and the clamp stays unreachable without re-deriving anything.
+ * That is also why full volume is 1.0 and not, say, 1.2 - a slider that could
+ * push the mix into the clamp would be trading the invariant for loudness, and
+ * at VOL_MAX the output is bit-identical to what shipped before there were
+ * volumes at all. */
 #define MIX_GAIN 0.55f
 
 typedef struct {
@@ -1089,6 +1104,16 @@ typedef struct {
     Sfx          sfx[NUM_SFX];
     SDL_atomic_t layer_fire;  /* bumped once per fragment restore        */
     SDL_atomic_t voice_fire;  /* bumped once per soul restore            */
+    /* Settings volumes, 0..VOL_MAX. Atomics because they are the one part of
+     * Audio the game thread writes while the callback is running, and they are
+     * a single int each, so unlike the reset payload there is nothing to tear:
+     * no flag is needed, the value either arrives this callback or the next.
+     *
+     * SDL_zero leaves these at 0, which is silence, so EVERY construction of an
+     * Audio that will actually render must set them - main through
+     * cfg_apply_audio before the device opens, audio_selftest to VOL_MAX. */
+    SDL_atomic_t music_vol;
+    SDL_atomic_t sfx_vol;
     /* Reset and reseed both follow the same discipline: the game thread writes
      * the PAYLOAD first and sets the FLAG second, and the callback reads the
      * payload only after seeing the flag, so it can never act on a half-written
@@ -1248,6 +1273,7 @@ static void SDLCALL audio_cb(void *userdata, Uint8 *stream, int len)
     int nfloats = len / (int)sizeof(float);
     int frames = nfloats / a->channels;
     double inc = TONE_HZ / (double)a->rate;
+    float mvol, svol;
     int i, c, si;
 #if WAYFARER_SELFTEST
     Uint64 t0 = SDL_GetPerformanceCounter();
@@ -1256,6 +1282,16 @@ static void SDLCALL audio_cb(void *userdata, Uint8 *stream, int len)
 #endif
 
     synth_latch(a);
+    /* Read ONCE per callback, not once per sample: an atomic read per sample
+     * would be 1024 of them for a value that cannot meaningfully change inside
+     * 21 ms, and a volume that moved mid-buffer would zip. A change therefore
+     * lands on a buffer boundary, which at 21.3 ms is inaudible as a step. */
+    mvol = (float)SDL_AtomicGet(&a->music_vol) / (float)VOL_MAX;
+    svol = (float)SDL_AtomicGet(&a->sfx_vol)   / (float)VOL_MAX;
+    if (mvol < 0.0f) mvol = 0.0f;
+    if (mvol > 1.0f) mvol = 1.0f;
+    if (svol < 0.0f) svol = 0.0f;
+    if (svol > 1.0f) svol = 1.0f;
     for (si = 0; si < NUM_SFX; si++) {
         int fired = SDL_AtomicGet(&a->sfx[si].fire);
         if (fired != a->sfx[si].seen) {
@@ -1266,7 +1302,7 @@ static void SDLCALL audio_cb(void *userdata, Uint8 *stream, int len)
     }
 
     for (i = 0; i < frames; i++) {
-        float v = 0.0f, mix = 0.0f;
+        float v = 0.0f, mus = 0.0f, sfxm = 0.0f;
         if (a->noise) {
             v = rng_bipolar(&a->rng) * TONE_AMP;
         } else if (a->tone) {
@@ -1274,20 +1310,23 @@ static void SDLCALL audio_cb(void *userdata, Uint8 *stream, int len)
             a->phase += inc;
             if (a->phase >= 1.0) a->phase -= 1.0;
         } else if (a->synth.synth_on) {
-            mix = synth_step(a);
+            mus = synth_step(a);
         }
         for (si = 0; si < NUM_SFX; si++) {
             if (a->sfx[si].env > 0.0f) {
                 const SfxCfg *sc = &SFX_CFG[si];
-                mix += wave_sample(sc->wave, (float)a->sfx[si].phase, a)
-                       * a->sfx[si].env * sc->amp;
+                sfxm += wave_sample(sc->wave, (float)a->sfx[si].phase, a)
+                        * a->sfx[si].env * sc->amp;
                 a->sfx[si].phase += (double)sc->freq / (double)a->rate;
                 if (a->sfx[si].phase >= 1.0) a->sfx[si].phase -= 1.0;
                 a->sfx[si].env -= sc->decay / (float)a->rate;
                 if (a->sfx[si].env < 0.0f) a->sfx[si].env = 0.0f;
             }
         }
-        v += mix * MIX_GAIN;
+        /* The two volumes are held apart all the way to here rather than being
+         * folded into one number, because they are two controls: turning the
+         * music down must not take the chime with it. */
+        v += (mus * mvol + sfxm * svol) * MIX_GAIN;
         /* Kept as a safety net even though MIX_GAIN makes it unreachable: it is
          * the last line between an arithmetic bug in here and the speakers. */
         if (v >  1.0f) v =  1.0f;
@@ -4529,32 +4568,50 @@ static const Uint8 FONT_5X7[FONT_GLYPHS * FONT_H] = {
 
 /* idx*stride+row is the deliberately-exposed seam: every caller outside
  * font_selftest passes FONT_STRIDE; the test corrupts it to prove the
- * pixel-count checker actually notices a misread glyph. */
+ * pixel-count checker actually notices a misread glyph.
+ *
+ * `scale` is separate from that seam and is the ordinary drawing knob: every
+ * pre-menu caller passes FONT_SCALE and is unchanged, and the menu title asks
+ * for 4. A scaled glyph is the same bits with a bigger fill_rect per lit pixel
+ * rather than a second glyph table, so there is still exactly one font. */
 static void draw_glyph(SDL_Surface *fb, int x, int y, int ch, Uint32 colour,
-                       int stride)
+                       int stride, int scale)
 {
     int idx = ch - FONT_FIRST;
     int row, col;
 
     if (idx < 0 || idx >= FONT_GLYPHS)
         return;
+    if (scale < 1)
+        return;
     for (row = 0; row < FONT_H; row++) {
         Uint8 bits = FONT_5X7[idx * stride + row];
         for (col = 0; col < FONT_W; col++)
             if (bits & (1u << (FONT_W - 1 - col)))
-                fill_rect(fb, x + col * FONT_SCALE, y + row * FONT_SCALE,
-                          FONT_SCALE, FONT_SCALE, colour);
+                fill_rect(fb, x + col * scale, y + row * scale,
+                          scale, scale, colour);
+    }
+}
+
+/* Advance and line height are FONT_ADV/FONT_LINE scaled by the same factor, so
+ * a scaled run keeps the one-pixel gap the 5x7 table was drawn to have. */
+#define FONT_ADV_AT(sc)  ((FONT_W + 1) * (sc))
+#define FONT_LINE_AT(sc) ((FONT_H + 1) * (sc))
+
+static void draw_text_scaled(SDL_Surface *fb, int x, int y, const char *str,
+                             Uint32 colour, int scale)
+{
+    int cx = x;
+    for (; *str; str++) {
+        if (*str == '\n') { cx = x; y += FONT_LINE_AT(scale); continue; }
+        draw_glyph(fb, cx, y, (unsigned char)*str, colour, FONT_STRIDE, scale);
+        cx += FONT_ADV_AT(scale);
     }
 }
 
 static void draw_text(SDL_Surface *fb, int x, int y, const char *str, Uint32 colour)
 {
-    int cx = x;
-    for (; *str; str++) {
-        if (*str == '\n') { cx = x; y += FONT_LINE; continue; }
-        draw_glyph(fb, cx, y, (unsigned char)*str, colour, FONT_STRIDE);
-        cx += FONT_ADV;
-    }
+    draw_text_scaled(fb, x, y, str, colour, FONT_SCALE);
 }
 
 /* One font pixel down-right in black, then the real colour on top - legible
@@ -4565,7 +4622,12 @@ static void draw_text_shadow(SDL_Surface *fb, int x, int y, const char *str, Uin
     draw_text(fb, x, y, str, colour);
 }
 
-static int text_w(const char *s) { return (int)SDL_strlen(s) * FONT_ADV; }
+static int text_w_scaled(const char *s, int scale)
+{
+    return (int)SDL_strlen(s) * FONT_ADV_AT(scale);
+}
+
+static int text_w(const char *s) { return text_w_scaled(s, FONT_SCALE); }
 
 /* ---- The game state -----------------------------------------------------
  *
@@ -4789,6 +4851,86 @@ static int game_save(const Game *g, const char *path)
     return i;
 }
 
+/* Everything about a save file that can be judged from its 28 bytes alone,
+ * without regenerating anything. Split out of game_load so that "is there a
+ * save worth offering?" and "load it" ask the SAME question - a menu row lit by
+ * a bare file-exists check would offer a corrupt or a v1 file and then fail on
+ * it, which reads as the game being broken rather than as there being no save.
+ * This is not a second construction path: it constructs nothing, and game_load
+ * still re-derives every field it uses from the same buffer.
+ * Returns 0 when the header is sound, -1 otherwise. */
+static int save_header_ok(const Uint8 *buf)
+{
+    Uint8  area, maps, abilities;
+    Uint32 restored;
+    float  px, py;
+
+    if (buf[0] != SAVE_MAGIC_0 || buf[1] != SAVE_MAGIC_1) return -1;
+    if (buf[2] != SAVE_VERSION)                           return -1;
+    if (buf[3] != 1 && buf[3] != 2 && buf[3] != 3)        return -1;
+    if (buf[22] != 0 || buf[23] != 0)                     return -1;
+    area = buf[3];
+
+    /* Same shape of check as the restored mask's below, and it falls out of the
+     * same live invariant: a map fragment lies in ONE area, and she cannot have
+     * picked up an area's map without having been in that area, which
+     * progression makes impossible for any area past the one she is in. */
+    maps = buf[21];
+    if (maps & (Uint8)~(Uint8)SAVE_MAPS_BITS)             return -1;
+    if (maps & (Uint8)~(Uint8)((1u << area) - 1u))        return -1;
+
+    restored = save_get32(buf + 24);
+    if (restored & ~SAVE_ALL_BITS) return -1;
+    /* Free integrity check that falls straight out of the gameplay invariant
+     * the portal enforces live: you cannot BE in Area N unless every earlier
+     * area is 100% restored (that is what unlocks each portal), and you
+     * cannot have left an area with spurious LATER-area progress already on
+     * the books - progress can only ever be ahead of where you currently are
+     * by exactly the areas you have already finished and left. */
+    if (area == 1 && (restored & ((SAVE_AREA1_BITS << SAVE_AREA2_SHIFT) |
+                                   (SAVE_AREA1_BITS << SAVE_AREA3_SHIFT)))) return -1;
+    if (area == 2 && ((restored & SAVE_AREA1_BITS) != SAVE_AREA1_BITS ||
+                       (restored & (SAVE_AREA1_BITS << SAVE_AREA3_SHIFT)))) return -1;
+    if (area == 3 && (restored & (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))
+                   != (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))  return -1;
+
+    abilities = buf[20];
+    if (abilities & (Uint8)~(Uint8)ABIL_ALL) return -1;
+
+    px = save_getf32(buf + 12);
+    py = save_getf32(buf + 16);
+    /* Written as !(x >= 0) rather than (x < 0) so it also rejects NaN, which
+     * compares false against everything and would otherwise sail through. */
+    if (!(px >= 0.0f) || !(py >= 0.0f) ||
+        !(px < (float)WORLD_W * TILE) || !(py < (float)WORLD_H * TILE))
+        return -1;
+
+    return 0;
+}
+
+/* Is there a save the menu can honestly offer to load? Header-only, so the root
+ * menu can ask it every time it is built without generating a world. It is
+ * deliberately not the whole of game_load - a header can be sound and the file
+ * still be rejected later for standing her inside a wall - but the header is
+ * exactly the part that separates "no save" from "a save", and a stale offer
+ * for that one remaining case is a far smaller wrong than an offer made for any
+ * stray byte on disk. Takes a path like game_save/game_load, so the test can
+ * drive a scratch file rather than the player's own. */
+static int save_exists(const char *path)
+{
+    Uint8 buf[SAVE_SIZE];
+    SDL_RWops *rw = SDL_RWFromFile(path, "rb");
+    size_t got;
+
+    if (!rw)
+        return 0;
+    got = SDL_RWread(rw, buf, 1, SAVE_SIZE);
+    SDL_RWclose(rw);
+    if (got != (size_t)SAVE_SIZE)
+        return 0;
+    return save_header_ok(buf) == 0;
+}
+
 /* Regenerate from the saved seed, then replay the deltas. Returns 0 on success.
  *
  * This is the first boundary in the project where outside input reaches the
@@ -4824,46 +4966,18 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     }
     SDL_RWclose(rw);
 
-    if (buf[0] != SAVE_MAGIC_0 || buf[1] != SAVE_MAGIC_1) return -1;
-    if (buf[2] != SAVE_VERSION)                           return -1;
-    if (buf[3] != 1 && buf[3] != 2 && buf[3] != 3)        return -1;
-    if (buf[22] != 0 || buf[23] != 0)                     return -1;
-    area = buf[3];
-
-    /* Same shape of check as the restored mask's below, and it falls out of the
-     * same live invariant: a map fragment lies in ONE area, and she cannot have
-     * picked up an area's map without having been in that area, which
-     * progression makes impossible for any area past the one she is in. */
-    maps = buf[21];
-    if (maps & (Uint8)~(Uint8)SAVE_MAPS_BITS)             return -1;
-    if (maps & (Uint8)~(Uint8)((1u << area) - 1u))        return -1;
-
-    restored = save_get32(buf + 24);
-    if (restored & ~SAVE_ALL_BITS) return -1;
-    /* Free integrity check that falls straight out of the gameplay invariant
-     * the portal enforces live: you cannot BE in Area N unless every earlier
-     * area is 100% restored (that is what unlocks each portal), and you
-     * cannot have left an area with spurious LATER-area progress already on
-     * the books - progress can only ever be ahead of where you currently are
-     * by exactly the areas you have already finished and left. */
-    if (area == 1 && (restored & ((SAVE_AREA1_BITS << SAVE_AREA2_SHIFT) |
-                                   (SAVE_AREA1_BITS << SAVE_AREA3_SHIFT)))) return -1;
-    if (area == 2 && ((restored & SAVE_AREA1_BITS) != SAVE_AREA1_BITS ||
-                       (restored & (SAVE_AREA1_BITS << SAVE_AREA3_SHIFT)))) return -1;
-    if (area == 3 && (restored & (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))
-                   != (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))  return -1;
-
-    abilities = buf[20];
-    if (abilities & (Uint8)~(Uint8)ABIL_ALL) return -1;
-
-    seed = save_get64(buf + 4);
-    px = save_getf32(buf + 12);
-    py = save_getf32(buf + 16);
-    /* Written as !(x >= 0) rather than (x < 0) so it also rejects NaN, which
-     * compares false against everything and would otherwise sail through. */
-    if (!(px >= 0.0f) || !(py >= 0.0f) ||
-        !(px < (float)WORLD_W * TILE) || !(py < (float)WORLD_H * TILE))
+    if (save_header_ok(buf) != 0)
         return -1;
+
+    /* Re-derived from the same buffer the header check just judged, rather
+     * than handed back through out-params: one reader, one set of offsets. */
+    area      = buf[3];
+    maps      = buf[21];
+    restored  = save_get32(buf + 24);
+    abilities = buf[20];
+    seed      = save_get64(buf + 4);
+    px        = save_getf32(buf + 12);
+    py        = save_getf32(buf + 16);
 
     /* File-level validation done. Regenerate into scratch: Game is far too big
      * to keep two of on the stack, and the live game must stay untouched until
@@ -4908,6 +5022,133 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     SDL_free(tmp);
     *seed_out = seed;
     return 0;
+}
+
+/* ---- Settings -----------------------------------------------------------
+ *
+ * The first state in this project that is neither world nor progress: what the
+ * PLAYER prefers, which survives a new game and has nothing to do with a seed.
+ *
+ * Its own file, not spare bytes in the save. Save bytes 22-23 are reserved and
+ * must be zero, so spending them would force a SAVE_VERSION bump, and a bump
+ * rejects every save already on disk (v1 files are refused, not migrated) - a
+ * volume slider is not worth deleting someone's game for. It also would not
+ * work: settings must be readable BEFORE a world exists, to size the window.
+ *
+ * Same discipline as the save all the same - flat, fixed-size, versioned, every
+ * field hand-packed little-endian, validated completely before anything live is
+ * touched. It is one byte per field here, so "little-endian" costs nothing to
+ * honour and the format does not become a special case the day a field grows.
+ *
+ *   byte 0-1  'W','C'
+ *        2    CFG_VERSION
+ *        3    music volume  0..VOL_MAX
+ *        4    sound volume  0..VOL_MAX
+ *        5    fullscreen    0 or 1
+ *        6    window scale  1..WIN_SCALE_MAX
+ *        7    reserved, must be zero
+ */
+#define CFG_MAGIC_0   'W'
+#define CFG_MAGIC_1   'C'
+#define CFG_VERSION   1
+#define CFG_SIZE      8
+#define CFG_FILENAME  "wayfarer.cfg"
+
+typedef struct {
+    int music;       /* 0..VOL_MAX */
+    int sfx;         /* 0..VOL_MAX */
+    int fullscreen;  /* 0 or 1     */
+    int scale;       /* 1..WIN_SCALE_MAX; 0 = "pick one for me", never stored */
+} Settings;
+
+static void cfg_defaults(Settings *c)
+{
+    c->music      = VOL_MAX;
+    c->sfx        = VOL_MAX;
+    c->fullscreen = 0;
+    c->scale      = 0;
+}
+
+static int cfg_save(const Settings *c, const char *path)
+{
+    Uint8 buf[CFG_SIZE];
+    SDL_RWops *rw;
+    int r;
+
+    buf[0] = CFG_MAGIC_0;
+    buf[1] = CFG_MAGIC_1;
+    buf[2] = CFG_VERSION;
+    buf[3] = (Uint8)c->music;
+    buf[4] = (Uint8)c->sfx;
+    buf[5] = (Uint8)(c->fullscreen ? 1 : 0);
+    /* A scale of 0 means pick_scale chose it, which is a property of the
+     * display and not a preference - stored as the scale actually in use so a
+     * reload reproduces the window the player last saw. */
+    buf[6] = (Uint8)(c->scale >= 1 && c->scale <= WIN_SCALE_MAX ? c->scale : 1);
+    buf[7] = 0;
+
+    rw = SDL_RWFromFile(path, "wb");
+    if (!rw)
+        return -1;
+    r = (SDL_RWwrite(rw, buf, 1, CFG_SIZE) == CFG_SIZE) ? 0 : -1;
+    if (SDL_RWclose(rw) != 0)
+        r = -1;
+    return r;
+}
+
+/* Validated into a local and copied out only once every field has passed, so a
+ * malformed file leaves *c exactly as it was - the same rule the save obeys,
+ * for the same reason: half-applied settings are worse than none. A missing
+ * file is not an error, it is a first run; the caller keeps its defaults. */
+static int cfg_load(Settings *c, const char *path)
+{
+    Uint8 buf[CFG_SIZE];
+    SDL_RWops *rw = SDL_RWFromFile(path, "rb");
+    Settings tmp;
+
+    if (!rw)
+        return -1;
+    if (SDL_RWread(rw, buf, 1, CFG_SIZE) != CFG_SIZE) {
+        SDL_RWclose(rw);
+        return -1;
+    }
+    SDL_RWclose(rw);
+
+    if (buf[0] != CFG_MAGIC_0 || buf[1] != CFG_MAGIC_1) return -1;
+    if (buf[2] != CFG_VERSION)                          return -1;
+    if (buf[3] > VOL_MAX)                               return -1;
+    if (buf[4] > VOL_MAX)                               return -1;
+    if (buf[5] > 1)                                     return -1;
+    if (buf[6] < 1 || buf[6] > WIN_SCALE_MAX)           return -1;
+    if (buf[7] != 0)                                    return -1;
+
+    tmp.music      = buf[3];
+    tmp.sfx        = buf[4];
+    tmp.fullscreen = buf[5];
+    tmp.scale      = buf[6];
+    *c = tmp;
+    return 0;
+}
+
+/* The two halves of "make the world match these settings". Separate because
+ * they answer to different owners - one crosses into the audio callback and
+ * may only go through atomics, the other is a window call that must happen on
+ * the thread that made the window - and because the audio half is the only one
+ * that is safe to call before there is a window at all. */
+static void cfg_apply_audio(Audio *a, const Settings *c)
+{
+    SDL_AtomicSet(&a->music_vol, c->music);
+    SDL_AtomicSet(&a->sfx_vol,   c->sfx);
+}
+
+static void cfg_apply_window(SDL_Window *win, const Settings *c)
+{
+    SDL_SetWindowFullscreen(win, c->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+    /* Resizing while fullscreen would fight the display for the resolution and
+     * leave the window the wrong size on the way back out. The scale is kept in
+     * the settings either way, so leaving fullscreen restores it. */
+    if (!c->fullscreen && c->scale >= 1)
+        SDL_SetWindowSize(win, LOGICAL_W * c->scale, LOGICAL_H * c->scale);
 }
 
 /* ---- HUD ----------------------------------------------------------------
@@ -5152,6 +5393,340 @@ static void hud_draw(SDL_Surface *fb, const Game *g)
     draw_text_shadow(fb, 8, fb->h - FONT_LINE - 4, buf, pale);
 
     mm_draw(fb, g);
+}
+
+/* ---- The menu -----------------------------------------------------------
+ *
+ * One screen serving two jobs, because they are the same screen: the title the
+ * game opens on, and the pause screen Escape brings up. The only difference is
+ * one row's wording, so `started` is the whole of the state that separates
+ * them - two screens would be two things to keep in step.
+ *
+ * OPAQUE, and it replaces the world rather than covering it, exactly as the map
+ * screen does. There is no alpha blend anywhere in this project and a dimming
+ * pass would be a new per-pixel primitive over 129,600 pixels to show a world
+ * nobody is looking at; being opaque is also what lets the test count its
+ * pixels and lets the negative control assert a closed menu draws nothing.
+ *
+ * WHAT ROWS EXIST lives in exactly one function, menu_build. Drawing indexes
+ * that list, moving the selection indexes that list, and activating indexes
+ * that list, so a row cannot be drawn in one place and acted on in another -
+ * the same reason synth_add_frag is a function rather than two copies of the
+ * unlock ladder.
+ *
+ * Labels may only use characters the 5x7 table actually fills. '(', ')', '[',
+ * ']', '+', '*', '%', '_', '#', '&' and '"' are all-zero rows in FONT_5X7 and
+ * would ship as holes, so the caret is '>' and the volume bar is '=' and '-'.
+ * menu_selftest checks every label against font_bits rather than trusting this
+ * comment to be read.
+ */
+typedef enum {
+    MENU_NONE = 0,   /* playing; nothing intercepts input */
+    MENU_ROOT,
+    MENU_SETTINGS,
+    MENU_CONTROLS
+} MenuPage;
+
+/* What activating a row means, as a value. menu_act is pure and returns one of
+ * these; main() is what owns the window, the audio device, the world and the
+ * running flag, and does the actual work. Splitting it that way is what lets
+ * the test drive every row with no window open and no world generated. */
+typedef enum {
+    MA_NONE = 0,     /* out of range, a disabled row, or a value row */
+    MA_START,        /* start game / resume - close the menu, play */
+    MA_LOAD,
+    MA_SETTINGS,
+    MA_CONTROLS,
+    MA_BACK,
+    MA_QUIT
+} MenuAction;
+
+#define MENU_ROWS_MAX 8
+#define MENU_TEXT_MAX 32
+/* 4x puts "wayfarer" at 188 px of the 480 the screen is wide - big enough to be
+ * a title rather than a line of HUD, with margin left at the widest label. */
+#define MENU_TITLE_SCALE 4
+/* One blank line between rows. Tighter and the caret has nowhere to sit. */
+#define MENU_ROW_H (FONT_LINE * 2)
+
+/* adjust: which value left/right steps, or MADJ_NONE for a plain row. */
+enum { MADJ_NONE = 0, MADJ_MUSIC, MADJ_SFX, MADJ_FULLSCREEN, MADJ_SCALE };
+
+typedef struct {
+    char       text[MENU_TEXT_MAX];
+    int        enabled;
+    int        adjust;
+    MenuAction act;
+} MenuRow;
+
+static struct {
+    MenuPage page;
+    int      sel;
+    int      started;   /* 0 = title screen, 1 = a game is under way */
+} menu;
+
+/* The volume bar. Ten cells, '=' filled and '-' empty, both of which the font
+ * actually has - a bar drawn from a character the table leaves blank would be
+ * an invisible control, which is the failure mode the label test exists for. */
+static void menu_bar(char *dst, size_t cap, const char *label, int v)
+{
+    char bar[VOL_MAX + 1];
+    int i;
+
+    for (i = 0; i < VOL_MAX; i++)
+        bar[i] = (i < v) ? '=' : '-';
+    bar[VOL_MAX] = '\0';
+    SDL_snprintf(dst, cap, "%s %s %d", label, bar, v);
+}
+
+/* Every row of the current page, in order. Pure: it reads the page, the
+ * settings and whether a save is loadable, and writes nothing. Returns the
+ * count, which is always <= MENU_ROWS_MAX.
+ *
+ * `save_ok` is passed in rather than read from disk here so that the caller
+ * decides how often the file is touched - the menu is rebuilt every frame it is
+ * drawn, and stat-ing the save 60 times a second to grey out one row would be
+ * a syscall in the render path for no gain. */
+static int menu_build(MenuPage page, const Settings *cfg, int started,
+                      int save_ok, MenuRow *rows)
+{
+    int n = 0;
+
+    SDL_memset(rows, 0, sizeof(MenuRow) * MENU_ROWS_MAX);
+    switch (page) {
+    case MENU_ROOT:
+        SDL_strlcpy(rows[n].text, started ? "resume" : "start game",
+                    MENU_TEXT_MAX);
+        rows[n].enabled = 1; rows[n].act = MA_START; n++;
+        /* Greyed rather than hidden when there is no save: a row that appears
+         * once a save exists makes the menu change shape under the player, and
+         * a visible-but-dim row says "this is a thing, you have not got one
+         * yet" - which is the true statement. */
+        SDL_strlcpy(rows[n].text, "load game", MENU_TEXT_MAX);
+        rows[n].enabled = save_ok; rows[n].act = MA_LOAD; n++;
+        SDL_strlcpy(rows[n].text, "settings", MENU_TEXT_MAX);
+        rows[n].enabled = 1; rows[n].act = MA_SETTINGS; n++;
+        SDL_strlcpy(rows[n].text, "quit", MENU_TEXT_MAX);
+        rows[n].enabled = 1; rows[n].act = MA_QUIT; n++;
+        break;
+    case MENU_SETTINGS:
+        menu_bar(rows[n].text, MENU_TEXT_MAX, "music", cfg->music);
+        rows[n].enabled = 1; rows[n].adjust = MADJ_MUSIC; n++;
+        menu_bar(rows[n].text, MENU_TEXT_MAX, "sound", cfg->sfx);
+        rows[n].enabled = 1; rows[n].adjust = MADJ_SFX; n++;
+        SDL_snprintf(rows[n].text, MENU_TEXT_MAX, "fullscreen  %s",
+                     cfg->fullscreen ? "on" : "off");
+        rows[n].enabled = 1; rows[n].adjust = MADJ_FULLSCREEN; n++;
+        /* Dim while fullscreen is on rather than absent: the window scale is
+         * still the player's setting, it simply has nothing to size while the
+         * display owns the resolution, and saying so beats the row vanishing. */
+        SDL_snprintf(rows[n].text, MENU_TEXT_MAX, "window scale  %d", cfg->scale);
+        rows[n].enabled = !cfg->fullscreen; rows[n].adjust = MADJ_SCALE; n++;
+        SDL_strlcpy(rows[n].text, "controls", MENU_TEXT_MAX);
+        rows[n].enabled = 1; rows[n].act = MA_CONTROLS; n++;
+        SDL_strlcpy(rows[n].text, "back", MENU_TEXT_MAX);
+        rows[n].enabled = 1; rows[n].act = MA_BACK; n++;
+        break;
+    case MENU_CONTROLS:
+        SDL_strlcpy(rows[n].text, "back", MENU_TEXT_MAX);
+        rows[n].enabled = 1; rows[n].act = MA_BACK; n++;
+        break;
+    case MENU_NONE:
+    default:
+        break;
+    }
+    return n;
+}
+
+/* What row `idx` does. Out of range and disabled rows are MA_NONE rather than
+ * an assert or a clamp: the selection is bounds-checked on every move, so a bad
+ * index here means a bug elsewhere, and the honest response to "do the thing at
+ * row -1" is to do nothing at all. The test drives exactly that. */
+static MenuAction menu_act(const MenuRow *rows, int count, int idx)
+{
+    if (idx < 0 || idx >= count)
+        return MA_NONE;
+    if (!rows[idx].enabled)
+        return MA_NONE;
+    return rows[idx].act;
+}
+
+/* Move the selection by `step`, wrapping, skipping disabled rows. Bounded by
+ * `count` iterations so a page whose rows are ALL disabled terminates instead
+ * of spinning - it leaves the selection where it was, which is the only honest
+ * answer when there is nothing to move to. */
+static int menu_step(const MenuRow *rows, int count, int sel, int step)
+{
+    int i, n = sel;
+
+    if (count <= 0)
+        return 0;
+    for (i = 0; i < count; i++) {
+        n += step;
+        if (n < 0)       n = count - 1;
+        if (n >= count)  n = 0;
+        if (rows[n].enabled)
+            return n;
+    }
+    return sel;
+}
+
+/* Adjust the value on a row. Clamped rather than wrapped: a player holding
+ * right to reach full volume should not fall off the end back to silence. */
+static void menu_adjust(Settings *cfg, int adjust, int step)
+{
+    switch (adjust) {
+    case MADJ_MUSIC:
+        cfg->music += step;
+        if (cfg->music < 0)       cfg->music = 0;
+        if (cfg->music > VOL_MAX) cfg->music = VOL_MAX;
+        break;
+    case MADJ_SFX:
+        cfg->sfx += step;
+        if (cfg->sfx < 0)       cfg->sfx = 0;
+        if (cfg->sfx > VOL_MAX) cfg->sfx = VOL_MAX;
+        break;
+    case MADJ_FULLSCREEN:
+        cfg->fullscreen = !cfg->fullscreen;
+        break;
+    case MADJ_SCALE:
+        cfg->scale += step;
+        if (cfg->scale < 1)             cfg->scale = 1;
+        if (cfg->scale > WIN_SCALE_MAX) cfg->scale = WIN_SCALE_MAX;
+        break;
+    default:
+        break;
+    }
+}
+
+/* The controls list. Here rather than inside menu_draw so the label test can
+ * walk it for font holes: it is the longest text in the game and the most
+ * likely place for a character the table leaves blank to slip in. */
+/* The three footers, hoisted for the same reason as the control lines: the
+ * label test walks them for width and for blank glyphs. Indexed by the enum
+ * below so menu_draw picks one rather than spelling them out inline, where the
+ * test could not see them. */
+enum { MFOOT_TITLE = 0, MFOOT_PAUSED, MFOOT_SUB, MFOOT_COUNT };
+static const char *const MENU_FOOTERS[MFOOT_COUNT] = {
+    "arrows move   enter choose",
+    "arrows move   enter choose   escape resume",
+    "arrows move   enter choose   escape back"
+};
+
+static const char *const MENU_CONTROL_LINES[] = {
+    "wasd or arrows   walk",
+    "e or space       interact",
+    "m                map",
+    "f5               save",
+    "f9               load",
+    "f11              fullscreen",
+    "escape           this menu"
+};
+#define MENU_CONTROL_COUNT \
+    ((int)(sizeof(MENU_CONTROL_LINES) / sizeof(MENU_CONTROL_LINES[0])))
+
+/* Placed by fb->w/fb->h, never LOGICAL_*: with no backbuffer we draw straight
+ * into the window surface at native resolution, and a menu positioned by the
+ * logical size would land in the top-left corner of a 1080p screen. Same rule
+ * hud_draw and bigmap_draw follow, for the same reason. */
+static void menu_draw(SDL_Surface *fb, const Settings *cfg, int save_ok)
+{
+    Uint32 ink   = SDL_MapRGB(fb->format, 0x10, 0x12, 0x18);
+    Uint32 warm  = SDL_MapRGB(fb->format, 0xf0, 0xd8, 0xb0);
+    Uint32 pale  = SDL_MapRGB(fb->format, 0x9a, 0xa8, 0xb8);
+    Uint32 dim   = SDL_MapRGB(fb->format, 0x78, 0x82, 0x90);
+    /* Darker than the HUD's dim, which only has to read as "not yet earned"
+     * beside a lit one. Here it has to read as "you cannot pick this", against
+     * rows that are themselves unlit until the caret reaches them - at the
+     * HUD's value an unselected row and a disabled one were near enough
+     * identical on screen to be worth nothing. */
+    Uint32 off   = SDL_MapRGB(fb->format, 0x4c, 0x54, 0x60);
+    Uint32 edge  = SDL_MapRGB(fb->format, 0x6a, 0x5c, 0x44);
+    MenuRow rows[MENU_ROWS_MAX];
+    int count, i, y, x, maxw = 0;
+
+    if (menu.page == MENU_NONE)
+        return;
+
+    count = menu_build(menu.page, cfg, menu.started, save_ok, rows);
+    fill_rect(fb, 0, 0, fb->w, fb->h, ink);
+
+    /* The title only on the root page. On a subpage it would be a second thing
+     * competing with the heading for the same glance, and the player already
+     * knows what game they are in by then. */
+    if (menu.page == MENU_ROOT) {
+        const char *t = "wayfarer";
+        int tw = text_w_scaled(t, MENU_TITLE_SCALE);
+        draw_text_scaled(fb, (fb->w - tw) / 2, fb->h / 6, t, warm,
+                         MENU_TITLE_SCALE);
+        fill_rect(fb, (fb->w - tw) / 2, fb->h / 6 + FONT_LINE_AT(MENU_TITLE_SCALE),
+                  tw, 1, edge);
+    } else {
+        const char *h = (menu.page == MENU_SETTINGS) ? "settings" : "controls";
+        draw_text_scaled(fb, (fb->w - text_w_scaled(h, 2)) / 2, fb->h / 6, h,
+                         warm, 2);
+    }
+
+    y = fb->h / 2 - (count * MENU_ROW_H) / 2;
+    if (menu.page == MENU_CONTROLS) {
+        /* The list sits where the rows would, and `back` follows it. Every line
+         * is drawn from the same left edge, so the key column and the action
+         * column line up - the whole point of the padding inside the strings. */
+        int lx = (fb->w - text_w(MENU_CONTROL_LINES[0])) / 2;
+        int ly = fb->h / 3;
+        for (i = 0; i < MENU_CONTROL_COUNT; i++) {
+            draw_text(fb, lx, ly, MENU_CONTROL_LINES[i], pale);
+            ly += FONT_LINE + 2;
+        }
+        y = ly + FONT_LINE;
+    }
+
+    /* The BLOCK is centred and the rows are left-aligned inside it, rather than
+     * each row being centred on its own. Centring every row individually made
+     * the settings page jitter: "fullscreen  off" and "window scale  2" are
+     * different lengths, so their labels started at different x and the column
+     * read as ragged even though each line was perfectly centred. */
+    for (i = 0; i < count; i++) {
+        int w = text_w(rows[i].text);
+        if (w > maxw) maxw = w;
+    }
+    x = (fb->w - maxw) / 2;
+
+    for (i = 0; i < count; i++) {
+        Uint32 col = !rows[i].enabled ? off : (i == menu.sel ? warm : pale);
+        draw_text(fb, x, y, rows[i].text, col);
+        /* The caret sits outside the label rather than inside it, so the row
+         * text does not shift by six pixels as the selection passes over. */
+        if (i == menu.sel)
+            draw_text(fb, x - FONT_ADV * 2, y, ">", warm);
+        y += MENU_ROW_H;
+    }
+
+    /* The footer names the keys that work HERE. The map screen states how to
+     * close itself for the same reason: a screen that gives no way out reads as
+     * a hang, and this one is the first thing a new player ever sees. */
+    {
+        /* Names what escape does HERE, which is three different things across
+         * the three pages - and on the title screen it is nothing at all, so it
+         * goes unmentioned rather than being promised and ignored. */
+        const char *f = MENU_FOOTERS[menu.page != MENU_ROOT ? MFOOT_SUB
+                                     : menu.started         ? MFOOT_PAUSED
+                                     : MFOOT_TITLE];
+        draw_text(fb, (fb->w - text_w(f)) / 2, fb->h - FONT_LINE - 8, f, dim);
+    }
+
+    /* The toast, on the menu's own terms.
+     *
+     * The menu REPLACES the HUD, so a message raised while it is up - a save
+     * that would not load, settings that would not write - was being posted to
+     * a hud_draw that never runs, and vanished. Reusing hud.toast rather than
+     * inventing a second message line keeps one place where the game says
+     * something went wrong. It does not tick down here, because the menu pauses
+     * the simulation: it stays as long as the player is still looking at the
+     * screen it is about, and expires normally once play resumes. */
+    if (hud.toast_left > 0)
+        draw_text(fb, (fb->w - text_w(hud.toast)) / 2,
+                  fb->h - FONT_LINE * 3 - 8, hud.toast, warm);
 }
 
 /* ---- The map screen -----------------------------------------------------
@@ -8480,7 +9055,7 @@ static int font_selftest(void)
             SDL_FillRect(fb, NULL, 0);
             for (i = 0; s[i]; i++)
                 draw_glyph(fb, 2 + i * FONT_ADV, 2, (unsigned char)s[i], white,
-                           FONT_STRIDE + 1);
+                           FONT_STRIDE + 1, FONT_SCALE);
             {
                 int bad = count_lit(fb, 0, 0, fb->w, fb->h);
                 if (bad == got) {
@@ -8498,8 +9073,8 @@ static int font_selftest(void)
 
     /* Out of range draws nothing rather than indexing past the table. */
     SDL_FillRect(fb, NULL, 0);
-    draw_glyph(fb, 4, 4, 0x1F, white, FONT_STRIDE);          /* below FONT_FIRST */
-    draw_glyph(fb, 12, 4, FONT_LAST + 1, white, FONT_STRIDE); /* above FONT_LAST */
+    draw_glyph(fb, 4, 4, 0x1F, white, FONT_STRIDE, FONT_SCALE);          /* below FONT_FIRST */
+    draw_glyph(fb, 12, 4, FONT_LAST + 1, white, FONT_STRIDE, FONT_SCALE); /* above FONT_LAST */
     if (count_lit(fb, 0, 0, fb->w, fb->h) != 0) {
         printf("FAIL  font: an out-of-range character drew pixels\n");
         fails++;
@@ -9476,6 +10051,591 @@ static int hud_selftest(Uint64 base)
     return fails;
 }
 
+/* ---- --menu-test --------------------------------------------------------
+ *
+ * The menu is the first screen a player ever sees and the only way out of the
+ * game that is not the window's close button, so the things that must not break
+ * are: it draws when open and NOTHING when closed, the selection can never
+ * leave the list or land on a row that does nothing, a row's action is the
+ * action its label promises, the settings file cannot poison the live settings,
+ * and every label is made of characters the font actually fills.
+ *
+ * Every check below has a negative control, because a checker that has never
+ * rejected anything proves nothing - and two of these controls are exactly the
+ * bugs the design invites: a label containing '(' shipping as a blank hole, and
+ * a "load game" row lit by a file that cannot actually be loaded.
+ */
+static int menu_selftest(void)
+{
+    SDL_Surface *fb = test_surface(LOGICAL_W, LOGICAL_H);
+    const char *path = "wayfarer-menutest.tmp";
+    Settings cfg, back;
+    MenuRow rows[MENU_ROWS_MAX];
+    int fails = 0, count, i;
+
+    if (!fb) {
+        printf("FAIL  menu: could not create the test surface\n");
+        return 1;
+    }
+    cfg_defaults(&cfg);
+
+    /* ---- 1. the root page names what it will do ------------------------- */
+    count = menu_build(MENU_ROOT, &cfg, 0, 1, rows);
+    if (count != 4) {
+        printf("FAIL  menu: root page built %d rows, expected 4\n", count);
+        fails++;
+    }
+    {
+        MenuRow started[MENU_ROWS_MAX];
+        int n2 = menu_build(MENU_ROOT, &cfg, 1, 1, started);
+        if (n2 != count || SDL_strcmp(rows[0].text, started[0].text) == 0) {
+            printf("FAIL  menu: row 0 reads \"%s\" both before and during a game;"
+                   " it must say start and resume\n", rows[0].text);
+            fails++;
+        } else {
+            printf("menu    : root row 0 is \"%s\" at the title, \"%s\" in play\n",
+                   rows[0].text, started[0].text);
+        }
+    }
+
+    /* ---- 2. "load game" tracks whether a save can actually be loaded ----- */
+    {
+        Game *g  = (Game *)SDL_malloc(sizeof(Game));
+        Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+
+        if (!g || !sc) {
+            printf("FAIL  menu: could not allocate a world for the save case\n");
+            fails++;
+        } else {
+            SDL_RWops *rw;
+            Uint8 buf[SAVE_SIZE];
+
+            /* An EMPTY file, not a missing one: the case a bare "does the
+             * file exist" check gets wrong. */
+            rw = SDL_RWFromFile(path, "wb");
+            if (rw) SDL_RWclose(rw);
+            count = menu_build(MENU_ROOT, &cfg, 0, save_exists(path), rows);
+            if (rows[1].enabled) {
+                printf("FAIL  menu: load offered for an empty save file\n");
+                fails++;
+            }
+
+            game_init(g, sc, 1);
+            if (game_save(g, path) != 0) {
+                printf("FAIL  menu: could not write the test save\n");
+                fails++;
+            }
+            count = menu_build(MENU_ROOT, &cfg, 0, save_exists(path), rows);
+            if (!rows[1].enabled) {
+                printf("FAIL  menu: load NOT offered for a save that game_save"
+                       " just wrote\n");
+                fails++;
+            } else {
+                printf("menu    : load offered for a real save, refused for an"
+                       " empty file\n");
+            }
+
+            /* NEGATIVE CONTROL. The file still exists and is still 28 bytes -
+             * only the version byte is wrong. A row lit by mere existence would
+             * stay lit here and then fail the moment it was chosen, which reads
+             * as the game being broken rather than as there being no save. */
+            rw = SDL_RWFromFile(path, "rb");
+            if (rw && SDL_RWread(rw, buf, 1, SAVE_SIZE) == SAVE_SIZE) {
+                SDL_RWclose(rw);
+                buf[2] = SAVE_VERSION + 1;
+                rw = SDL_RWFromFile(path, "wb");
+                if (rw) {
+                    SDL_RWwrite(rw, buf, 1, SAVE_SIZE);
+                    SDL_RWclose(rw);
+                }
+                count = menu_build(MENU_ROOT, &cfg, 0, save_exists(path), rows);
+                if (rows[1].enabled) {
+                    printf("FAIL  menu: negative control - load still offered for"
+                           " a file game_load would reject; the row is lit by"
+                           " existence, not by validity\n");
+                    fails++;
+                } else {
+                    printf("menu    : negative control PASS (a 28-byte file with"
+                           " a bad version is not offered)\n");
+                }
+            } else {
+                if (rw) SDL_RWclose(rw);
+                printf("FAIL  menu: could not re-read the test save\n");
+                fails++;
+            }
+            SDL_free(g);
+            SDL_free(sc);
+        }
+    }
+
+    /* ---- 3. it draws when open, and nothing at all when closed ---------- */
+    SDL_zero(menu);
+    menu.page = MENU_ROOT;
+    menu.sel  = 0;
+    SDL_FillRect(fb, NULL, 0);
+    menu_draw(fb, &cfg, 1);
+    {
+        /* Counted as pixels that are NOT the background, not as pixels that are
+         * lit: the menu fills the whole surface with an ink that is itself
+         * non-black, so count_lit alone returns all 129,600 whether or not a
+         * single glyph rendered - it would pass on an empty screen. What has to
+         * be true is that TEXT reached the surface. */
+        Uint32 ink_c   = SDL_MapRGB(fb->format, 0x10, 0x12, 0x18);
+        int    filled  = count_col(fb, ink_c, 0, 0, fb->w, fb->h);
+        int    open_px = fb->w * fb->h - filled;
+        int    shut_px;
+
+        if (filled <= 0) {
+            printf("FAIL  menu: an open menu did not fill its background\n");
+            fails++;
+        }
+        if (open_px <= 0) {
+            printf("FAIL  menu: an open menu drew a background and no text\n");
+            fails++;
+        }
+        /* NEGATIVE CONTROL, driven through the SAME predicate main() gates the
+         * draw with, so it is the shipping path that is being asserted about
+         * and not a test-only one. */
+        SDL_zero(menu);
+        menu.page = MENU_NONE;
+        SDL_FillRect(fb, NULL, 0);
+        if (menu.page != MENU_NONE)
+            menu_draw(fb, &cfg, 1);
+        menu_draw(fb, &cfg, 1);   /* and directly, to prove its own early out */
+        shut_px = count_lit(fb, 0, 0, fb->w, fb->h);
+        if (shut_px != 0) {
+            printf("FAIL  menu: negative control - a closed menu drew %d px\n",
+                   shut_px);
+            fails++;
+        } else {
+            printf("menu    : draws %d px of text over a %d px ground when open,"
+                   " 0 px of anything when closed\n", open_px, filled);
+        }
+    }
+
+    /* ---- 3b. a message raised while the menu is up is actually shown ----- */
+    {
+        /* Text pixels, i.e. everything that is not the background ink - the
+         * same reason check 3 counts that way: the menu paints all 129,600
+         * pixels a non-black colour, so count_lit saturates and would report
+         * no difference whether or not the message rendered. */
+        Uint32 ink_c = SDL_MapRGB(fb->format, 0x10, 0x12, 0x18);
+        int quiet, loud;
+#define MENU_TEXT_PX() (fb->w * fb->h - count_col(fb, ink_c, 0, 0, fb->w, fb->h))
+
+        SDL_zero(menu);
+        menu.page = MENU_ROOT;
+        hud.toast_left = 0;
+        SDL_FillRect(fb, NULL, 0);
+        menu_draw(fb, &cfg, 1);
+        quiet = MENU_TEXT_PX();
+
+        /* The menu replaces the HUD, so a toast posted here used to be handed
+         * to a hud_draw that never runs. The failure paths that raise one - a
+         * save that will not load, settings that will not write - both leave
+         * the menu open, so this is the only place the player could see it. */
+        hud_toast("that save could not be loaded");
+        SDL_FillRect(fb, NULL, 0);
+        menu_draw(fb, &cfg, 1);
+        loud = MENU_TEXT_PX();
+
+        if (loud <= quiet) {
+            printf("FAIL  menu: a toast raised over the menu drew nothing"
+                   " (%d px with, %d px without)\n", loud, quiet);
+            fails++;
+        } else {
+            printf("menu    : a toast over the menu adds %d px\n", loud - quiet);
+        }
+        /* NEGATIVE CONTROL: an EXPIRED toast must not be drawn. Without this
+         * the check above would pass on a menu that draws hud.toast whatever
+         * its remaining time says, and a stale message would sit on the title
+         * screen forever. */
+        hud.toast_left = 0;
+        SDL_FillRect(fb, NULL, 0);
+        menu_draw(fb, &cfg, 1);
+        if (MENU_TEXT_PX() != quiet) {
+            printf("FAIL  menu: negative control - an expired toast is still"
+                   " drawn over the menu\n");
+            fails++;
+        } else {
+            printf("menu    : negative control PASS (an expired toast draws"
+                   " nothing)\n");
+        }
+#undef MENU_TEXT_PX
+        SDL_zero(hud);
+    }
+
+    /* ---- 4. the selection cannot escape, and never rests on a dead row --- */
+    {
+        int sel = 0, bad = 0, onto_disabled = 0, step;
+
+        /* save_ok = 0, so "load game" is disabled and sits in the MIDDLE of the
+         * list - the position that catches a skip implemented as a clamp. */
+        count = menu_build(MENU_ROOT, &cfg, 0, 0, rows);
+        for (i = 0; i < 200; i++) {
+            step = (i % 3 == 0) ? -1 : 1;
+            sel = menu_step(rows, count, sel, step);
+            if (sel < 0 || sel >= count) { bad++; break; }
+            if (!rows[sel].enabled) onto_disabled++;
+        }
+        if (bad) {
+            printf("FAIL  menu: selection left the list (%d of %d)\n", sel, count);
+            fails++;
+        }
+        if (onto_disabled) {
+            printf("FAIL  menu: selection landed on a disabled row %d times\n",
+                   onto_disabled);
+            fails++;
+        }
+        if (!bad && !onto_disabled)
+            printf("menu    : 200 moves stayed inside %d rows and never landed"
+                   " on the disabled one\n", count);
+
+        /* It must WRAP, not stop. A clamp would pass everything above. */
+        if (menu_step(rows, count, 0, -1) != count - 1 ||
+            menu_step(rows, count, count - 1, 1) != 0) {
+            printf("FAIL  menu: the selection clamps at the ends instead of"
+                   " wrapping\n");
+            fails++;
+        } else {
+            printf("menu    : wraps at both ends\n");
+        }
+    }
+
+    /* ---- 5. a row does what its label says, and a bad index does nothing - */
+    {
+        count = menu_build(MENU_ROOT, &cfg, 0, 1, rows);
+        if (menu_act(rows, count, 0) != MA_START ||
+            menu_act(rows, count, 1) != MA_LOAD  ||
+            menu_act(rows, count, 2) != MA_SETTINGS ||
+            menu_act(rows, count, 3) != MA_QUIT) {
+            printf("FAIL  menu: a root row's action does not match its label\n");
+            fails++;
+        } else {
+            printf("menu    : every root row's action matches its label\n");
+        }
+        /* NEGATIVE CONTROL. Nothing outside the list may resolve to an action -
+         * MA_QUIT reached by an off-by-one would end the process. */
+        {
+            int idx[4]; int n_bad = 0;
+            idx[0] = -1; idx[1] = count; idx[2] = count + 99; idx[3] = -1000;
+            for (i = 0; i < 4; i++)
+                if (menu_act(rows, count, idx[i]) != MA_NONE) n_bad++;
+            /* A disabled row is out of bounds in the same sense. */
+            count = menu_build(MENU_ROOT, &cfg, 0, 0, rows);
+            if (menu_act(rows, count, 1) != MA_NONE) n_bad++;
+            if (n_bad) {
+                printf("FAIL  menu: negative control - %d out-of-range or"
+                       " disabled rows resolved to a real action\n", n_bad);
+                fails++;
+            } else {
+                printf("menu    : negative control PASS (-1, %d, %d and a"
+                       " disabled row all do nothing)\n", count, count + 99);
+            }
+        }
+    }
+
+    /* ---- 6. every label is drawable, and fits ---------------------------- */
+    {
+        static const MenuPage pages[3] = { MENU_ROOT, MENU_SETTINGS, MENU_CONTROLS };
+        int checked = 0, blanks = 0, wide = 0, pi, ri, ci;
+
+        for (pi = 0; pi < 3; pi++) {
+            /* Both save states and both fullscreen states, so no label is
+             * missed because it only exists in one of them. */
+            int pass;
+            for (pass = 0; pass < 4; pass++) {
+                Settings v = cfg;
+                v.fullscreen = pass & 1;
+                v.music = (pass & 2) ? 0 : VOL_MAX;
+                v.sfx   = (pass & 2) ? 3 : VOL_MAX;
+                count = menu_build(pages[pi], &v, pass & 1, pass & 1, rows);
+                for (ri = 0; ri < count; ri++) {
+                    checked++;
+                    if (text_w(rows[ri].text) > LOGICAL_W - 8) {
+                        printf("FAIL  menu: \"%s\" is %d px, wider than the"
+                               " frame\n", rows[ri].text, text_w(rows[ri].text));
+                        wide++;
+                    }
+                    for (ci = 0; rows[ri].text[ci]; ci++)
+                        if (rows[ri].text[ci] != ' ' &&
+                            font_bits((unsigned char)rows[ri].text[ci],
+                                      FONT_STRIDE) == 0) {
+                            printf("FAIL  menu: \"%s\" contains '%c', which the"
+                                   " font draws as nothing\n",
+                                   rows[ri].text, rows[ri].text[ci]);
+                            blanks++;
+                        }
+                }
+            }
+        }
+        for (ri = 0; ri < MFOOT_COUNT; ri++) {
+            checked++;
+            if (text_w(MENU_FOOTERS[ri]) > LOGICAL_W - 8) {
+                printf("FAIL  menu: footer \"%s\" is %d px, wider than the"
+                       " frame\n", MENU_FOOTERS[ri], text_w(MENU_FOOTERS[ri]));
+                wide++;
+            }
+            for (ci = 0; MENU_FOOTERS[ri][ci]; ci++)
+                if (MENU_FOOTERS[ri][ci] != ' ' &&
+                    font_bits((unsigned char)MENU_FOOTERS[ri][ci],
+                              FONT_STRIDE) == 0) {
+                    printf("FAIL  menu: footer \"%s\" contains '%c', which the"
+                           " font draws as nothing\n",
+                           MENU_FOOTERS[ri], MENU_FOOTERS[ri][ci]);
+                    blanks++;
+                }
+        }
+        for (ri = 0; ri < MENU_CONTROL_COUNT; ri++) {
+            checked++;
+            if (text_w(MENU_CONTROL_LINES[ri]) > LOGICAL_W - 8) {
+                printf("FAIL  menu: control line \"%s\" is %d px, wider than the"
+                       " frame\n", MENU_CONTROL_LINES[ri],
+                       text_w(MENU_CONTROL_LINES[ri]));
+                wide++;
+            }
+            for (ci = 0; MENU_CONTROL_LINES[ri][ci]; ci++)
+                if (MENU_CONTROL_LINES[ri][ci] != ' ' &&
+                    font_bits((unsigned char)MENU_CONTROL_LINES[ri][ci],
+                              FONT_STRIDE) == 0) {
+                    printf("FAIL  menu: control line \"%s\" contains '%c', which"
+                           " the font draws as nothing\n",
+                           MENU_CONTROL_LINES[ri], MENU_CONTROL_LINES[ri][ci]);
+                    blanks++;
+                }
+        }
+        fails += wide + blanks;
+        if (!wide && !blanks)
+            printf("menu    : %d labels all fit %d px and contain no blank"
+                   " glyphs\n", checked, LOGICAL_W);
+
+        /* NEGATIVE CONTROL. '(' IS in the table's range and IS all zeroes, so a
+         * label using it would draw as a hole and every other check above would
+         * still pass. If this finds nothing, the loop above is measuring
+         * nothing. */
+        if (font_bits('(', FONT_STRIDE) != 0) {
+            printf("FAIL  menu: negative control - '(' has bits, so the blank"
+                   " glyph check cannot catch a label that uses it\n");
+            fails++;
+        } else {
+            static const char *hole = "quit (really)";
+            int found = 0;
+            for (ci = 0; hole[ci]; ci++)
+                if (hole[ci] != ' ' &&
+                    font_bits((unsigned char)hole[ci], FONT_STRIDE) == 0)
+                    found++;
+            if (!found) {
+                printf("FAIL  menu: negative control - \"%s\" passed the blank"
+                       " glyph check it should fail\n", hole);
+                fails++;
+            } else {
+                printf("menu    : negative control PASS (a label containing '('"
+                       " is caught, %d blank glyphs)\n", found);
+            }
+        }
+    }
+
+    /* ---- 7. the settings file cannot poison the live settings ------------ */
+    {
+        Settings want;
+        want.music = 3; want.sfx = 7; want.fullscreen = 1; want.scale = 4;
+        if (cfg_save(&want, path) != 0) {
+            printf("FAIL  menu: could not write the test settings file\n");
+            fails++;
+        }
+        cfg_defaults(&back);
+        if (cfg_load(&back, path) != 0 ||
+            back.music != 3 || back.sfx != 7 ||
+            back.fullscreen != 1 || back.scale != 4) {
+            printf("FAIL  menu: settings did not round trip"
+                   " (music %d sfx %d full %d scale %d)\n",
+                   back.music, back.sfx, back.fullscreen, back.scale);
+            fails++;
+        } else {
+            printf("menu    : settings round trip PASS\n");
+        }
+
+        /* NEGATIVE CONTROLS. Every field's illegal values, one at a time, and
+         * each must be REFUSED with the live settings left exactly as they
+         * were - the same rule game_load obeys, for the same reason. */
+        {
+            static const struct { int off; int val; const char *what; } bad[] = {
+                { 0, 'X',           "bad magic" },
+                { 2, CFG_VERSION+1, "wrong version" },
+                { 3, VOL_MAX + 1,   "music above the scale" },
+                { 4, 255,           "sound above the scale" },
+                { 5, 2,             "fullscreen neither 0 nor 1" },
+                { 6, 0,             "scale 0" },
+                { 6, WIN_SCALE_MAX + 1, "scale past the maximum" },
+                { 7, 1,             "nonzero reserved byte" }
+            };
+            int n = (int)(sizeof(bad) / sizeof(bad[0])), rejected = 0;
+
+            for (i = 0; i < n; i++) {
+                Uint8 buf[CFG_SIZE];
+                SDL_RWops *rw;
+                Settings live = back, before;
+
+                if (cfg_save(&want, path) != 0) continue;
+                rw = SDL_RWFromFile(path, "rb");
+                if (!rw) continue;
+                if (SDL_RWread(rw, buf, 1, CFG_SIZE) != CFG_SIZE) {
+                    SDL_RWclose(rw); continue;
+                }
+                SDL_RWclose(rw);
+                buf[bad[i].off] = (Uint8)bad[i].val;
+                rw = SDL_RWFromFile(path, "wb");
+                if (!rw) continue;
+                SDL_RWwrite(rw, buf, 1, CFG_SIZE);
+                SDL_RWclose(rw);
+
+                before = live;
+                if (cfg_load(&live, path) == 0) {
+                    printf("FAIL  menu: accepted a settings file with %s\n",
+                           bad[i].what);
+                    fails++;
+                } else if (SDL_memcmp(&live, &before, sizeof(Settings)) != 0) {
+                    printf("FAIL  menu: a rejected settings file (%s) still"
+                           " changed the live settings\n", bad[i].what);
+                    fails++;
+                } else {
+                    rejected++;
+                }
+            }
+            printf("menu    : rejected %d of %d malformed settings files,"
+                   " live settings untouched every time\n", rejected, n);
+        }
+
+        /* A missing file is a first run, not a corruption: it must be refused
+         * AND leave the defaults in place, which is what main() relies on. */
+        {
+            Settings live;
+            cfg_defaults(&live);
+            (void)remove(path);
+            if (cfg_load(&live, path) == 0) {
+                printf("FAIL  menu: loaded settings from a file that is not"
+                       " there\n");
+                fails++;
+            } else if (live.music != VOL_MAX || live.sfx != VOL_MAX ||
+                       live.fullscreen != 0 || live.scale != 0) {
+                printf("FAIL  menu: a missing settings file disturbed the"
+                       " defaults\n");
+                fails++;
+            } else {
+                printf("menu    : a missing settings file leaves the defaults\n");
+            }
+        }
+    }
+
+    /* ---- 8. the volume steps are bounded ---------------------------------- */
+    {
+        Settings v = cfg;
+        for (i = 0; i < 50; i++) menu_adjust(&v, MADJ_MUSIC, -1);
+        for (i = 0; i < 50; i++) menu_adjust(&v, MADJ_SFX, 1);
+        for (i = 0; i < 50; i++) menu_adjust(&v, MADJ_SCALE, 1);
+        if (v.music != 0 || v.sfx != VOL_MAX || v.scale != WIN_SCALE_MAX) {
+            printf("FAIL  menu: adjust ran past its bounds"
+                   " (music %d sfx %d scale %d)\n", v.music, v.sfx, v.scale);
+            fails++;
+        }
+        /* NEGATIVE CONTROL: it must CLAMP, not wrap. Holding right to reach
+         * full volume and falling back to silence is the bug this catches. */
+        menu_adjust(&v, MADJ_SFX, 1);
+        menu_adjust(&v, MADJ_MUSIC, -1);
+        if (v.sfx != VOL_MAX || v.music != 0) {
+            printf("FAIL  menu: negative control - adjust wrapped past a bound"
+                   " (music %d sfx %d)\n", v.music, v.sfx);
+            fails++;
+        } else {
+            printf("menu    : volume and scale clamp at both ends\n");
+        }
+    }
+
+    /* ---- 9. the volume setting actually reaches the speakers ------------- */
+    {
+        /* The callback is driven DIRECTLY, with no device open: it is an
+         * ordinary function, and calling it here measures the real mix on a
+         * machine with no sound card - which is the same machine the game must
+         * still run on. This is the end of the path the settings row starts:
+         * row -> Settings -> cfg_apply_audio -> atomic -> audio_cb. */
+        Audio a;
+        float buf[512];
+        int   nz_full = 0, nz_mute = 0, nz_sfx = 0;
+
+        SDL_zero(a);
+        a.rate     = AUDIO_RATE;
+        a.channels = 2;
+        a.synth.synth_on = 1;
+        a.synth.layers   = (1 << NUM_LAYERS) - 1;
+        a.synth.area     = BIOME_FOREST;
+        SDL_AtomicSet(&a.music_vol, VOL_MAX);
+        SDL_AtomicSet(&a.sfx_vol,   VOL_MAX);
+        audio_cb(&a, (Uint8 *)buf, (int)sizeof(buf));
+        for (i = 0; i < (int)(sizeof(buf) / sizeof(buf[0])); i++)
+            if (buf[i] != 0.0f) nz_full++;
+
+        /* Music silenced, SFX untouched and none firing: the buffer must be
+         * exactly zero. Not "quiet" - a volume of 0 that still leaked would be
+         * a mix that cannot be turned off. */
+        SDL_zero(a);
+        a.rate     = AUDIO_RATE;
+        a.channels = 2;
+        a.synth.synth_on = 1;
+        a.synth.layers   = (1 << NUM_LAYERS) - 1;
+        a.synth.area     = BIOME_FOREST;
+        SDL_AtomicSet(&a.music_vol, 0);
+        SDL_AtomicSet(&a.sfx_vol,   VOL_MAX);
+        audio_cb(&a, (Uint8 *)buf, (int)sizeof(buf));
+        for (i = 0; i < (int)(sizeof(buf) / sizeof(buf[0])); i++)
+            if (buf[i] != 0.0f) nz_mute++;
+
+        /* And the two are INDEPENDENT: with the music silenced, a fired SFX
+         * must still be heard. A single master volume would fail this. */
+        SDL_zero(a);
+        a.rate     = AUDIO_RATE;
+        a.channels = 2;
+        a.synth.synth_on = 1;
+        a.synth.layers   = (1 << NUM_LAYERS) - 1;
+        a.synth.area     = BIOME_FOREST;
+        SDL_AtomicSet(&a.music_vol, 0);
+        SDL_AtomicSet(&a.sfx_vol,   VOL_MAX);
+        sfx_fire(&a, SFX_CHIME);
+        audio_cb(&a, (Uint8 *)buf, (int)sizeof(buf));
+        for (i = 0; i < (int)(sizeof(buf) / sizeof(buf[0])); i++)
+            if (buf[i] != 0.0f) nz_sfx++;
+
+        if (nz_mute != 0) {
+            printf("FAIL  menu: music volume 0 still produced %d nonzero"
+                   " samples\n", nz_mute);
+            fails++;
+        }
+        /* NEGATIVE CONTROL. If full volume were ALSO silent, the check above
+         * would pass on a mix that never produced anything - which is exactly
+         * how a zeroed Audio reads, and exactly the bug the layers test caught
+         * the first time these volumes were wired up. */
+        if (nz_full == 0) {
+            printf("FAIL  menu: negative control - full volume produced silence"
+                   " too, so the mute check proves nothing\n");
+            fails++;
+        }
+        if (nz_sfx == 0) {
+            printf("FAIL  menu: silencing the music also silenced the SFX; the"
+                   " two volumes are not independent\n");
+            fails++;
+        }
+        if (!nz_mute && nz_full && nz_sfx)
+            printf("menu    : music 0 is exactly silent, music %d is %d/%d"
+                   " samples, and a chime still sounds under a silenced"
+                   " score\n", VOL_MAX, nz_full,
+                   (int)(sizeof(buf) / sizeof(buf[0])));
+    }
+
+    (void)remove(path);
+    SDL_FreeSurface(fb);
+    printf("menu    : %s\n", fails ? "FAIL" : "PASS");
+    return fails;
+}
+
 /* ---- --save-test --------------------------------------------------------
  *
  * The round-trip claim, tested exactly: save, trash the live state, load, and
@@ -9930,6 +11090,16 @@ static int audio_selftest(int argc, char **argv, int ms)
     int i, layers, fails = 0;
 
     SDL_zero(a);
+    /* SDL_zero left both volume atomics at 0, which is SILENCE. Set explicitly
+     * rather than relying on a default, because what this test asserts - that
+     * no sample ever reaches the clamp - is a claim about the WORST case, and
+     * the worst case is full volume. Measuring it at anything less would be
+     * measuring a mix the player can turn up, and the check would pass by
+     * being quiet rather than by being correctly scaled. The first run of this
+     * after the volumes landed reported 1.0000 headroom, which is exactly what
+     * a silent mix looks like to a clamp counter. */
+    SDL_AtomicSet(&a.music_vol, VOL_MAX);
+    SDL_AtomicSet(&a.sfx_vol,   VOL_MAX);
     a.noise = arg_flag(argc, argv, "--noise");
     /* --rate exists to exercise the sample-rate-conversion path on a machine
      * whose device happens to match our request exactly. */
@@ -10450,7 +11620,20 @@ int main(int argc, char **argv)
     Audio audio;
     SDL_AudioDeviceID dev = 0;
     SDL_AudioSpec have;
-    int scale, running = 1, frame = 0, limit, fullscreen = 0;
+    int scale, running = 1, frame = 0, limit;
+    Settings cfg;
+    /* Whether a save is worth offering. Refreshed when the menu opens and after
+     * anything that changes the file, NOT every frame the menu is drawn: the
+     * row is rebuilt at 60 Hz and stat-ing the save that often would put a
+     * syscall in the render path to answer a question that cannot have changed
+     * without one of those events happening first. */
+    int save_ok = 0;
+    /* Has anything the settings file holds changed this session? Only then is
+     * the file written on the way out. Without it, every first run would drop a
+     * wayfarer.cfg recording whatever scale pick_scale happened to choose on
+     * whatever display was attached - locking in a window size nobody asked
+     * for, on the strength of having once started the game. */
+    int cfg_dirty = 0;
     int cam_x = 0, cam_y = 0;
     Uint64 perf, prev, now, seed, frame_due = 0;
     float acc = 0.0f, clock = 0.0f;
@@ -10476,6 +11659,7 @@ int main(int argc, char **argv)
     if (arg_flag(argc, argv, "--sort-test"))     return sort_selftest();
     if (arg_flag(argc, argv, "--mockup-test"))   return mockup_selftest();
     if (arg_flag(argc, argv, "--font-test"))     return font_selftest();
+    if (arg_flag(argc, argv, "--menu-test"))     return menu_selftest();
     if (arg_flag(argc, argv, "--hud-test"))
         return hud_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
     if (arg_flag(argc, argv, "--map-test"))
@@ -10662,6 +11846,12 @@ int main(int argc, char **argv)
     }
 #endif
 
+    /* Settings before SDL, because the window is sized from them. A missing or
+     * malformed file is a first run, not an error: cfg_load leaves the defaults
+     * in place and nothing is said about it. */
+    cfg_defaults(&cfg);
+    (void)cfg_load(&cfg, CFG_FILENAME);
+
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
         return fatal("Wayfarer could not start SDL's video subsystem, so it cannot "
                      "open a window.", 1);
@@ -10673,6 +11863,10 @@ int main(int argc, char **argv)
     SDL_zero(audio);
     audio.req_rate = AUDIO_RATE;
     rng_seed(&audio.rng, seed, STREAM_AUDIO);
+    /* BEFORE audio_open, not after: SDL_zero left both volume atomics at 0, so
+     * a device that started first would render a buffer of silence and the game
+     * would open with a fade-in nobody asked for. */
+    cfg_apply_audio(&audio, &cfg);
     if (!arg_flag(argc, argv, "--mute") && SDL_InitSubSystem(SDL_INIT_AUDIO) == 0) {
         dev = audio_open(&audio, &have);
         if (dev) {
@@ -10681,12 +11875,20 @@ int main(int argc, char **argv)
         }
     }
 
+    /* --scale beats the stored setting, which beats pick_scale: an explicit
+     * flag on the command line is the most specific thing anyone said. The
+     * chosen value goes back into cfg so the settings row shows the scale
+     * actually in use rather than a 0 nobody picked. */
     scale = arg_int(argc, argv, "--scale", 0);
     if (scale < 1 || scale > WIN_SCALE_MAX)
-        scale = pick_scale();
+        scale = (cfg.scale >= 1 && cfg.scale <= WIN_SCALE_MAX) ? cfg.scale
+                                                               : pick_scale();
+    cfg.scale = scale;
 
     win = SDL_CreateWindow("Wayfarer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                           LOGICAL_W * scale, LOGICAL_H * scale, SDL_WINDOW_SHOWN);
+                           LOGICAL_W * scale, LOGICAL_H * scale,
+                           SDL_WINDOW_SHOWN |
+                           (cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     if (!win) {
         SDL_Quit();
         return fatal("Wayfarer could not create its window.", 2);
@@ -10720,6 +11922,39 @@ int main(int argc, char **argv)
         return fatal("Wayfarer could not allocate its colour tables.", 5);
     }
 
+    /* The title menu, unless --frames was given.
+     *
+     * --frames is the screenshot and smoke-test flag, and every recipe using it
+     * - in CLAUDE.md, in README.md, in anything anyone has scripted - means
+     * "photograph the world". Opening a menu in front of that would silently
+     * change what every one of those commands captures, which is a worse bug
+     * than having no menu: the shots would keep being taken and keep looking
+     * fine. So a --frames run plays straight through, exactly as before, and
+     * --menu below is how the menu itself gets photographed. */
+    if (!limit) {
+        menu.page    = MENU_ROOT;
+        menu.sel     = 0;
+        menu.started = 0;
+        save_ok      = save_exists(SAVE_FILENAME);
+    }
+#if WAYFARER_SELFTEST
+    /* --menu: open the menu for a screenshot, the same favour --map does for
+     * the map screen and for the same reason - it is otherwise unreachable
+     * from a --frames run, which is the only run that can take a picture.
+     * AFTER the --frames suppression above, so it wins over it. */
+    if (arg_flag(argc, argv, "--menu")) {
+        const char *pg = NULL;
+        menu.page    = MENU_ROOT;
+        menu.sel     = 0;
+        menu.started = arg_flag(argc, argv, "--paused");
+        save_ok      = save_exists(SAVE_FILENAME);
+        for (i = 1; i < argc - 1; i++)
+            if (SDL_strcmp(argv[i], "--menupage") == 0) pg = argv[i + 1];
+        if (pg && SDL_strcmp(pg, "settings") == 0) menu.page = MENU_SETTINGS;
+        if (pg && SDL_strcmp(pg, "controls") == 0) menu.page = MENU_CONTROLS;
+    }
+#endif
+
     perf = SDL_GetPerformanceFrequency();
     prev = SDL_GetPerformanceCounter();
 
@@ -10730,14 +11965,182 @@ int main(int argc, char **argv)
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT)
                 running = 0;
-            else if (ev.type == SDL_KEYDOWN) {
-                switch (ev.key.keysym.sym) {
+            /* The menu consumes the whole key event before the play switch ever
+             * sees it, so nothing below can fire underneath an open menu.
+             * Event-driven, unlike walking: the movement keys are polled from
+             * SDL_GetKeyboardState once per tick, and a selection moved that
+             * way would run the length of the list on a single press. */
+            else if (ev.type == SDL_KEYDOWN && menu.page != MENU_NONE) {
+                MenuRow    rows[MENU_ROWS_MAX];
+                int        count = menu_build(menu.page, &cfg, menu.started,
+                                              save_ok, rows);
+                SDL_Keycode k = ev.key.keysym.sym;
+                MenuAction act = MA_NONE;
+
+                /* The rows are rebuilt from live state, so the caret can be
+                 * left sitting on one that has since been disabled - a load
+                 * that fails turns "load game" off underneath it. Normalised
+                 * BEFORE the key is interpreted, so enter can never resolve
+                 * against a row that is no longer offering anything. */
+                if (count > 0 && (menu.sel < 0 || menu.sel >= count ||
+                                  !rows[menu.sel].enabled))
+                    menu.sel = menu_step(rows, count,
+                                         (menu.sel < 0 || menu.sel >= count)
+                                         ? 0 : menu.sel, 1);
+
+                switch (k) {
+                case SDLK_UP:
+                case SDLK_w:
+                    menu.sel = menu_step(rows, count, menu.sel, -1);
+                    break;
+                case SDLK_DOWN:
+                case SDLK_s:
+                    menu.sel = menu_step(rows, count, menu.sel, 1);
+                    break;
+                case SDLK_LEFT:
+                case SDLK_a:
+                case SDLK_RIGHT:
+                case SDLK_d:
+                    if (menu.sel >= 0 && menu.sel < count &&
+                        rows[menu.sel].enabled &&
+                        rows[menu.sel].adjust != MADJ_NONE) {
+                        int step = (k == SDLK_RIGHT || k == SDLK_d) ? 1 : -1;
+                        menu_adjust(&cfg, rows[menu.sel].adjust, step);
+                        /* Applied on the keypress rather than on leaving the
+                         * page: a volume you cannot hear while you set it is a
+                         * volume you have to set twice. */
+                        cfg_apply_audio(&audio, &cfg);
+                        cfg_apply_window(win, &cfg);
+                        cfg_dirty = 1;
+                    }
+                    break;
+                case SDLK_RETURN:
+                case SDLK_KP_ENTER:
+                case SDLK_SPACE:
+                    act = menu_act(rows, count, menu.sel);
+                    break;
                 case SDLK_ESCAPE:
-                    running = 0;
+                    /* Back out one page, and off the root only if there is a
+                     * game to go back to. On the title screen escape does
+                     * nothing: quitting is a row you choose, not a key that
+                     * ends the process behind your back - which is exactly
+                     * what it used to do. */
+                    if (menu.page != MENU_ROOT)   act = MA_BACK;
+                    else if (menu.started)        act = MA_START;
                     break;
                 case SDLK_F11:
-                    fullscreen = !fullscreen;
-                    SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                    /* Still live inside the menu, and it goes through the
+                     * setting rather than around it, so the fullscreen row and
+                     * the key can never disagree about the current state. */
+                    cfg.fullscreen = !cfg.fullscreen;
+                    cfg_apply_window(win, &cfg);
+                    cfg_dirty = 1;
+                    break;
+                default:
+                    break;
+                }
+
+                switch (act) {
+                case MA_START:
+                    menu.page    = MENU_NONE;
+                    menu.started = 1;
+                    /* The interpolator draws between these and where she stands
+                     * now; nothing moved while the menu was up, so this is the
+                     * same statement every other state jump in here makes. */
+                    prev_px = g->p.x;
+                    prev_py = g->p.y;
+                    break;
+                case MA_LOAD: {
+                    Uint64 ls = seed;
+                    if (game_load(g, sc, SAVE_FILENAME, &ls) == 0) {
+                        seed = ls;
+#if WAYFARER_SELFTEST
+                        if (lit_mode)
+                            reveal_all(&g->w);
+#endif
+                        prev_px = g->p.x;
+                        prev_py = g->p.y;
+                        hud.mm_dirty  = 1;
+                        hud.map_open  = 0;
+                        hud.bm_dirty  = 1;
+                        hud.win_shown = area_complete(g);
+                        audio_request_reset(&audio, ls, g->frags_restored,
+                                            g->souls_restored,
+                                            g->area == 1 ? BIOME_FOREST
+                                            : g->area == 2 ? BIOME_UNDERWORLD
+                                            : BIOME_LUMIARA);
+                        hud_toast("loaded");
+                        menu.page    = MENU_NONE;
+                        menu.started = 1;
+                    } else {
+                        /* The row is only offered when save_exists said yes, so
+                         * arriving here means the file passed its header and
+                         * was still refused - stale by the time it was read, or
+                         * standing her in a wall. Say so and re-ask the file
+                         * rather than leaving a row that cannot work. */
+                        hud_toast("that save could not be loaded");
+                        save_ok = save_exists(SAVE_FILENAME);
+                        /* Move the caret off the row that just went dim, so the
+                         * very next frame does not draw it resting on one. */
+                        count = menu_build(menu.page, &cfg, menu.started,
+                                           save_ok, rows);
+                        if (count > 0 && !rows[menu.sel].enabled)
+                            menu.sel = menu_step(rows, count, menu.sel, 1);
+                    }
+                    break;
+                }
+                case MA_SETTINGS:
+                    menu.page = MENU_SETTINGS;
+                    menu.sel  = 0;
+                    break;
+                case MA_CONTROLS:
+                    menu.page = MENU_CONTROLS;
+                    menu.sel  = 0;
+                    break;
+                case MA_BACK:
+                    if (menu.page == MENU_CONTROLS) {
+                        menu.page = MENU_SETTINGS;
+                        menu.sel  = 0;
+                    } else {
+                        /* Written on the way out of settings: one moment, one
+                         * place for the failure to be reported, instead of a
+                         * file write on every arrow key. */
+                        if (menu.page == MENU_SETTINGS && cfg_dirty) {
+                            if (cfg_save(&cfg, CFG_FILENAME) != 0)
+                                hud_toast("could not write the settings file");
+                            else
+                                cfg_dirty = 0;
+                        }
+                        menu.page = MENU_ROOT;
+                        menu.sel  = 0;
+                    }
+                    break;
+                case MA_QUIT:
+                    running = 0;
+                    break;
+                case MA_NONE:
+                default:
+                    break;
+                }
+            }
+            else if (ev.type == SDL_KEYDOWN) {
+                switch (ev.key.keysym.sym) {
+                /* Escape opens the menu instead of ending the process. It used
+                 * to quit outright with no confirmation and no way back, which
+                 * is the single thing this whole screen exists to fix. */
+                case SDLK_ESCAPE:
+                    menu.page    = MENU_ROOT;
+                    menu.sel     = 0;
+                    menu.started = 1;
+                    save_ok      = save_exists(SAVE_FILENAME);
+                    break;
+                case SDLK_F11:
+                    /* Goes through the setting, so the key and the settings row
+                     * can never disagree - and so it is remembered, which a
+                     * toggle that only touched a local never was. */
+                    cfg.fullscreen = !cfg.fullscreen;
+                    cfg_apply_window(win, &cfg);
+                    cfg_dirty = 1;
                     break;
                 case SDLK_e:
                 case SDLK_SPACE:
@@ -10768,6 +12171,11 @@ int main(int argc, char **argv)
                 case SDLK_F5:
                     hud_toast(game_save(g, SAVE_FILENAME) == 0
                               ? "saved" : "could not write the save file");
+                    /* Re-asked here rather than assumed: a successful save is
+                     * the one event that turns "no save" into "a save", and
+                     * asking the file is what keeps the row's answer and the
+                     * file's contents the same answer. */
+                    save_ok = save_exists(SAVE_FILENAME);
                     break;
                 /* Step to the next or previous world. Both spellings are here
                  * because both are the obvious one to somebody: ] and [ read as
@@ -10844,7 +12252,23 @@ int main(int argc, char **argv)
          * otherwise spin the catch-up loop for thousands of steps. */
         if (elapsed > 0.25)
             elapsed = 0.25;
-        acc += (float)elapsed;
+        /* The menu PAUSES, where the map screen only holds her still. The map
+         * is something she is reading while standing in the world, so fog,
+         * restoration easing and toasts all keep running underneath it; the
+         * menu is not in the world at all, and time passing behind it - a toast
+         * expiring, a region finishing its ease - would be the game playing
+         * itself while nobody is looking.
+         *
+         * The accumulator is HELD AT ZERO rather than left to fill and be
+         * discarded on the way out. Two things fall out of that: closing the
+         * menu cannot fire a burst of catch-up ticks and walk her out of the
+         * pause, and the render interpolator's alpha stays 0 instead of
+         * becoming the minutes-long ratio that would extrapolate the camera
+         * somewhere absurd if the menu were opened mid-stride. */
+        if (menu.page != MENU_NONE)
+            acc = 0.0f;
+        else
+            acc += (float)elapsed;
         while (acc >= TICK_DT) {
             const Uint8 *keys = SDL_GetKeyboardState(NULL);
             /* Captured before anything moves her, and captured on EVERY tick
@@ -10968,7 +12392,12 @@ int main(int argc, char **argv)
                 draw_atlas(draw, atlas_page, clock);
             } else
 #endif
-            {
+            /* Opaque and full-surface, so like the map screen it REPLACES the
+             * world rather than covering it - rendering a world underneath an
+             * opaque menu would be a full frame of work nobody sees. */
+            if (menu.page != MENU_NONE) {
+                menu_draw(draw, &cfg, save_ok);
+            } else {
                 render_world(draw, &g->w, seed, cam_x, cam_y);
                 props_build(draw->w, draw->h, &g->w, seed, cam_x, cam_y, g->ents,
                             &rp, clock, dl);
@@ -11066,6 +12495,12 @@ int main(int argc, char **argv)
             }
         }
     }
+
+    /* Anything still unwritten - F11 during play, or a quit taken without
+     * backing out of the settings page - goes to disk here. Silent on failure:
+     * the window is on its way down and there is nowhere left to say it. */
+    if (cfg_dirty)
+        (void)cfg_save(&cfg, CFG_FILENAME);
 
     /* Close the device FIRST: it stops and joins the callback thread, so
      * nothing is still reading `audio` while the rest of this tears down. */

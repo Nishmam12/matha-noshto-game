@@ -30,6 +30,7 @@ $tests = @(
     @{ n = 'sort';     a = @('--sort-test')     } # y-sort order/stability, prop ghosting
     @{ n = 'mockup';   a = @('--mockup-test')   } # rendered-pixel census vs the mockups
     @{ n = 'font';     a = @('--font-test')     } # glyph coverage, exact pixel count
+    @{ n = 'menu';     a = @('--menu-test')     } # rows, selection, actions, labels, settings file
     @{ n = 'hud';      a = @('--hud-test', '--seed', '1') }      # toast/banner ticks, minimap rule
     @{ n = 'save';     a = @('--save-test', '--seed', '1') }     # round trip + 12 rejection controls
     @{ n = 'map';      a = @('--map-test', '--seeds', '8', '--seed', '1') } # fragment placement, pickup, trails, screen

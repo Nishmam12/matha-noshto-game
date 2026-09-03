@@ -22,6 +22,13 @@ SDL2*/
 sdl2-src/
 sdl2-build/
 
+# Player state, written to the working directory by the game itself. Running the
+# game or the self-tests from the repo root drops these here; they are one
+# person's progress and one person's volume settings, not source.
+wayfarer.sav
+wayfarer.cfg
+wayfarer-menutest.tmp
+
 # Scratch
 *.map
 *.f32

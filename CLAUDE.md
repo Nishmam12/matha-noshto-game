@@ -6,6 +6,8 @@
 - Run All Self-Tests: `powershell -ExecutionPolicy Bypass -File .\tools\run-tests.ps1`
 - Run Single Test: `.\build\wayfarer-selftest.exe --<test-name> [--seeds N] [--seed N]`
 - Look at the map screen: `--map` (grant + open it), `--standon map` (stand on the fragment)
+- Look at the menu: `--menu` (open it), `--paused` (say "resume", not "start game"),
+  `--menupage settings|controls`
 - Re-bake art: `powershell -File tools\bake.ps1` — only when `assets\` changes
 
 ## Core Invariants & Rules
@@ -45,6 +47,42 @@
   a hot mix — the clamp is what keeps it in range. Check samples reaching the clamp instead.
 - `SDL_InitSubSystem(SDL_INIT_AUDIO)` is separate from `SDL_Init(VIDEO)` and its failure is
   **never fatal**: a machine with no sound device must still play.
+
+## The menu
+- `--frames` **suppresses the title menu** and plays straight through. Every screenshot recipe
+  here and in the README means "photograph the world", and a menu in front of that would change
+  what all of them capture while they carried on passing. `--menu` is how the menu itself is
+  photographed. Any new flag that forces a state must decide this question too.
+- The menu **pauses** where the map screen only holds her still: `acc` is held at zero while it
+  is up. The map is read while standing in the world, so fog and easing keep running under it;
+  the menu is not in the world at all.
+- **What rows exist lives only in `menu_build`.** Drawing, moving the selection and activating
+  all index that one list. `menu_act` is pure and returns a `MA_*`; `main` performs it, because
+  `main` is what owns the window, the device, the world and the running flag.
+- Labels may only use characters `FONT_5X7` actually fills. `(` `)` `[` `]` `+` `*` `%` `_` `#`
+  `&` `"` are all-zero rows and ship as holes — `--menu-test` checks every label against
+  `font_bits`, with a control that a label containing `(` is caught.
+- Escape opens the menu; it no longer ends the process. Quitting is a row you choose.
+
+## Settings format
+- Its own file (`wayfarer.cfg`), **never** spare save bytes. Bytes 22–23 are reserved-must-be-zero,
+  so spending them would force a `SAVE_VERSION` bump, and a bump rejects every save on disk — a
+  volume slider is not worth deleting someone's game for. Settings must also be readable *before*
+  a world exists, to size the window.
+- Same discipline as the save: flat, fixed-size, versioned, hand-packed little-endian, validated
+  into a local and copied out only once every field passes. A missing file is a first run, not an
+  error. `--menu-test` asserts every field's illegal values are refused with the live settings
+  left untouched.
+- The file is written only if something actually changed this session (leaving the settings page,
+  or on exit for an F11 taken during play). A first run that never touches settings must not drop
+  a `wayfarer.cfg` — it would record whatever scale `pick_scale` happened to choose on whatever
+  display was attached, locking in a window size nobody asked for.
+- Volumes are in `[0,1]` and may only **attenuate**. They multiply the mix before `MIX_GAIN`, so
+  0.93 stays the worst case and the clamp stays unreachable without re-deriving anything. Full
+  volume is bit-identical to what shipped before there were volumes.
+- `SDL_zero(Audio)` leaves both volume atomics at **0, which is silence**. Every construction
+  that will render must set them — `main` via `cfg_apply_audio` before the device opens,
+  `audio_selftest` to `VOL_MAX` because the clamp bound is a claim about the worst case.
 
 ## Save format
 - Loading **regenerates from the seed and replays deltas**. Never add a second construction path.
