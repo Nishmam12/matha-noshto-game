@@ -31,7 +31,8 @@ $tests = @(
     @{ n = 'mockup';   a = @('--mockup-test')   } # rendered-pixel census vs the mockups
     @{ n = 'font';     a = @('--font-test')     } # glyph coverage, exact pixel count
     @{ n = 'hud';      a = @('--hud-test', '--seed', '1') }      # toast/banner ticks, minimap rule
-    @{ n = 'save';     a = @('--save-test', '--seed', '1') }     # round trip + 10 rejection controls
+    @{ n = 'save';     a = @('--save-test', '--seed', '1') }     # round trip + 12 rejection controls
+    @{ n = 'map';      a = @('--map-test', '--seeds', '8', '--seed', '1') } # fragment placement, pickup, trails, screen
     # Both audio rows need a real output device. On a machine with none they
     # fail loudly rather than skipping, which is the honest outcome: silence is
     # exactly what this suite exists to catch.

@@ -696,19 +696,53 @@ if (-not $Quiet) { Write-Host ("  decorations {0} objects, all opaque pixels acc
 # tables reuse these three for all eight non-centre slots rather than
 # referencing cells that would fail the same obstacle-visibility check.
 $UwTileCells = @(
-    @{ n = 'UW_ACID_NW';    src = 'wc'; c = 0; r = 0 }
-    @{ n = 'UW_ACID_N';     src = 'wc'; c = 1; r = 0 }
-    @{ n = 'UW_ACID_NE';    src = 'wc'; c = 3; r = 0 }
-    @{ n = 'UW_FLOOR_A';    src = 'gr'; c = 6; r = 21 }
-    @{ n = 'UW_FLOOR_B';    src = 'gr'; c = 8; r = 21 }
-    @{ n = 'UW_RUBBLE_A';   src = 'wc'; c = 0; r = 4 }
-    @{ n = 'UW_RUBBLE_B';   src = 'wc'; c = 2; r = 4 }
-    @{ n = 'UW_FLOOR_C';    src = 'gr'; c = 4; r = 21 }
-    @{ n = 'UW_FLOOR_D';    src = 'gr'; c = 9; r = 21 }
-    @{ n = 'UW_RUBBLE_C';   src = 'gr'; c = 2; r = 21 }
-    @{ n = 'UW_RUBBLE_D';   src = 'gr'; c = 3; r = 21 }
-    @{ n = 'UW_ROCKWALL_A'; src = 'gr'; c = 0; r = 21 }
-    @{ n = 'UW_ROCKWALL_B'; src = 'gr'; c = 1; r = 21 }
+    # Acid water coastlines / hole edges (3x3 blob_slice mapping)
+    @{ n = 'UW_ACID_NW';    src = 'wc'; c = 5; r = 1 }
+    @{ n = 'UW_ACID_N';     src = 'wc'; c = 6; r = 1 }
+    @{ n = 'UW_ACID_NE';    src = 'wc'; c = 8; r = 1 }
+    @{ n = 'UW_ACID_W';     src = 'wc'; c = 5; r = 2 }
+    @{ n = 'UW_ACID_E';     src = 'wc'; c = 8; r = 2 }
+    @{ n = 'UW_ACID_SW';    src = 'wc'; c = 5; r = 4 }
+    @{ n = 'UW_ACID_S';     src = 'wc'; c = 6; r = 4 }
+    @{ n = 'UW_ACID_SE';    src = 'wc'; c = 8; r = 4 }
+
+    # Ground floor tiles: Ground_rocks
+    @{ n = 'UW_FLOOR_A';    src = 'gr'; c = 2; r = 2 }
+    @{ n = 'UW_FLOOR_B';    src = 'gr'; c = 3; r = 2 }
+    @{ n = 'UW_FLOOR_C';    src = 'gr'; c = 1; r = 2 }
+    @{ n = 'UW_FLOOR_D';    src = 'gr'; c = 2; r = 1 }
+
+    # Darker surface / rubble (Rubble A..D) from Ground_rocks (all 256/256 opaque)
+    @{ n = 'UW_RUBBLE_A';   src = 'gr'; c = 13; r = 57 }
+    @{ n = 'UW_RUBBLE_B';   src = 'gr'; c =  7; r = 20 }
+    @{ n = 'UW_RUBBLE_C';   src = 'gr'; c =  9; r = 20 }
+    @{ n = 'UW_RUBBLE_D';   src = 'gr'; c =  7; r = 15 }
+
+    # Dark spiked rock cliffs (Cliff & Rockwall): Ground_rocks
+    @{ n = 'UW_ROCKWALL_A'; src = 'gr'; c =  2; r =  3 }
+    @{ n = 'UW_ROCKWALL_B'; src = 'gr'; c = 10; r =  9 }
+    @{ n = 'UW_ROCK_NW';    src = 'gr'; c =  1; r =  1 }
+    @{ n = 'UW_ROCK_N';     src = 'gr'; c =  2; r =  1 }
+    @{ n = 'UW_ROCK_NE';    src = 'gr'; c =  3; r =  1 }
+    @{ n = 'UW_ROCK_W';     src = 'gr'; c =  1; r =  2 }
+    @{ n = 'UW_ROCK_E';     src = 'gr'; c =  3; r =  2 }
+    @{ n = 'UW_ROCK_SW';    src = 'gr'; c =  1; r =  3 }
+    @{ n = 'UW_ROCK_S';     src = 'gr'; c =  2; r =  3 }
+    @{ n = 'UW_ROCK_SE';    src = 'gr'; c =  3; r =  3 }
+
+    # Clean toxic acid water fill (col 22, row 0 in water_coasts is 100% opaque toxic green)
+    @{ n = 'UW_ACIDFILL_A'; src = 'wc'; c = 22; r =  0 }
+    @{ n = 'UW_ACIDFILL_B'; src = 'wc'; c = 22; r =  0 }
+    @{ n = 'UW_ACIDFILL_C'; src = 'wc'; c = 22; r =  0 }
+    @{ n = 'UW_ACIDFILL_D'; src = 'wc'; c = 22; r =  0 }
+
+    # Stone stairs for climbable high-area passes (Ground_rocks cols 18-19, rows 47-49)
+    @{ n = 'UW_STAIRS_TL';  src = 'gr'; c = 18; r = 47 }
+    @{ n = 'UW_STAIRS_TR';  src = 'gr'; c = 19; r = 47 }
+    @{ n = 'UW_STAIRS_ML';  src = 'gr'; c = 18; r = 48 }
+    @{ n = 'UW_STAIRS_MR';  src = 'gr'; c = 19; r = 48 }
+    @{ n = 'UW_STAIRS_BL';  src = 'gr'; c = 18; r = 49 }
+    @{ n = 'UW_STAIRS_BR';  src = 'gr'; c = 19; r = 49 }
 )
 $imgGr = Get-PixelData $UwGroundPng
 $imgWc = Get-PixelData $UwWaterPng
@@ -717,65 +751,40 @@ foreach ($t in $UwTileCells) {
     $idx = Get-IndexArray $img ($t.c * $TILE) ($t.r * $TILE) $TILE $TILE
     Add-Sprite $t.n $idx $TILE $TILE 0 0
 }
-# The acid FILL (pond interior) has no ready-made opaque liquid tile in the
-# source art - the hole centres are transparent by design, meant to show
-# whatever is composited underneath. Rather than invent new pixels, the two
-# floor tiles above are re-baked here through a fixed toxic-green tint, so
-# acid reads as visibly distinct from plain floor at a glance (the same
-# legibility concern CLAUDE.md's "ponds invisible on the minimap" note is
-# about) while staying byte-for-byte reproducible from the same source rects.
-$AcidTint = { param($r, $g, $b) @([int]($r * 0.55), [int][Math]::Min(255, $g * 0.95 + 40), [int]($b * 0.55)) }
-$idx = Get-IndexArray $imgGr (6 * $TILE) (21 * $TILE) $TILE $TILE $AcidTint
-Add-Sprite 'UW_ACIDFILL_A' $idx $TILE $TILE 0 0
-$idx = Get-IndexArray $imgGr (8 * $TILE) (21 * $TILE) $TILE $TILE $AcidTint
-Add-Sprite 'UW_ACIDFILL_B' $idx $TILE $TILE 0 0
-$idx = Get-IndexArray $imgGr (4 * $TILE) (21 * $TILE) $TILE $TILE $AcidTint
-Add-Sprite 'UW_ACIDFILL_C' $idx $TILE $TILE 0 0
-$idx = Get-IndexArray $imgGr (9 * $TILE) (21 * $TILE) $TILE $TILE $AcidTint
-Add-Sprite 'UW_ACIDFILL_D' $idx $TILE $TILE 0 0
-if (-not $Quiet) { Write-Host ("  uw tiles    {0} curated cells + 4 tinted acid-fill variants" -f $UwTileCells.Count) }
+if (-not $Quiet) { Write-Host ("  uw tiles    {0} curated cells baked" -f $UwTileCells.Count) }
 
 # ---- Underworld decorations -----------------------------------------------
-# Objects_separately ships each object as its OWN pre-cropped PNG (not a
-# shared sheet), so no curated-rect overlap bookkeeping is needed - each file
-# already is one object. 2-4 numbered poses are picked per family (from the
-# 'shadow1' recolour; shadow2/shadow3 are near-identical recolours of the same
-# poses, verified by near-identical file sizes) for genuine silhouette variety
-# rather than picking three copies of the same pose. Lich_shadow* (reads as an
-# NPC/enemy - no such system exists), Animation*.png (unrelated reference
-# sheet), and Ruin_shadow*/Scull_door_shadow* (no PROP_* slot needs them - see
-# UNDERWORLD_BIOME_PLAN.md discussion) are deliberately excluded.
 $UwObjects = @(
-    @{ n = 'UW_TREE_1';    f = 'Tree_shadow1_1.png' }
-    @{ n = 'UW_TREE_2';    f = 'Tree_shadow1_2.png' }
-    @{ n = 'UW_TREE_3';    f = 'Tree_shadow1_3.png' }
-    @{ n = 'UW_PINE_1';    f = 'Broken_tree_shadow1_1.png' }
-    @{ n = 'UW_PINE_2';    f = 'Broken_tree_shadow1_2.png' }
-    @{ n = 'UW_PINE_3';    f = 'Broken_tree_shadow1_3.png' }
-    @{ n = 'UW_BUSH_1';    f = 'Thorn_plant_shadow1_3.png' }
-    @{ n = 'UW_BUSH_2';    f = 'Thorn_plant_shadow1_5.png' }
-    @{ n = 'UW_BUSH_3';    f = 'Thorn_plant_shadow1_6.png' }
-    @{ n = 'UW_LOG_1';     f = 'Dead_arm_shadow1_1.png' }
-    @{ n = 'UW_LOG_2';     f = 'Dead_arm_shadow1_2.png' }
-    @{ n = 'UW_LOG_3';     f = 'Dead_arm_shadow1_3.png' }
-    @{ n = 'UW_LOG_4';     f = 'Dead_arm_shadow1_4.png' }
-    @{ n = 'UW_ROCKPROP_1';f = 'Rock_shadow1_1.png' }
-    @{ n = 'UW_ROCKPROP_2';f = 'Rock_shadow1_2.png' }
-    @{ n = 'UW_ROCKPROP_3';f = 'Rock_shadow1_3.png' }
-    @{ n = 'UW_STONE_1';   f = 'Bones_shadow1_1.png' }
-    @{ n = 'UW_STONE_2';   f = 'Bones_shadow1_3.png' }
-    @{ n = 'UW_STONE_3';   f = 'Bones_shadow1_13.png' }
-    @{ n = 'UW_CRYSTAL_1'; f = 'Crystal_shadow1_1.png' }
-    @{ n = 'UW_CRYSTAL_2'; f = 'Crystal_shadow1_2.png' }
-    @{ n = 'UW_CRYSTAL_3'; f = 'Crystal_shadow1_3.png' }
-    @{ n = 'UW_CRYSTAL_4'; f = 'Crystal_shadow1_4.png' }
-    @{ n = 'UW_TUFT_1';    f = 'Bones_shadow1_2.png' }
-    @{ n = 'UW_TUFT_2';    f = 'Bones_shadow1_18.png' }
-    @{ n = 'UW_TUFT_3';    f = 'Bones_shadow1_16.png' }
-    @{ n = 'UW_TUFT_4';    f = 'Bones_shadow1_5.png' }
-    @{ n = 'UW_REED_1';    f = 'Grave_shadow1_1.png' }
-    @{ n = 'UW_REED_2';    f = 'Grave_shadow1_2.png' }
-    @{ n = 'UW_REED_3';    f = 'Grave_shadow1_3.png' }
+    @{ n = 'UW_TREE_1';     f = 'Dead_tree_shadow1_1.png' }
+    @{ n = 'UW_TREE_2';     f = 'Dead_tree_shadow1_2.png' }
+    @{ n = 'UW_TREE_3';     f = 'Tree_shadow1_1.png' }
+    @{ n = 'UW_PINE_1';     f = 'Broken_tree_shadow1_4.png' }
+    @{ n = 'UW_PINE_2';     f = 'Broken_tree_shadow1_6.png' }
+    @{ n = 'UW_PINE_3';     f = 'Broken_tree_shadow1_7.png' }
+    @{ n = 'UW_BUSH_1';     f = 'Thorn_plant_shadow1_3.png' }
+    @{ n = 'UW_BUSH_2';     f = 'Thorn_plant_shadow1_2.png' }
+    @{ n = 'UW_BUSH_3';     f = 'Thorn_plant_shadow1_1.png' }
+    @{ n = 'UW_LOG_1';      f = 'Broken_tree_shadow1_4.png' }
+    @{ n = 'UW_LOG_2';      f = 'Broken_tree_shadow1_5.png' }
+    @{ n = 'UW_LOG_3';      f = 'Broken_tree_shadow1_6.png' }
+    @{ n = 'UW_LOG_4';      f = 'Broken_tree_shadow1_7.png' }
+    @{ n = 'UW_ROCKPROP_1'; f = 'Rock_shadow1_1.png' }
+    @{ n = 'UW_ROCKPROP_2'; f = 'Rock_shadow1_2.png' }
+    @{ n = 'UW_ROCKPROP_3'; f = 'Rock_shadow1_3.png' }
+    @{ n = 'UW_STONE_1';    f = 'Grave_shadow1_1.png' }
+    @{ n = 'UW_STONE_2';    f = 'Grave_shadow1_2.png' }
+    @{ n = 'UW_STONE_3';    f = 'Grave_shadow1_3.png' }
+    @{ n = 'UW_CRYSTAL_1';  f = 'Crystal_shadow1_1.png' }
+    @{ n = 'UW_CRYSTAL_2';  f = 'Crystal_shadow1_2.png' }
+    @{ n = 'UW_CRYSTAL_3';  f = 'Crystal_shadow1_3.png' }
+    @{ n = 'UW_CRYSTAL_4';  f = 'Crystal_shadow1_4.png' }
+    @{ n = 'UW_TUFT_1';     f = 'Bones_shadow1_2.png' }
+    @{ n = 'UW_TUFT_2';     f = 'Bones_shadow1_18.png' }
+    @{ n = 'UW_TUFT_3';     f = 'Bones_shadow1_16.png' }
+    @{ n = 'UW_TUFT_4';     f = 'Bones_shadow1_5.png' }
+    @{ n = 'UW_REED_1';     f = 'Bones_shadow1_1.png' }
+    @{ n = 'UW_REED_2';     f = 'Bones_shadow1_3.png' }
+    @{ n = 'UW_REED_3';     f = 'Rock_shadow1_4.png' }
 )
 foreach ($o in $UwObjects) {
     $path = Join-Path $UwObjectsDir $o.f

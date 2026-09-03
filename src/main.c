@@ -80,18 +80,25 @@ static Uint32 perf_calls;
  * The fallback is not belt-and-braces: SDL_ShowSimpleMessageBox routes through
  * the video subsystem and returns -1 showing nothing when video is what failed,
  * which is the likeliest failure of all. */
+#ifdef _WIN32
 __declspec(dllimport) int __stdcall MessageBoxA(void *hWnd, const char *lpText,
                                                const char *lpCaption, unsigned int uType);
 #define WF_MB_OK        0x00000000u
 #define WF_MB_ICONERROR 0x00000010u
+#endif
 
 static int fatal(const char *what, int code)
 {
     char msg[512];
 
     SDL_snprintf(msg, sizeof(msg), "%s\n\nSDL reported: %s", what, SDL_GetError());
-    if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Wayfarer", msg, NULL) != 0)
+    if (SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Wayfarer", msg, NULL) != 0) {
+#ifdef _WIN32
         MessageBoxA(NULL, msg, "Wayfarer Fatal Error", WF_MB_OK | WF_MB_ICONERROR);
+#else
+        SDL_Log("Wayfarer Fatal Error: %s", msg);
+#endif
+    }
     return code;
 }
 
@@ -581,6 +588,12 @@ typedef struct {
     Uint8 biome;       /* BIOME_* - render/prop selector only, set by world_gen */
     int   portal_tile; /* Where this area's exit onward stands (unused in
                           * Lumiara - Area 3 is terminal) */
+    /* Where this biome's map fragment lies, or -1 once it has been taken.
+     * ONE field carries "is it still there", so the renderer, the interact
+     * prompt and the interact key cannot disagree about it - and because
+     * loading regenerates the world and then replays the deltas, clearing it
+     * is exactly the delta a found map replays as. See world_place_map. */
+    int   map_tile;
 } World;
 
 /* BFS working set. One struct so a caller allocates it once; far too big for a
@@ -676,7 +689,7 @@ static Uint32 tile_hash(Uint64 seed, int tx, int ty)
  * and every seeded test result with it. */
 typedef struct { Uint64 state, inc; } Rng;
 
-enum { STREAM_TERRAIN = 1, STREAM_ENTITIES = 2, STREAM_AUDIO = 3 };
+enum { STREAM_TERRAIN = 1, STREAM_ENTITIES = 2, STREAM_AUDIO = 3, STREAM_MAP = 4 };
 
 static Uint32 rng_next(Rng *r)
 {
@@ -1563,24 +1576,18 @@ static const short tile_uw_olive_edge[9] = {
 static const short tile_uw_water_cap[3] = {
     ART_UW_ACID_N, ART_UW_ACID_NE, ART_UW_ACID_NW
 };
-/* Only NW/N/NE of the source "hole" motif measured fully opaque by bake.ps1's
- * scan (the W/E/S/SW/SE bands carry real transparency, by design of the
- * source art) - reused for all eight non-centre slots rather than the
- * directionally-"correct" cells, which would fail --tile-test's
- * obstacle-visibility check (a mostly-transparent rim on a blocking tile is
- * exactly the invisible-wall bug that check exists to catch). Less varied
- * than a true 3x3 wrap, not broken. */
 static const short tile_uw_water_edge[9] = {
     ART_UW_ACID_NW, ART_UW_ACID_N, ART_UW_ACID_NE,
-    ART_UW_ACID_NW, ART_UW_ACID_N, ART_UW_ACID_NE,   /* centre: unreachable, safe filler */
-    ART_UW_ACID_NW, ART_UW_ACID_N, ART_UW_ACID_NE
+    ART_UW_ACID_W,  ART_UW_ACID_N, ART_UW_ACID_E,
+    ART_UW_ACID_SW, ART_UW_ACID_S, ART_UW_ACID_SE
 };
 static const short tile_uw_rock_ring[9] = {
-    ART_UW_ACID_NW, ART_UW_ACID_N, ART_UW_ACID_NE,
-    ART_UW_ACID_NW, ART_NONE,      ART_UW_ACID_NE,
-    ART_UW_ACID_NW, ART_UW_ACID_N, ART_UW_ACID_NE
+    ART_UW_ROCK_NW, ART_UW_ROCK_N, ART_UW_ROCK_NE,
+    ART_UW_ROCK_W,  ART_NONE,      ART_UW_ROCK_E,
+    ART_UW_ROCK_SW, ART_UW_ROCK_S, ART_UW_ROCK_SE
 };
 static const short tile_uw_rock_fill[2] = { ART_UW_ROCKWALL_A, ART_UW_ROCKWALL_B };
+static const short tile_uw_rock_cliff[2] = { ART_UW_ROCKWALL_A, ART_UW_ROCKWALL_B };
 
 /* ---- Lumiara tile tables ---------------------------------------------------
  *
@@ -1671,7 +1678,7 @@ static const TileSet TILESET_FOREST = {
 };
 static const TileSet TILESET_UNDERWORLD = {
     tile_uw_ground_base, tile_uw_dirt_fill, tile_uw_water_fill, tile_uw_grass_edge, tile_uw_olive_edge,
-    tile_uw_water_cap, tile_uw_water_edge, tile_uw_rock_ring, tile_uw_rock_fill, tile_uw_rock_fill
+    tile_uw_water_cap, tile_uw_water_edge, tile_uw_rock_ring, tile_uw_rock_fill, tile_uw_rock_cliff
 };
 static const TileSet TILESET_LUMIARA = {
     tile_lum_ground_base, tile_lum_dirt_fill, tile_lum_water_fill, tile_lum_grass_edge, tile_lum_olive_edge,
@@ -1992,6 +1999,45 @@ static void bfs_open(const World *w, const int *sources, int nsrc,
             dist[nb[k]] = dist[idx] + 1;
             if (owner) owner[nb[k]] = owner[idx];
             queue[tail++] = nb[k];
+        }
+    }
+}
+
+/* Single-source BFS over tiles she can actually WALK, honouring the ability
+ * gates - as opposed to bfs_open above, which ignores them and answers about
+ * the open component. Fills hop distance, -1 for "cannot get there from here
+ * with what she is holding".
+ *
+ * Shipping code, not verification scaffolding: the map screen's trails are
+ * walked back down this field, and --play-test's headless playthrough drives
+ * the same function. Two distance fields - one for the route the map draws and
+ * one for the route the test proves walkable - would only need to disagree
+ * once for the map to promise a way through a gate.
+ *
+ * Asks tile_blocked, which reads solid[][] and regions[].terrain and nothing
+ * else, so what the map routes through is exactly what stops her. */
+static void bfs_gated(const World *w, Uint8 abilities, int start,
+                      int *dist, int *queue)
+{
+    static const int dxs[4] = { 1, -1, 0, 0 };
+    static const int dys[4] = { 0, 0, 1, -1 };
+    int head = 0, tail = 0, i;
+
+    for (i = 0; i < WORLD_W * WORLD_H; i++) dist[i] = -1;
+    if (start < 0) return;
+    if (tile_blocked(w, abilities, start % WORLD_W, start / WORLD_W)) return;
+    dist[start] = 0;
+    queue[tail++] = start;
+    while (head < tail) {
+        int idx = queue[head++], x = idx % WORLD_W, y = idx / WORLD_W, d;
+        for (d = 0; d < 4; d++) {
+            int nx = x + dxs[d], ny = y + dys[d], ni;
+            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H) continue;
+            ni = ny * WORLD_W + nx;
+            if (dist[ni] >= 0) continue;
+            if (tile_blocked(w, abilities, nx, ny)) continue;
+            dist[ni] = dist[idx] + 1;
+            queue[tail++] = ni;
         }
     }
 }
@@ -2756,6 +2802,23 @@ static int entity_in_reach(const World *w, const Entity *ents, float px, float p
     return best;
 }
 
+/* The map fragment, on the SAME radius entities use rather than a second
+ * number: two interact distances would mean a prompt that appears at one range
+ * and a key that works at another. Returns 0 once it has been taken, because
+ * taking it is what sets map_tile to -1 - see try_take_map. */
+static int map_in_reach(const World *w, float px, float py)
+{
+    float ex, ey, dx, dy;
+
+    if (w->map_tile < 0)
+        return 0;
+    ex = (float)(w->map_tile % WORLD_W) * TILE + TILE * 0.5f;
+    ey = (float)(w->map_tile / WORLD_W) * TILE + TILE * 0.5f;
+    dx = ex - px;
+    dy = ey - py;
+    return dx * dx + dy * dy <= INTERACT_RADIUS * INTERACT_RADIUS;
+}
+
 /* The ONE state transition for restoring something. Both the interact key and
  * (later) save-loading replay go through here, so "restored" means exactly one
  * thing and cannot mean two. */
@@ -3067,6 +3130,91 @@ static void world_place_portal(World *w)
     }
 }
 
+/* ---- The map fragment ---------------------------------------------------
+ *
+ * One per biome, and deliberately NOT an eleventh entity. Restoration state is
+ * a single Uint32 and three areas of ENTITY_COUNT already claim thirty of its
+ * bits, so an eleventh collectible per area would not fit in the save at all -
+ * that ceiling is the structural rule at the top of this file, not a
+ * preference. It is tracked instead by Game.maps, three bits, one per area.
+ *
+ * It also stands OUTSIDE the completability proof, on purpose: it grants no
+ * ability and restores no region, so world_solvable never sees it and a world
+ * is finishable whether or not she ever picks it up. Nothing about gating,
+ * placement or reachability had to change to admit it.
+ *
+ * Drawn from its OWN rng stream so that adding it cannot perturb one tile of
+ * terrain or one entity position in any existing seed - the same reason
+ * tile_hash is stateless - and placed inside what is reachable with NO
+ * abilities, so the map is always something she can go and get rather than a
+ * reward for having already finished the area she wanted it for.
+ */
+#define MAP_MIN_SPAWN_DIST 14   /* Chebyshev tiles: far enough to be a find */
+#define MAP_MIN_ENT_DIST    3   /* never share a neighbourhood with a mote */
+
+/* The placement rule as ONE predicate, so --map-test rejects bad tiles with the
+ * same code that accepted the good one. A checker written separately from the
+ * placer only ever proves the two agree about the cases someone thought of.
+ *
+ * `far` is the spawn-distance clause, separable because it is the one clause
+ * placement is allowed to give up on - see world_place_map. */
+static int map_tile_ok(const World *w, const Entity *ents, Uint32 reach,
+                       int tile, int far)
+{
+    int x, y, i, dx, dy;
+
+    if (tile < 0 || tile >= WORLD_W * WORLD_H) return 0;
+    x = tile % WORLD_W;
+    y = tile / WORLD_W;
+    if (w->solid[y][x]) return 0;
+    if (w->region[y][x] >= w->region_count) return 0;   /* REGION_NONE included */
+    if (!(reach & (1u << w->region[y][x]))) return 0;
+    if (tile == w->portal_tile) return 0;
+    if (tile == w->spawn_tile) return 0;
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        if (ents[i].tile < 0) continue;
+        dx = (ents[i].tile % WORLD_W) - x; if (dx < 0) dx = -dx;
+        dy = (ents[i].tile / WORLD_W) - y; if (dy < 0) dy = -dy;
+        if ((dx > dy ? dx : dy) < MAP_MIN_ENT_DIST) return 0;
+    }
+    if (far && w->spawn_tile >= 0) {
+        dx = (w->spawn_tile % WORLD_W) - x; if (dx < 0) dx = -dx;
+        dy = (w->spawn_tile / WORLD_W) - y; if (dy < 0) dy = -dy;
+        if ((dx > dy ? dx : dy) < MAP_MIN_SPAWN_DIST) return 0;
+    }
+    return 1;
+}
+
+/* Reservoir sampling over the whole map, exactly like pick_tile_in_region and
+ * for the same reason: one pass, uniform, no temporary list.
+ *
+ * Run at most twice. The second pass drops the spawn-distance clause, and is
+ * what a world too small or too hemmed in to have anything legal that far out
+ * falls back to: distance from spawn is a PREFERENCE, and a map fragment that
+ * failed to exist would not be. Which pass ran is visible to the test, which
+ * demands the far clause wherever a qualifying tile existed at all. */
+static void world_place_map(World *w, const Entity *ents, Uint64 seed)
+{
+    Rng rng;
+    Uint32 reach = regions_reachable(w, ABIL_NONE);
+    int far, chosen = -1;
+
+    w->map_tile = -1;
+    if (reach == 0)                       /* no spawn region: take anything */
+        reach = regions_reachable(w, ABIL_ALL);
+    rng_seed(&rng, seed, STREAM_MAP);
+    for (far = 1; far >= 0 && chosen < 0; far--) {
+        int seen = 0, x, y;
+        for (y = 0; y < WORLD_H; y++)
+            for (x = 0; x < WORLD_W; x++) {
+                if (!map_tile_ok(w, ents, reach, y * WORLD_W + x, far)) continue;
+                seen++;
+                if (rng_below(&rng, (Uint32)seen) == 0) chosen = y * WORLD_W + x;
+            }
+    }
+    w->map_tile = chosen;
+}
+
 /* Carve the ridges for the tag assignment currently on the regions, then place
  * and verify. Returns 1 for a world that is sound, 0 for one to roll back.
  *
@@ -3153,6 +3301,11 @@ static int world_gen(World *w, Scratch *sc, Entity *ents, Uint64 seed, Uint8 bio
      * set "after the fact" by some callers and not others is a real garbage-read
      * risk, not a style nit. */
     w->biome = biome;
+    /* Set here rather than only in world_place_map, so the field is never
+     * garbage on any path: the same bare-SDL_malloc World the comment above
+     * describes would otherwise let a rolled-back or half-built world be read
+     * for a map tile that was never placed. */
+    w->map_tile = -1;
     world_stub(w, seed);
     world_spawn(w, sc);
     regions_build(w, sc);
@@ -3168,6 +3321,9 @@ static int world_gen(World *w, Scratch *sc, Entity *ents, Uint64 seed, Uint8 bio
     rng_seed(&rng, seed, STREAM_ENTITIES);
     r = world_place_and_verify(w, sc, &rng, depth, ents, seed);
     world_place_portal(w);
+    /* Last, and after the portal: placement reads both the final entity
+     * positions and portal_tile to keep clear of them. */
+    world_place_map(w, ents, seed);
     return r;
 }
 
@@ -3501,7 +3657,7 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, float density, U
  * screenshot. Costs runtime memory only; the list is heap-allocated. */
 #define DRAW_MAX 1024
 
-enum { DI_SPRITE = 0, DI_FRAGMENT, DI_SOUL };
+enum { DI_SPRITE = 0, DI_FRAGMENT, DI_SOUL, DI_MAP };
 
 /* How far entity `i`'s mote is lifted off its tile this instant, in px. A slow
  * bob, so a mote reads as alive rather than as scenery; the per-entity phase
@@ -3519,6 +3675,13 @@ static int entity_bob(int i, float clock)
 /* The mote's own size in px, and the one place that answers it: props_draw
  * draws the halo from it and the prompt clears the halo using it. */
 static int entity_mote_px(int is_soul) { return is_soul ? 7 : 5; }
+
+/* The map fragment is a chart, not a mote: wider than tall, so it reads as a
+ * folded sheet against the round pickups at a glance. Same reason those are
+ * two sizes - what a thing is has to be legible before you are close enough
+ * to press E on it. */
+#define MAP_MOTE_W 9
+#define MAP_MOTE_H 7
 
 typedef struct {
     int feet_y;     /* sort key: ground-contact y, in screen space */
@@ -3640,9 +3803,49 @@ static void camera_follow(float px, float py, int view_w, int view_h,
  *   ground   one opaque 16x16 tile per cell
  *   edges    transparent blob overlays: grass over dirt, then olive over grass
  *   water    pond rim and cap
- *
- * Ordering between the passes is the whole composition: an overlay drawn in the
- * ground pass would be painted over by the next cell's ground tile. */
+ */
+static int uw_is_ledge_pass(const World *w, int tx, int ty, int *stair_part)
+{
+    int r;
+    int n_ledge = 0, n_norm = 0, rock_flank = 0;
+    static const int dx[4] = { 0, 0, -1, 1 };
+    static const int dy[4] = { -1, 1, 0, 0 };
+    int d;
+
+    if (w->solid[ty][tx] || w->terr[ty][tx] == GT_ROCK)
+        return 0;
+    r = w->region[ty][tx];
+    if (r == REGION_NONE)
+        return 0;
+
+    for (d = 0; d < 4; d++) {
+        int nx = tx + dx[d], ny = ty + dy[d];
+        int nr;
+        if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H) continue;
+        if (w->solid[ny][nx] || w->terr[ny][nx] == GT_ROCK) {
+            rock_flank = 1;
+            continue;
+        }
+        nr = w->region[ny][nx];
+        if (nr == REGION_NONE) continue;
+        if (w->regions[nr].terrain == TERRAIN_LEDGE) n_ledge++;
+        else n_norm++;
+    }
+    if (!rock_flank)
+        return 0;
+    if (!((w->regions[r].terrain == TERRAIN_LEDGE && n_norm > 0) ||
+          (w->regions[r].terrain != TERRAIN_LEDGE && n_ledge > 0)))
+        return 0;
+
+    if (stair_part) {
+        if (w->regions[r].terrain == TERRAIN_LEDGE)
+            *stair_part = (tx & 1) ? ART_UW_STAIRS_TR : ART_UW_STAIRS_TL;
+        else
+            *stair_part = (tx & 1) ? ART_UW_STAIRS_MR : ART_UW_STAIRS_ML;
+    }
+    return 1;
+}
+
 static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
                          int cam_x, int cam_y)
 {
@@ -3828,6 +4031,18 @@ static void render_world(SDL_Surface *fb, const World *w, Uint64 seed,
             }
         }
     }
+
+    /* In Underworld, render stone stairs at the passes leading into high areas (TERRAIN_LEDGE) */
+    if (w->biome == BIOME_UNDERWORLD) {
+        for (ty = ty0; ty < ty1; ty++) {
+            for (tx = tx0; tx < tx1; tx++) {
+                int sx = tx * TILE - cam_x, sy = ty * TILE - cam_y;
+                int stair_art;
+                if (uw_is_ledge_pass(w, tx, ty, &stair_art))
+                    draw_sprite(fb, stair_art, sx, sy, tile_level(w, tx, ty));
+            }
+        }
+    }
 }
 
 
@@ -3886,6 +4101,39 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
             pa = &prop_art[w->biome][kind];
             if (pa->n <= 0)
                 continue;
+            /* Keep the map fragment's own neighbourhood clear of scenery, in
+             * EVERY biome. Not decoration: measured on seed 3, the chart was
+             * drawn and then completely buried by two sprites - a bush anchored
+             * on its own tile, which sorts after it because the bob lowers a
+             * marker's sort key, and a second one a tile south. A key item that
+             * unlocks a whole screen and cannot be seen is not the same failure
+             * as one of seven fragments sitting behind a trunk, which is
+             * deliberate; this one has no other copy to find.
+             *
+             * One tile of clearance is enough for the art that exists: a prop
+             * two rows south has its feet 32 px below the chart's and the
+             * tallest sprite here is ~30 px, so its top lands under the chart
+             * rather than over it. Same shape and same reason as the portal
+             * exclusion below - and applied here, on the render side, rather
+             * than by teaching placement about prop_at: which tiles carry props
+             * is a render-side rule with a density thin and a ground-context
+             * swap on top of it, and a placer that restated it would be a
+             * second copy free to drift. */
+            if (w->map_tile >= 0) {
+                int mtx = w->map_tile % WORLD_W, mty = w->map_tile / WORLD_W;
+                if (tx >= mtx - 1 && tx <= mtx + 1 && ty >= mty - 1 && ty <= mty + 1)
+                    continue;
+            }
+            /* In Underworld, keep the stone stairs and dimensional portal clear of props */
+            if (w->biome == BIOME_UNDERWORLD) {
+                if (uw_is_ledge_pass(w, tx, ty, NULL))
+                    continue;
+                if (w->portal_tile >= 0) {
+                    int ptx = w->portal_tile % WORLD_W, pty = w->portal_tile / WORLD_W;
+                    if (tx >= ptx - 1 && tx <= ptx + 1 && ty >= pty - 1 && ty <= pty + 1)
+                        continue;
+                }
+            }
             /* Bits 14-19 for the density thin: disjoint from the presence roll
              * (bits 8-13) and the variant pick (24+), so "how often" stays
              * independent of both "whether" and "which". Applied here rather
@@ -3960,6 +4208,22 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
         }
     }
 
+    /* The map fragment, in the same list and under the same fog rule as the
+     * collectibles: it is a thing lying in the world, so a trunk in front of it
+     * hides it, and being deep in fog hides it too. Bobbing on the phase slot
+     * just past the last entity, so it cannot pulse in lockstep with a mote
+     * standing near it. */
+    if (w->map_tile >= 0) {
+        int mx = w->map_tile % WORLD_W, my = w->map_tile / WORLD_W;
+        if (mx >= tx0 && mx < tx1 && my >= ty0 && my < ty1 &&
+            tile_level(w, mx, my) >= 3)
+            draw_list_push_marker(dl, DI_MAP,
+                                  mx * TILE + TILE / 2 - cam_x,
+                                  my * TILE + TILE - cam_y
+                                      - entity_bob(ENTITY_COUNT, clock),
+                                  FOG_LEVELS - 1);
+    }
+
     /* The player goes in the same list, so she sorts against props by feet
      * rather than by tile row. */
     {
@@ -4017,6 +4281,21 @@ static void props_draw(SDL_Surface *fb, const DrawList *dl)
         const DrawItem *it = &dl->item[i];
         if (it->kind == DI_SPRITE) {
             draw_sprite_sp(fb, &ART_SPRITES[it->art], it->x, it->y, it->level, it->fade, 0);
+            continue;
+        }
+        /* Same procedural reasoning as the E keycap: a folded chart costs no
+         * art data and retunes in a rebuild. Parchment plate, leather edge, and
+         * an ink route bent across it so it is not merely a pale rectangle. */
+        if (it->kind == DI_MAP) {
+            int x0 = it->x - MAP_MOTE_W / 2, y0 = it->y - MAP_MOTE_H;
+            Uint32 edge = SDL_MapRGB(fb->format, 0x5a, 0x3c, 0x22);
+            Uint32 page = SDL_MapRGB(fb->format, 0xe8, 0xd6, 0xa6);
+            Uint32 ink  = SDL_MapRGB(fb->format, 0x8c, 0x33, 0x1e);
+            fill_rect(fb, x0 - 1, y0 - 1, MAP_MOTE_W + 2, MAP_MOTE_H + 2, edge);
+            fill_rect(fb, x0, y0, MAP_MOTE_W, MAP_MOTE_H, page);
+            fill_rect(fb, x0 + 1, y0 + MAP_MOTE_H - 2, 3, 1, ink);
+            fill_rect(fb, x0 + 3, y0 + 2, 1, MAP_MOTE_H - 3, ink);
+            fill_rect(fb, x0 + 4, y0 + 2, 4, 1, ink);
             continue;
         }
         /* Fragments and Souls have no authored art, so they are drawn: a warm
@@ -4113,8 +4392,22 @@ static void prompt_draw(SDL_Surface *fb, const World *w, const Entity *ents,
     int i = entity_in_reach(w, ents, px, py);
     int ex, ey, sx, sy;
 
-    if (i < 0)
+    if (i < 0) {
+        /* The map fragment takes the prompt only when no mote is in reach,
+         * which is exactly the order the interact key resolves the two in - a
+         * keycap pointing at one thing while the key acts on another is worse
+         * than no keycap at all. --map-test asserts the two agree. */
+        if (!map_in_reach(w, px, py))
+            return;
+        ex = w->map_tile % WORLD_W;
+        ey = w->map_tile / WORLD_W;
+        if (tile_level(w, ex, ey) < 3)
+            return;
+        sx = ex * TILE + TILE / 2 - cam_x;
+        sy = ey * TILE + TILE - cam_y - entity_bob(ENTITY_COUNT, clock);
+        draw_prompt(fb, sx, sy - MAP_MOTE_H - 3, clock);
         return;
+    }
     ex = ents[i].tile % WORLD_W;
     ey = ents[i].tile / WORLD_W;
     if (tile_level(w, ex, ey) < 3)
@@ -4295,6 +4588,15 @@ typedef struct {
                         * ever holds the ACTIVE area's 10 entities, so this is
                         * what carries the other areas' progress while they
                         * are not loaded. */
+    /* Which areas' map fragments she has found: bit 0 area 1, bit 1 area 2,
+     * bit 2 area 3. Persistent across an area switch for the same reason
+     * `restored` is - only one area's World is ever loaded, so a per-World
+     * flag would forget the Forest map the moment she stepped through the
+     * portal and remember it again if she somehow came back. Three bits rather
+     * than three more bits of `restored`: `restored` is thirty bits deep
+     * already, and a map is not a memory - it grants nothing, restores
+     * nothing, and area_complete must not count it. */
+    Uint8  maps;
 } Game;
 
 /* Area 2 and Area 3's worlds are each a deterministic salt of the root seed,
@@ -4347,7 +4649,15 @@ static void game_init_area(Game *g, Scratch *sc, Uint64 seed, Uint8 area)
 static void game_init(Game *g, Scratch *sc, Uint64 seed)
 {
     g->restored = 0;
+    g->maps = 0;
     game_init_area(g, sc, seed, 1);
+}
+
+/* Whether the CURRENT area's map has been found. g->area is always 1-3, so the
+ * shift is always in range. */
+static int game_has_map(const Game *g)
+{
+    return (g->maps & (Uint8)(1u << (g->area - 1))) != 0;
 }
 
 static void game_restore(Game *g, int i)
@@ -4381,9 +4691,19 @@ static int area_complete(const Game *g)
  */
 #define SAVE_MAGIC_0  'W'
 #define SAVE_MAGIC_1  'F'
-#define SAVE_VERSION  1
+/* Bumped from 1 when byte 21 stopped being reserved and became the map-fragment
+ * mask. A v1 file happens to carry a zero there, which would even READ
+ * correctly as "no maps found" - the bump is not because it would be
+ * misinterpreted but because the format changed, and a version field that only
+ * moves when a change would otherwise corrupt something is a version field
+ * nobody can reason about. v1 saves are rejected, not migrated: there is one
+ * construction path from a file to a game, and a migration would be a second. */
+#define SAVE_VERSION  2
 #define SAVE_SIZE     28
 #define SAVE_FILENAME "wayfarer.sav"
+
+/* Byte 21: three legal bits, one per area. */
+#define SAVE_MAPS_BITS 0x07u
 
 /* Byte 24-27's restored mask now spans 30 bits: 0-9 Area 1's ENTITY_COUNT
  * entities, 10-19 Area 2's, 20-29 Area 3's. All three are always in scope
@@ -4455,7 +4775,7 @@ static int game_save(const Game *g, const char *path)
     save_put32(buf + 12, fx);
     save_put32(buf + 16, fy);
     buf[20] = g->p.abilities;
-    buf[21] = 0;
+    buf[21] = g->maps;
     buf[22] = 0;
     buf[23] = 0;
     save_put32(buf + 24, restored);
@@ -4493,7 +4813,7 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     Uint32 restored, active, shift;
     Uint8 area;
     float px, py;
-    Uint8 abilities;
+    Uint8 abilities, maps;
     int i;
 
     if (!rw)
@@ -4507,8 +4827,16 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     if (buf[0] != SAVE_MAGIC_0 || buf[1] != SAVE_MAGIC_1) return -1;
     if (buf[2] != SAVE_VERSION)                           return -1;
     if (buf[3] != 1 && buf[3] != 2 && buf[3] != 3)        return -1;
-    if (buf[21] != 0 || buf[22] != 0 || buf[23] != 0)     return -1;
+    if (buf[22] != 0 || buf[23] != 0)                     return -1;
     area = buf[3];
+
+    /* Same shape of check as the restored mask's below, and it falls out of the
+     * same live invariant: a map fragment lies in ONE area, and she cannot have
+     * picked up an area's map without having been in that area, which
+     * progression makes impossible for any area past the one she is in. */
+    maps = buf[21];
+    if (maps & (Uint8)~(Uint8)SAVE_MAPS_BITS)             return -1;
+    if (maps & (Uint8)~(Uint8)((1u << area) - 1u))        return -1;
 
     restored = save_get32(buf + 24);
     if (restored & ~SAVE_ALL_BITS) return -1;
@@ -4561,6 +4889,12 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     tmp->p.x = px;
     tmp->p.y = py;
     tmp->restored = restored;              /* the full 20-bit mask, both areas */
+    /* Replayed as a delta on the regenerated world, exactly like a restored
+     * entity: world_gen has just laid this area's map fragment back down, and
+     * having found it means it is not lying there any more. */
+    tmp->maps = maps;
+    if (maps & (Uint8)(1u << (area - 1)))
+        tmp->w.map_tile = -1;
 
     /* Snap the eased floats to their targets, then rebuild the fog as one
      * instant of standing where she stands. reveal_around is incremental, so it
@@ -4606,6 +4940,15 @@ static struct {
     int          mm_dirty;
     int          mm_tick;
     SDL_Surface *mm;
+    /* The full-screen map. Same cached-surface-plus-dirty-flag shape as the
+     * minimap above and for the same reason, one step larger: a rebuild is
+     * 16,384 blocks plus a BFS, which is nothing once every fifteen frames and
+     * real work every frame. */
+    int          map_open;
+    int          bm_dirty;
+    int          bm_tick;
+    int          bm_closed;   /* collectibles with no route she can walk today */
+    SDL_Surface *bm;
 } hud;
 
 static void hud_toast(const char *s)
@@ -4811,6 +5154,244 @@ static void hud_draw(SDL_Surface *fb, const Game *g)
     mm_draw(fb, g);
 }
 
+/* ---- The map screen -----------------------------------------------------
+ *
+ * What the map fragment buys, and the reason it is worth crossing a biome for:
+ * the WHOLE layout, unfogged, with a dashed trail from where she stands to
+ * every fragment and every soul she has not found yet.
+ *
+ * Deliberately not a fog lift. The two answer different questions - fog is
+ * "what have I seen", the map is "what is there" - and merging them would
+ * either hand her a lit world for a pickup or make the reward invisible on the
+ * screen she opened to look at it. The minimap keeps its fog gating for the
+ * same reason: it is the always-on navigation aid, and it is not the reward.
+ *
+ * 128 tiles at two pixels is 256 square, which does not leave room for a
+ * caption above and below it on a 270-line screen - so the map sits against
+ * the right edge and the legend takes the 200-odd pixels that leaves on the
+ * left, rather than the map being shrunk to make room for its own caption.
+ */
+#define BM_SCALE      2
+#define BM_W          (WORLD_W * BM_SCALE)
+#define BM_H          (WORLD_H * BM_SCALE)
+#define BM_TRAIL_STEP 3    /* a dot every N tiles, so a trail reads as dashed */
+#define BM_REFRESH    15   /* frames between rebuilds while it is open */
+
+/* Where the map panel's top-left corner lands on `fb`. A function because
+ * --map-test has to look at particular pixels of it, and a test that restated
+ * this arithmetic would keep passing while the panel moved out from under it.
+ * Read from the surface rather than from LOGICAL_*: with no backbuffer we draw
+ * at native resolution - the same reason hud_draw reads fb->w. */
+static void bm_origin(const SDL_Surface *fb, int *ox, int *oy)
+{
+    *ox = fb->w - BM_W - 7;
+    *oy = (fb->h - BM_H) / 2;
+    if (*ox < 8) *ox = 8;
+    if (*oy < 0) *oy = 0;
+}
+
+/* The two trail colours, in one place, because --map-test counts pixels of
+ * exactly these to prove a trail reached the screen.
+ *
+ * Brighter than the first pass, which was picked against the DARK map of an
+ * untouched biome and measured badly on a restored one: ground goes from
+ * 0x3c444a to a full 0x6a9a70 as she brings an area back, and a muted gold
+ * that read clearly on the first was nearly the same luminance as the second.
+ * A map that gets harder to read the further you get is the wrong way round.
+ * Kept a step below the endpoint markers, so a trail still reads as leading TO
+ * the brighter thing at its end rather than competing with it. */
+static Uint32 bm_trail_col(SDL_Surface *s, int is_soul)
+{
+    return is_soul ? SDL_MapRGB(s->format, 0x5f, 0xa6, 0xc2)
+                   : SDL_MapRGB(s->format, 0xcc, 0x95, 0x2c);
+}
+
+/* Terrain only, and with NO fog term - that absence is the whole feature. Same
+ * water-before-solid ordering as mm_col, and for the same reason: water IS
+ * solid, so testing solid first would draw every pond as rock. */
+static Uint32 bm_col(SDL_Surface *s, const Game *g, int tx, int ty)
+{
+    const World *w = &g->w;
+    Uint8 reg = w->litreg[ty][tx];
+    float r = (reg != REGION_NONE && reg < w->region_count)
+              ? w->regions[reg].restoration : 0.0f;
+
+    if (w->terr[ty][tx] == GT_WATER)
+        return SDL_MapRGB(s->format, 0x2c, 0x4c, 0x74);
+    if (w->solid[ty][tx])
+        return SDL_MapRGB(s->format, 0x15, 0x15, 0x1d);
+    /* Restoration still reads, so the map also shows how much of the biome she
+     * has already brought back - the one progress channel it keeps. */
+    return SDL_MapRGB(s->format, (Uint8)(0x3c + (0x6a - 0x3c) * r),
+                                 (Uint8)(0x44 + (0x9a - 0x44) * r),
+                                 (Uint8)(0x4a + (0x70 - 0x4a) * r));
+}
+
+/* Walk a BFS distance field back from `from` toward its source, dotting as it
+ * goes. Reconstructed from the field rather than from a stored parent array:
+ * the step to take is any neighbour one hop nearer, which the field already
+ * says, and a parent array would be a second description of the same thing.
+ *
+ * Bounded by a guard count as well as by the distance, so a malformed field
+ * cannot spin here - the render path has no business trusting an invariant it
+ * could just check. */
+static void bm_trail(SDL_Surface *s, const int *dist, int from, Uint32 col)
+{
+    static const int dxs[4] = { 1, -1, 0, 0 };
+    static const int dys[4] = { 0, 0, 1, -1 };
+    int cur = from, guard = WORLD_W * WORLD_H, step = 0;
+
+    if (from < 0 || dist[from] < 0)
+        return;
+    while (dist[cur] > 0 && guard-- > 0) {
+        int x = cur % WORLD_W, y = cur / WORLD_W, d, next = -1;
+        for (d = 0; d < 4; d++) {
+            int nx = x + dxs[d], ny = y + dys[d], ni;
+            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H) continue;
+            ni = ny * WORLD_W + nx;
+            if (dist[ni] == dist[cur] - 1) { next = ni; break; }
+        }
+        if (next < 0)
+            return;
+        cur = next;
+        /* The last dot stops short of her own marker rather than under it. */
+        if ((step++ % BM_TRAIL_STEP) == 0 && dist[cur] > 0)
+            fill_rect(s, (cur % WORLD_W) * BM_SCALE, (cur / WORLD_W) * BM_SCALE,
+                      BM_SCALE, BM_SCALE, col);
+    }
+}
+
+/* Terrain and trails into the cache. The markers and her own position are NOT
+ * cached - they are drawn live over the blit, so nothing on screen can be up to
+ * BM_REFRESH frames stale about where something is. */
+static void bm_redraw(const Game *g, Scratch *sc)
+{
+    int tx, ty, i;
+
+    for (ty = 0; ty < WORLD_H; ty++)
+        for (tx = 0; tx < WORLD_W; tx++)
+            fill_rect(hud.bm, tx * BM_SCALE, ty * BM_SCALE, BM_SCALE, BM_SCALE,
+                      bm_col(hud.bm, g, tx, ty));
+
+    /* Routed through bfs_gated with the abilities she is HOLDING, so the map
+     * can never draw a way through a gate she cannot pass. Something behind
+     * such a gate gets no trail at all and is counted instead - see the legend
+     * line. Drawing a route she cannot walk would be a worse failure than
+     * drawing none: it would send her at a pond bank and blame her for it. */
+    bfs_gated(&g->w, g->p.abilities,
+              (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE),
+              sc->dist, sc->queue);
+    hud.bm_closed = 0;
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        if (g->ents[i].tile < 0 || g->ents[i].restored) continue;
+        if (sc->dist[g->ents[i].tile] < 0) { hud.bm_closed++; continue; }
+        bm_trail(hud.bm, sc->dist, g->ents[i].tile,
+                 bm_trail_col(hud.bm, g->ents[i].is_soul));
+    }
+    hud.bm_dirty = 0;
+}
+
+static void bm_marker(SDL_Surface *fb, int ox, int oy, int tile, Uint32 col, int size)
+{
+    int x = (tile % WORLD_W) * BM_SCALE, y = (tile / WORLD_W) * BM_SCALE;
+
+    fill_rect(fb, ox + x - size / 2, oy + y - size / 2, size, size, col);
+}
+
+/* One legend row: a colour chip and its name, on the same baseline. */
+static void bm_key(SDL_Surface *fb, int x, int y, Uint32 chip, const char *s,
+                   Uint32 text)
+{
+    fill_rect(fb, x, y + 1, 5, 5, chip);
+    draw_text(fb, x + 9, y, s, text);
+}
+
+/* Fills the whole surface, so it is a SCREEN rather than an overlay - which is
+ * also why the tick loop holds her still while it is up: walking blind under an
+ * opaque map is input she did not mean to give. */
+static void bigmap_draw(SDL_Surface *fb, const Game *g, Scratch *sc)
+{
+    static const char *title[BIOME_COUNT] = {
+        "map of the forest", "map of the underworld", "map of lumiara"
+    };
+    Uint32 ink   = SDL_MapRGB(fb->format, 0x10, 0x12, 0x18);
+    Uint32 warm  = SDL_MapRGB(fb->format, 0xf0, 0xd8, 0xb0);
+    Uint32 pale  = SDL_MapRGB(fb->format, 0x9a, 0xa8, 0xb8);
+    Uint32 edge  = SDL_MapRGB(fb->format, 0x6a, 0x5c, 0x44);
+    Uint32 gold  = SDL_MapRGB(fb->format, 0xff, 0xd7, 0x6a);
+    Uint32 soulc = SDL_MapRGB(fb->format, 0x9a, 0xd8, 0xe8);
+    Uint32 viol  = SDL_MapRGB(fb->format, 0xb0, 0x6a, 0xff);
+    Uint32 white = SDL_MapRGB(fb->format, 0xff, 0xff, 0xff);
+    int ox, oy, lx = 8, ly, i;
+    char buf[64];
+    SDL_Rect dst;
+
+    if (!hud.bm)
+        hud.bm = SDL_CreateRGBSurface(0, BM_W, BM_H, fb->format->BitsPerPixel,
+                                      fb->format->Rmask, fb->format->Gmask,
+                                      fb->format->Bmask, fb->format->Amask);
+    if (!hud.bm)
+        return;   /* a missing map screen is a degraded HUD, not a fatal error */
+    if (hud.bm_dirty || (hud.bm_tick++ % BM_REFRESH) == 0)
+        bm_redraw(g, sc);
+
+    bm_origin(fb, &ox, &oy);
+
+    fill_rect(fb, 0, 0, fb->w, fb->h, ink);
+    fill_rect(fb, ox - 1, oy - 1, BM_W + 2, 1, edge);
+    fill_rect(fb, ox - 1, oy + BM_H, BM_W + 2, 1, edge);
+    fill_rect(fb, ox - 1, oy, 1, BM_H, edge);
+    fill_rect(fb, ox + BM_W, oy, 1, BM_H, edge);
+    dst.x = ox; dst.y = oy; dst.w = 0; dst.h = 0;
+    SDL_BlitSurface(hud.bm, NULL, fb, &dst);
+
+    /* Endpoints over the trails, so a dot chain always terminates in the thing
+     * it leads to. Unrestored only: a trail to something already remembered
+     * would be a route to nothing. */
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        if (g->ents[i].tile < 0 || g->ents[i].restored) continue;
+        bm_marker(fb, ox, oy, g->ents[i].tile,
+                  g->ents[i].is_soul ? soulc : gold, 3);
+    }
+    if ((g->area == 1 || g->area == 2) && g->w.portal_tile >= 0)
+        bm_marker(fb, ox, oy, g->w.portal_tile, viol, 3);
+    bm_marker(fb, ox, oy,
+              (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE), white, 3);
+
+    ly = oy;
+    draw_text(fb, lx, ly, title[g->w.biome < BIOME_COUNT ? g->w.biome : 0], warm);
+    ly += FONT_LINE * 2;
+    SDL_snprintf(buf, sizeof(buf), "fragments %d/%d", g->frags_restored, FRAGMENT_COUNT);
+    draw_text(fb, lx, ly, buf, warm);
+    ly += FONT_LINE;
+    SDL_snprintf(buf, sizeof(buf), "souls %d/%d", g->souls_restored, SOUL_COUNT);
+    draw_text(fb, lx, ly, buf, warm);
+    ly += FONT_LINE * 2;
+    bm_key(fb, lx, ly, gold,  "memory fragment", pale); ly += FONT_LINE;
+    bm_key(fb, lx, ly, soulc, "found soul", pale);      ly += FONT_LINE;
+    if (g->area == 1 || g->area == 2) {
+        bm_key(fb, lx, ly, viol, "the way onward", pale);
+        ly += FONT_LINE;
+    }
+    bm_key(fb, lx, ly, white, "you are here", pale);
+    ly += FONT_LINE * 2;
+    draw_text(fb, lx, ly, "trails lead to what is", pale);       ly += FONT_LINE;
+    draw_text(fb, lx, ly, "still missing.", pale);               ly += FONT_LINE;
+    /* Stated rather than left as a silence: a collectible with no trail and no
+     * explanation reads as the map being broken, not as a gate she has yet to
+     * open. The count is what bm_redraw actually skipped, so the sentence
+     * cannot outlive the condition that produced it. */
+    if (hud.bm_closed > 0) {
+        SDL_snprintf(buf, sizeof(buf), "%d lie beyond what you", hud.bm_closed);
+        ly += FONT_LINE;
+        draw_text(fb, lx, ly, buf, pale);              ly += FONT_LINE;
+        draw_text(fb, lx, ly, "can cross for now.", pale);
+        ly += FONT_LINE;
+    }
+    ly += FONT_LINE;
+    draw_text(fb, lx, ly, "m   close the map", warm);
+}
+
 /* The one interaction key, in one function, so the tests drive exactly what E
  * runs. Returns the entity restored, or -1. */
 static int try_interact(Game *g, Audio *a)
@@ -4838,6 +5419,26 @@ static int try_interact(Game *g, Audio *a)
     }
     hud_toast(buf);
     return i;
+}
+
+/* The map fragment, on the same key and checked AFTER try_interact, so a mote
+ * and a chart lying in the same reach resolve the way the prompt drew them.
+ * Returns 1 if it was taken.
+ *
+ * Deliberately does NOT fire layer_fire: that counter is what the music reads
+ * as "another memory has come back", and a map is not a memory. It gets the
+ * pickup chime and nothing else, so the score cannot advance a layer for a
+ * thing that restored no part of the world. */
+static int try_take_map(Game *g, Audio *a)
+{
+    if (!map_in_reach(&g->w, g->p.x, g->p.y))
+        return 0;
+    g->w.map_tile = -1;
+    g->maps |= (Uint8)(1u << (g->area - 1));
+    hud.bm_dirty = 1;
+    sfx_fire(a, SFX_CHIME);
+    hud_toast("a map of this place  press m");
+    return 1;
 }
 
 /* Step to another world without leaving the session, for '[' and ']'.
@@ -4879,6 +5480,12 @@ static void game_reseed(Game *g, Scratch *sc, Audio *a, Uint64 seed)
     hud.mm_dirty  = 1;
     hud.win_shown = 0;
     hud.win_left  = 0;
+    /* Both, not just the flag: the cached map SURFACE would keep drawing the
+     * old world's layout, which is the same failure the minimap cache has and
+     * the same fix. Closed as well as dirtied - the new world's map has not
+     * been found, so there is nothing to be looking at. */
+    hud.map_open  = 0;
+    hud.bm_dirty  = 1;
     audio_request_reset(a, seed, 0, 0, BIOME_FOREST);
 }
 
@@ -4910,6 +5517,10 @@ static void game_transition_to_area(Game *g, Scratch *sc, Uint8 next_area)
     hud.mm_dirty  = 1;
     hud.win_shown = 0;
     hud.win_left  = 0;
+    /* g->maps is untouched - the Forest map stays found - but the new area's
+     * own map has not been, and the cache still holds the old biome. */
+    hud.map_open  = 0;
+    hud.bm_dirty  = 1;
 }
 
 /* The portal, checked alongside try_interact on the same key: only once the
@@ -4987,6 +5598,21 @@ static void gate_report(Uint8 missing, Audio *a)
 static SDL_Surface *test_surface(int w, int h)
 {
     return SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
+}
+
+/* --lit reveals the whole map so the minimap (and every marker gated on
+ * reveal - fragments, souls, the portal) can be looked at without exploring
+ * first. world_gen rebuilds World.reveal from nothing every time a world is
+ * (re)generated - a fresh game, a reseed, a portal transition, a load - so a
+ * one-shot reveal applied only before the main loop starts goes dark again
+ * the moment any of those happen. Factored out so every such call site can
+ * re-apply it, rather than only the first world ever being lit. */
+static void reveal_all(World *w)
+{
+    int lx, ly;
+    for (ly = 0; ly < WORLD_H; ly++)
+        for (lx = 0; lx < WORLD_W; lx++)
+            w->reveal[ly][lx] = 255;
 }
 
 /* Decode a sprite and count how many of its pixels are palette index 0, i.e.
@@ -6201,32 +6827,6 @@ static int reach_selftest(int seeds, Uint64 base)
 /* Distance field over tiles the given abilities can actually stand on. Uses the
  * REAL tile_blocked, so the autopilot cannot walk somewhere the player could
  * not - which is the whole point of driving the real simulation. */
-static void bfs_gated(const World *w, Uint8 abilities, int start,
-                      int *dist, int *queue)
-{
-    static const int dxs[4] = { 1, -1, 0, 0 };
-    static const int dys[4] = { 0, 0, 1, -1 };
-    int head = 0, tail = 0, i;
-
-    for (i = 0; i < WORLD_W * WORLD_H; i++) dist[i] = -1;
-    if (start < 0) return;
-    if (tile_blocked(w, abilities, start % WORLD_W, start / WORLD_W)) return;
-    dist[start] = 0;
-    queue[tail++] = start;
-    while (head < tail) {
-        int idx = queue[head++], x = idx % WORLD_W, y = idx / WORLD_W, d;
-        for (d = 0; d < 4; d++) {
-            int nx = x + dxs[d], ny = y + dys[d], ni;
-            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H) continue;
-            ni = ny * WORLD_W + nx;
-            if (dist[ni] >= 0) continue;
-            if (tile_blocked(w, abilities, nx, ny)) continue;
-            dist[ni] = dist[idx] + 1;
-            queue[tail++] = ni;
-        }
-    }
-}
-
 /* A headless playthrough, driving the REAL simulation - real tile_blocked, real
  * move_axis, real interact radius, real apply_restore. A test that walked a
  * private copy of the rules would only prove things about the copy.
@@ -7912,6 +8512,548 @@ static int font_selftest(void)
     return fails;
 }
 
+/* ---- --map-test ---------------------------------------------------------
+ *
+ * The map fragment and the screen it unlocks, checked where each claim can
+ * actually fail: WHERE the fragment lands, whether anything buries it, whether
+ * the key that takes it agrees with the keycap that advertised it, and whether
+ * the trails the screen draws are routes she could really walk.
+ *
+ * The trail checks are the load-bearing ones. A trail is a promise about the
+ * world - "go this way and you will get there" - and it is drawn from a
+ * distance field, so it can be wrong in exactly the way a picture cannot
+ * argue back about: a chain of dots straight through a pond bank looks like a
+ * route. Every step is therefore checked against tile_blocked, the same
+ * function that stops her.
+ */
+
+/* Walk a BFS field back the way bm_trail walks it, checking each step instead
+ * of drawing it. Returns the number of steps, or -1 if the route is not one
+ * she could walk. Deliberately re-derives nothing: it re-uses the same field
+ * bm_redraw hands bm_trail, so a broken field fails here too. */
+static int trail_walk_ok(const World *w, Uint8 abilities, const int *dist,
+                         int from, const char **why)
+{
+    static const int dxs[4] = { 1, -1, 0, 0 };
+    static const int dys[4] = { 0, 0, 1, -1 };
+    int cur = from, steps = 0, guard = WORLD_W * WORLD_H;
+
+    *why = "";
+    if (from < 0 || dist[from] < 0) { *why = "no route"; return -1; }
+    if (tile_blocked(w, abilities, from % WORLD_W, from / WORLD_W)) {
+        *why = "starts inside a wall"; return -1;
+    }
+    while (dist[cur] > 0 && guard-- > 0) {
+        int x = cur % WORLD_W, y = cur / WORLD_W, d, next = -1;
+        for (d = 0; d < 4; d++) {
+            int nx = x + dxs[d], ny = y + dys[d], ni;
+            if (nx < 0 || ny < 0 || nx >= WORLD_W || ny >= WORLD_H) continue;
+            ni = ny * WORLD_W + nx;
+            if (dist[ni] == dist[cur] - 1) { next = ni; break; }
+        }
+        if (next < 0) { *why = "dead end short of the source"; return -1; }
+        /* The two properties a drawn trail claims and could silently break. */
+        if (dist[next] != dist[cur] - 1) { *why = "step did not close the distance"; return -1; }
+        if (tile_blocked(w, abilities, next % WORLD_W, next / WORLD_W)) {
+            *why = "route crosses a tile she cannot enter"; return -1;
+        }
+        cur = next;
+        steps++;
+    }
+    if (dist[cur] != 0) { *why = "never reached the source"; return -1; }
+    return steps;
+}
+
+/* Pixels of EXACTLY one colour in a box. count_lit cannot serve here: the map
+ * screen paints its own opaque background, so "not black" is true of every
+ * pixel in the frame and would report the same number whatever the trails did.
+ * Exact-colour counting is what makes "a trail reached the screen" a claim
+ * about the trail rather than about the backdrop. */
+static int count_col(const SDL_Surface *s, Uint32 col, int bx, int by, int bw, int bh)
+{
+    int x, y, n = 0;
+
+    if (bx < 0) { bw += bx; bx = 0; }
+    if (by < 0) { bh += by; by = 0; }
+    for (y = by; y < by + bh && y < s->h; y++) {
+        const Uint32 *row = (const Uint32 *)((const Uint8 *)s->pixels + y * s->pitch);
+        for (x = bx; x < bx + bw && x < s->w; x++)
+            if ((row[x] & 0x00FFFFFFu) == (col & 0x00FFFFFFu)) n++;
+    }
+    return n;
+}
+
+/* Does any sprite drawn AFTER the item at `at` cover the box at (bx,by,bw,bh)?
+ * The visible property, asked of the finished draw list rather than of the
+ * placement rule - which is the only way to catch a chart that is placed
+ * perfectly and then buried, the bug this whole check exists because of. */
+static int box_buried_after(const DrawList *dl, int at, int bx, int by, int bw, int bh)
+{
+    int k;
+
+    for (k = at + 1; k < dl->n; k++) {
+        const ArtSprite *sp;
+        int x0, y0;
+        if (dl->item[k].kind != DI_SPRITE) continue;
+        sp = &ART_SPRITES[dl->item[k].art];
+        x0 = dl->item[k].x - sp->anchor_x;
+        y0 = dl->item[k].y - sp->anchor_y;
+        if (x0 < bx + bw && x0 + sp->w > bx && y0 < by + bh && y0 + sp->h > by)
+            return 1;
+    }
+    return 0;
+}
+
+static int map_selftest(int seeds, Uint64 base)
+{
+    Game *g = (Game *)SDL_malloc(sizeof(Game));
+    Game *b = (Game *)SDL_malloc(sizeof(Game));
+    Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+    DrawList *dl = (DrawList *)SDL_malloc(sizeof(DrawList));
+    SDL_Surface *fb = test_surface(LOGICAL_W, LOGICAL_H);
+    Audio audio;
+    int fails = 0, s_i, area, i;
+
+    if (!g || !b || !sc || !dl || !fb) {
+        printf("FAIL  map: out of memory\n");
+        SDL_free(g); SDL_free(b); SDL_free(sc); SDL_free(dl);
+        if (fb) SDL_FreeSurface(fb);
+        return 1;
+    }
+    if (!fogpal_build(fb)) {
+        printf("FAIL  map: fog palette\n");
+        SDL_free(g); SDL_free(b); SDL_free(sc); SDL_free(dl);
+        SDL_FreeSurface(fb);
+        return 1;
+    }
+    SDL_zero(audio);
+
+    /* ---- Placement, over every seed and every area ---------------------- */
+    for (s_i = 0; s_i < seeds; s_i++) {
+        Uint64 seed = base + (Uint64)s_i;
+        for (area = 1; area <= 3; area++) {
+            Uint32 reach;
+            int t, far_exists = 0, x, y;
+
+            g->restored = 0;
+            g->maps = 0;
+            game_init_area(g, sc, seed, (Uint8)area);
+            t = g->w.map_tile;
+            reach = regions_reachable(&g->w, ABIL_NONE);
+            if (reach == 0) reach = regions_reachable(&g->w, ABIL_ALL);
+
+            if (t < 0) {
+                printf("FAIL  map: seed %.0f area %d placed no map fragment\n",
+                       (double)seed, area);
+                fails++;
+                continue;
+            }
+            /* The placer's own predicate, asked of what the placer chose. */
+            if (!map_tile_ok(&g->w, g->ents, reach, t, 0)) {
+                printf("FAIL  map: seed %.0f area %d put the fragment on an illegal"
+                       " tile %d\n", (double)seed, area, t);
+                fails++;
+            }
+            /* Reachable with NO abilities, checked independently of the region
+             * bitmask the placer used - a walk, not a graph lookup. */
+            bfs_gated(&g->w, ABIL_NONE, g->w.spawn_tile, sc->dist, sc->queue);
+            if (sc->dist[t] < 0) {
+                printf("FAIL  map: seed %.0f area %d sealed the map fragment behind"
+                       " a gate she has nothing for\n", (double)seed, area);
+                fails++;
+            }
+            /* The spawn-distance clause is a preference the placer may drop -
+             * but only where nothing legal lay far enough out. */
+            for (y = 0; y < WORLD_H && !far_exists; y++)
+                for (x = 0; x < WORLD_W && !far_exists; x++)
+                    if (map_tile_ok(&g->w, g->ents, reach, y * WORLD_W + x, 1))
+                        far_exists = 1;
+            if (far_exists && !map_tile_ok(&g->w, g->ents, reach, t, 1)) {
+                printf("FAIL  map: seed %.0f area %d dropped the spawn-distance"
+                       " clause with %d legal far tiles available\n",
+                       (double)seed, area, far_exists);
+                fails++;
+            }
+            /* Same seed, same fragment: it is drawn from its own rng stream, so
+             * this must not depend on anything else the generator did. */
+            b->restored = 0;
+            b->maps = 0;
+            game_init_area(b, sc, seed, (Uint8)area);
+            if (b->w.map_tile != t) {
+                printf("FAIL  map: seed %.0f area %d is not deterministic (%d then"
+                       " %d)\n", (double)seed, area, t, b->w.map_tile);
+                fails++;
+            }
+        }
+    }
+    printf("map     : %d seeds x 3 areas - placed, reachable with no abilities,"
+           " clear of motes, deterministic\n", seeds);
+
+    /* ---- NEGATIVE CONTROL for the placement predicate ------------------- */
+    {
+        Uint32 reach;
+        int caught = 0, wall = -1, near_ent = -1, x, y;
+
+        g->restored = 0; g->maps = 0;
+        game_init_area(g, sc, base, 1);
+        reach = regions_reachable(&g->w, ABIL_NONE);
+
+        for (y = 0; y < WORLD_H && wall < 0; y++)
+            for (x = 0; x < WORLD_W && wall < 0; x++)
+                if (g->w.solid[y][x]) wall = y * WORLD_W + x;
+        for (i = 0; i < ENTITY_COUNT && near_ent < 0; i++)
+            if (g->ents[i].tile >= 0) near_ent = g->ents[i].tile;
+
+        if (wall >= 0 && !map_tile_ok(&g->w, g->ents, reach, wall, 0)) caught++;
+        else printf("  map control MISS: a solid tile was accepted\n");
+        if (!map_tile_ok(&g->w, g->ents, reach, g->w.spawn_tile, 0)) caught++;
+        else printf("  map control MISS: the spawn tile was accepted\n");
+        if (near_ent >= 0 && !map_tile_ok(&g->w, g->ents, reach, near_ent, 0)) caught++;
+        else printf("  map control MISS: an entity's own tile was accepted\n");
+        if (!map_tile_ok(&g->w, g->ents, reach, -1, 0)) caught++;
+        else printf("  map control MISS: tile -1 was accepted\n");
+        /* An empty reach mask makes every tile illegal - the clause that keeps
+         * the fragment inside what she can walk to. */
+        if (!map_tile_ok(&g->w, g->ents, 0u, g->w.map_tile, 0)) caught++;
+        else printf("  map control MISS: an unreachable region was accepted\n");
+
+        if (caught != 5) {
+            printf("FAIL  map: the placement predicate rejected only %d of 5"
+                   " deliberately illegal tiles\n", caught);
+            fails++;
+        } else {
+            printf("map     : negative control - the predicate rejects all 5"
+                   " illegal tiles\n");
+        }
+    }
+
+    /* ---- Nothing buries the chart --------------------------------------- */
+    {
+        int cam_x, cam_y, at = -1, ctl_hits = 0, tx, ty;
+
+        g->restored = 0; g->maps = 0;
+        game_init_area(g, sc, base, 1);
+        reveal_all(&g->w);
+        g->p.x = (float)(g->w.map_tile % WORLD_W) * TILE + TILE * 0.5f;
+        g->p.y = (float)(g->w.map_tile / WORLD_W) * TILE + TILE * 0.5f;
+        cam_x = 0; cam_y = 0;
+        camera_follow(g->p.x, g->p.y, LOGICAL_W, LOGICAL_H, &cam_x, &cam_y);
+        props_build(LOGICAL_W, LOGICAL_H, &g->w, base, cam_x, cam_y, g->ents,
+                    &g->p, 0.0f, dl);
+        for (i = 0; i < dl->n; i++)
+            if (dl->item[i].kind == DI_MAP) { at = i; break; }
+        if (at < 0) {
+            printf("FAIL  map: the chart is not in the draw list with the camera"
+                   " on it\n");
+            fails++;
+        } else if (box_buried_after(dl, at, dl->item[at].x - MAP_MOTE_W / 2 - 1,
+                                    dl->item[at].y - MAP_MOTE_H - 1,
+                                    MAP_MOTE_W + 2, MAP_MOTE_H + 2)) {
+            printf("FAIL  map: a sprite drawn after the chart covers it - the"
+                   " fragment is invisible where it lies\n");
+            fails++;
+        } else {
+            printf("map     : no sprite drawn after the chart overlaps it\n");
+        }
+        /* NEGATIVE CONTROL for that checker. box_buried_after has to be capable
+         * of saying yes, or "nothing buries the chart" only means "this
+         * function returns 0". Swept over the same frame at the FRONT of the
+         * list, where by construction almost everything draws later. */
+        for (ty = cam_y / TILE; ty <= (cam_y + LOGICAL_H) / TILE && ctl_hits == 0; ty++)
+            for (tx = cam_x / TILE; tx <= (cam_x + LOGICAL_W) / TILE && ctl_hits == 0; tx++) {
+                if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H) continue;
+                if (box_buried_after(dl, -1, tx * TILE - cam_x, ty * TILE - cam_y,
+                                     MAP_MOTE_W + 2, MAP_MOTE_H + 2))
+                    ctl_hits++;
+            }
+        if (!ctl_hits) {
+            printf("  map control MISS: box_buried_after found nothing covered"
+                   " anywhere in a full frame of forest\n");
+            fails++;
+        } else {
+            printf("map     : negative control - the same checker does report"
+                   " a covered box elsewhere in the frame\n");
+        }
+    }
+
+    /* ---- Taking it, and the keycap that advertised it -------------------- */
+    {
+        int t;
+
+        g->restored = 0; g->maps = 0;
+        game_init_area(g, sc, base, 1);
+        t = g->w.map_tile;
+
+        /* Out of reach: three tiles away is well past INTERACT_RADIUS. */
+        g->p.x = (float)(t % WORLD_W) * TILE + TILE * 0.5f + 3.0f * TILE;
+        g->p.y = (float)(t / WORLD_W) * TILE + TILE * 0.5f;
+        if (map_in_reach(&g->w, g->p.x, g->p.y) || try_take_map(g, &audio)) {
+            printf("FAIL  map: the fragment was taken from three tiles away\n");
+            fails++;
+        } else if (g->maps != 0 || g->w.map_tile != t) {
+            printf("FAIL  map: a refused pickup still changed the world\n");
+            fails++;
+        } else {
+            printf("map     : negative control - out of reach takes nothing and"
+                   " changes nothing\n");
+        }
+
+        /* Standing on it. */
+        g->p.x = (float)(t % WORLD_W) * TILE + TILE * 0.5f;
+        g->p.y = (float)(t / WORLD_W) * TILE + TILE * 0.5f;
+        if (!map_in_reach(&g->w, g->p.x, g->p.y)) {
+            printf("FAIL  map: standing on the fragment is not in reach\n");
+            fails++;
+        }
+        if (!try_take_map(g, &audio)) {
+            printf("FAIL  map: standing on the fragment did not take it\n");
+            fails++;
+        } else if (!game_has_map(g) || g->w.map_tile >= 0) {
+            printf("FAIL  map: taking it left maps %d map_tile %d\n",
+                   g->maps, g->w.map_tile);
+            fails++;
+        } else if (try_take_map(g, &audio) || map_in_reach(&g->w, g->p.x, g->p.y)) {
+            printf("FAIL  map: the fragment could be taken twice\n");
+            fails++;
+        } else {
+            printf("map     : taken once, exactly once, and only in reach\n");
+        }
+
+        /* The keycap and the key resolve the same thing. With a mote moved onto
+         * the fragment's own tile, the mote must win BOTH - that is the order
+         * prompt_draw draws and the order the interact key acts in. */
+        g->restored = 0; g->maps = 0;
+        game_init_area(g, sc, base, 1);
+        t = g->w.map_tile;
+        g->ents[0].tile = t;
+        g->ents[0].restored = 0;
+        g->p.x = (float)(t % WORLD_W) * TILE + TILE * 0.5f;
+        g->p.y = (float)(t / WORLD_W) * TILE + TILE * 0.5f;
+        if (entity_in_reach(&g->w, g->ents, g->p.x, g->p.y) != 0) {
+            printf("FAIL  map: the mote on the shared tile was not the one in"
+                   " reach\n");
+            fails++;
+        } else if (try_interact(g, &audio) != 0 || g->w.map_tile != t) {
+            printf("FAIL  map: the interact key took the chart out from under a"
+                   " mote sharing its tile\n");
+            fails++;
+        } else {
+            printf("map     : mote outranks chart on the shared key, as the"
+                   " prompt draws it\n");
+        }
+    }
+
+    /* ---- The trails ------------------------------------------------------ */
+    {
+        int checked = 0, closed_none = 0;
+
+        for (s_i = 0; s_i < seeds; s_i++) {
+            Uint64 seed = base + (Uint64)s_i;
+            g->restored = 0; g->maps = 0;
+            game_init_area(g, sc, seed, 1);
+
+            /* With everything held, every placed collectible must have a route
+             * she could really walk - world_solvable already proves the world
+             * is finishable, so a missing route here is the MAP being wrong,
+             * not the world. */
+            bfs_gated(&g->w, ABIL_ALL,
+                      (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE),
+                      sc->dist, sc->queue);
+            for (i = 0; i < ENTITY_COUNT; i++) {
+                const char *why;
+                if (g->ents[i].tile < 0) continue;
+                if (trail_walk_ok(&g->w, ABIL_ALL, sc->dist, g->ents[i].tile, &why) < 0) {
+                    printf("FAIL  map: seed %.0f entity %d trail: %s\n",
+                           (double)seed, i, why);
+                    fails++;
+                }
+                checked++;
+            }
+            /* And with nothing held, something had better be out of reach
+             * across the sweep - otherwise the ability gating is not gating
+             * anything and the "beyond what you can cross" line is dead code. */
+            bfs_gated(&g->w, ABIL_NONE,
+                      (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE),
+                      sc->dist, sc->queue);
+            for (i = 0; i < ENTITY_COUNT; i++)
+                if (g->ents[i].tile >= 0 && sc->dist[g->ents[i].tile] < 0)
+                    closed_none++;
+        }
+        printf("map     : %d trails walked step by step - every step adjacent,"
+               " closer, and enterable\n", checked);
+        if (!closed_none) {
+            printf("FAIL  map: not one collectible in %d seeds was out of reach"
+                   " with no abilities - the trails are not gated at all\n", seeds);
+            fails++;
+        } else {
+            printf("map     : %d collectible(s) across the sweep have no trail"
+                   " until she earns the way in\n", closed_none);
+        }
+
+        /* NEGATIVE CONTROL for the step checker: a route the field does not
+         * support must be rejected, or "every trail is walkable" only means
+         * "trail_walk_ok returns >= 0". */
+        {
+            int broke = 0;
+            g->restored = 0; g->maps = 0;
+            game_init_area(g, sc, base, 1);
+            bfs_gated(&g->w, ABIL_ALL,
+                      (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE),
+                      sc->dist, sc->queue);
+            {
+                const char *why;
+                int wall = -1, x, y;
+                for (y = 0; y < WORLD_H && wall < 0; y++)
+                    for (x = 0; x < WORLD_W && wall < 0; x++)
+                        if (g->w.solid[y][x]) wall = y * WORLD_W + x;
+                /* A tile inside rock has no distance, so it has no route. */
+                if (wall >= 0 && trail_walk_ok(&g->w, ABIL_ALL, sc->dist, wall, &why) < 0)
+                    broke++;
+                /* Punch a hole in the field: a step that closes no distance is
+                 * exactly the corruption a drawn trail would show as a dot
+                 * chain that wanders. */
+                for (i = 0; i < WORLD_W * WORLD_H; i++)
+                    if (sc->dist[i] == 1) sc->dist[i] = 900;
+                if (trail_walk_ok(&g->w, ABIL_ALL, sc->dist,
+                                  g->ents[0].tile >= 0 ? g->ents[0].tile : -1, &why) < 0)
+                    broke++;
+            }
+            if (broke != 2) {
+                printf("FAIL  map: the trail checker accepted %d of 2 broken"
+                       " routes\n", 2 - broke);
+                fails++;
+            } else {
+                printf("map     : negative control - the trail checker rejects an"
+                       " unreachable target and a corrupted field\n");
+            }
+        }
+    }
+
+    /* ---- The screen ------------------------------------------------------ */
+    {
+        int lit_locked, water = -1, wall = -1, x, y;
+        int found = 0, total_all = 0;
+
+        /* The claim no BFS check above can make: that a trail reaches PIXELS,
+         * and that it appears exactly when the thing it leads to becomes
+         * reachable. Counted as pixels of the trail colour in a box around one
+         * collectible - not as total lit pixels, which the screen's own opaque
+         * background pins at the whole frame however the trails come out.
+         *
+         * Looked for over the sweep rather than assumed of one seed: the
+         * candidate has to be a collectible that is CLOSED with no abilities
+         * and open with all of them, and whose box no OTHER trail happens to
+         * cross. The first seed that offers one settles it. */
+        for (s_i = 0; s_i < seeds && !found; s_i++) {
+            Uint64 seed = base + (Uint64)s_i;
+            int ox, oy;
+
+            g->restored = 0; g->maps = 0;
+            game_init_area(g, sc, seed, 1);
+            g->maps = 1;
+            g->w.map_tile = -1;
+            /* Freed BEFORE the zero: SDL_zero(hud) overwrites the surface
+             * pointer, and a dropped 256 KB surface per seed is a leak the
+             * sweep would multiply. */
+            if (hud.bm) { SDL_FreeSurface(hud.bm); hud.bm = NULL; }
+            SDL_zero(hud);
+            bm_origin(fb, &ox, &oy);
+
+            for (i = 0; i < ENTITY_COUNT && !found; i++) {
+                Uint32 col;
+                int bx, by, none_px, all_px;
+                if (g->ents[i].tile < 0) continue;
+
+                bx = ox + (g->ents[i].tile % WORLD_W) * BM_SCALE - 10;
+                by = oy + (g->ents[i].tile / WORLD_W) * BM_SCALE - 10;
+
+                g->p.abilities = ABIL_NONE;
+                SDL_FillRect(fb, NULL, 0);
+                hud.bm_dirty = 1;
+                bigmap_draw(fb, g, sc);
+                col = bm_trail_col(fb, g->ents[i].is_soul);
+                none_px = count_col(fb, col, bx, by, 21, 21);
+
+                g->p.abilities = ABIL_ALL;
+                SDL_FillRect(fb, NULL, 0);
+                hud.bm_dirty = 1;
+                bigmap_draw(fb, g, sc);
+                all_px = count_col(fb, col, bx, by, 21, 21);
+                total_all = count_col(fb, col, ox, oy, BM_W, BM_H);
+
+                if (none_px == 0 && all_px > 0) {
+                    found = 1;
+                    printf("map     : seed %.0f entity %d - no trail pixel while"
+                           " it is closed, %d once she can reach it (%d on the"
+                           " whole map)\n",
+                           (double)seed, i, all_px, total_all);
+                }
+            }
+        }
+        if (!found) {
+            printf("FAIL  map: no collectible anywhere in the sweep gained trail"
+                   " pixels when its gate opened - the trails are not reaching"
+                   " the screen\n");
+            fails++;
+        }
+
+        /* Back to one known state for the checks below. */
+        g->restored = 0; g->maps = 0;
+        game_init_area(g, sc, base, 1);
+        g->maps = 1;
+        g->w.map_tile = -1;
+        g->p.abilities = ABIL_ALL;
+        if (hud.bm) { SDL_FreeSurface(hud.bm); hud.bm = NULL; }
+        SDL_zero(hud);
+        SDL_FillRect(fb, NULL, 0);
+        hud.bm_dirty = 1;
+        bigmap_draw(fb, g, sc);
+
+        /* Water and wall must not be the same colour - the same claim, and the
+         * same past bug, as the minimap's. */
+        for (y = 0; y < WORLD_H; y++)
+            for (x = 0; x < WORLD_W; x++) {
+                if (water < 0 && g->w.terr[y][x] == GT_WATER) water = y * WORLD_W + x;
+                if (wall < 0 && g->w.solid[y][x] && g->w.terr[y][x] != GT_WATER)
+                    wall = y * WORLD_W + x;
+            }
+        if (water >= 0 && wall >= 0 &&
+            bm_col(hud.bm, g, water % WORLD_W, water / WORLD_W) ==
+            bm_col(hud.bm, g, wall % WORLD_W, wall / WORLD_W)) {
+            printf("FAIL  map: water and rock draw the same colour on the map\n");
+            fails++;
+        } else if (water >= 0 && wall >= 0) {
+            printf("map     : water and rock are distinguishable on the map\n");
+        }
+
+        /* NEGATIVE CONTROL for the "it draws" check: the map screen is only
+         * reached through game_has_map, so an area whose fragment was never
+         * found must leave the frame exactly as it found it. Driven through
+         * the same predicate main() gates the call with. */
+        g->maps = 0;
+        SDL_FillRect(fb, NULL, 0);
+        lit_locked = 0;
+        if (game_has_map(g))
+            bigmap_draw(fb, g, sc);
+        lit_locked = count_lit(fb, 0, 0, fb->w, fb->h);
+        if (lit_locked != 0) {
+            printf("FAIL  map: a locked map still drew %d pixels\n", lit_locked);
+            fails++;
+        } else {
+            printf("map     : negative control - with no fragment found, the map"
+                   " screen draws nothing\n");
+        }
+        if (hud.bm) { SDL_FreeSurface(hud.bm); hud.bm = NULL; }
+        if (hud.mm) { SDL_FreeSurface(hud.mm); hud.mm = NULL; }
+    }
+
+    printf("map     : %s\n", fails ? "FAIL" : "PASS");
+    SDL_free(fogpal); fogpal = NULL;
+    SDL_FreeSurface(fb);
+    SDL_free(g); SDL_free(b); SDL_free(sc); SDL_free(dl);
+    return fails;
+}
+
 /* ---- --hud-test ---------------------------------------------------------
  *
  * The HUD is the one subsystem whose bugs are invisible to every other test:
@@ -8345,6 +9487,12 @@ typedef struct {
     Uint64 seed;
     float  px, py;
     Uint8  abilities;
+    /* Both, deliberately: `maps` is what the file carries and `map_tile` is
+     * what regenerating plus replaying it must produce. Checking only the mask
+     * would pass a load that remembered finding the map and then laid the
+     * fragment back down in the world to be found again. */
+    Uint8  maps;
+    int    map_tile;
     int    frags, souls, region_count;
     Uint8  restored[ENTITY_COUNT];
     int    tile[ENTITY_COUNT];
@@ -8358,6 +9506,8 @@ static void save_snap(const Game *g, SaveSnap *s)
     s->seed = g->seed;
     s->px = g->p.x; s->py = g->p.y;
     s->abilities = g->p.abilities;
+    s->maps = g->maps;
+    s->map_tile = g->w.map_tile;
     s->frags = g->frags_restored;
     s->souls = g->souls_restored;
     s->region_count = g->w.region_count;
@@ -8377,6 +9527,8 @@ static int save_snap_eq(const SaveSnap *a, const SaveSnap *b, const char **why)
     if (a->seed != b->seed)                     { *why = "seed"; return 0; }
     if (a->px != b->px || a->py != b->py)       { *why = "position"; return 0; }
     if (a->abilities != b->abilities)           { *why = "abilities"; return 0; }
+    if (a->maps != b->maps)                     { *why = "map mask"; return 0; }
+    if (a->map_tile != b->map_tile)             { *why = "map fragment tile"; return 0; }
     if (a->frags != b->frags)                   { *why = "fragment count"; return 0; }
     if (a->souls != b->souls)                   { *why = "soul count"; return 0; }
     if (a->region_count != b->region_count)     { *why = "region count"; return 0; }
@@ -8424,6 +9576,19 @@ static int save_selftest(Uint64 base)
     /* Deterministic in-play mutations through the SAME transition play uses. */
     for (i = 0; i < 3; i++)
         if (g->ents[i].tile >= 0) game_restore(g, i);
+    /* And take this area's map, through the same key play uses - otherwise the
+     * round trip would only ever be checked against maps == 0, which a save
+     * that dropped byte 21 entirely would satisfy. */
+    if (g->w.map_tile >= 0) {
+        Audio quiet;
+        SDL_zero(quiet);
+        g->p.x = (float)(g->w.map_tile % WORLD_W) * TILE + TILE * 0.5f;
+        g->p.y = (float)(g->w.map_tile / WORLD_W) * TILE + TILE * 0.5f;
+        if (!try_take_map(g, &quiet)) {
+            printf("FAIL  save: standing on the map fragment did not take it\n");
+            fails++;
+        }
+    }
     /* Finish the ease, so the load's snap is checked against settled values -
      * exactly what a player who stood still for a second would leave. */
     for (i = 0; i < g->w.region_count; i++)
@@ -8481,12 +9646,12 @@ static int save_selftest(Uint64 base)
             printf("FAIL  save: could not read the file back for the controls\n");
             fails++;
         } else {
-            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[12];
+            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[14];
             int nctl = 0;
 
             save_snap(again, &before);
 
-            for (i = 0; i < 12; i++) {
+            for (i = 0; i < 14; i++) {
                 SDL_memcpy(ctl[i].buf, good, SAVE_SIZE);
                 ctl[i].len = SAVE_SIZE;
             }
@@ -8531,6 +9696,16 @@ static int save_selftest(Uint64 base)
              * while testing nothing. */
             ctl[nctl].name = "abilities the restored mask does not account for";
             ctl[nctl].buf[20] = (Uint8)(good[20] ^ (Uint8)ABIL_KINDLE); nctl++;
+            /* Byte 21 stopped being reserved when the map fragment landed, so
+             * it needs the controls the reserved bytes used to give it for
+             * free. Bits outside the three legal ones first. */
+            ctl[nctl].name = "map bits outside the legal mask";
+            ctl[nctl].buf[21] |= 0xF8; nctl++;
+            /* And the same "progress in an area you have not reached" invariant
+             * the restored mask is checked against: a map fragment lies in one
+             * area, so an Area 1 save cannot have picked up Area 2's. */
+            ctl[nctl].name = "area 1 file, map found in area 2";
+            ctl[nctl].buf[21] |= 0x02; nctl++;
             {
                 /* NaN, not merely out of bounds: it compares false against
                  * every bound, so a naive (x < 0 || x > max) test lets it in. */
@@ -9260,20 +10435,6 @@ static void draw_atlas(SDL_Surface *fb, int page, float t)
     }
 }
 
-/* --lit reveals the whole map so the minimap (and every marker gated on
- * reveal - fragments, souls, the portal) can be looked at without exploring
- * first. world_gen rebuilds World.reveal from nothing every time a world is
- * (re)generated - a fresh game, a reseed, a portal transition, a load - so a
- * one-shot reveal applied only before the main loop starts goes dark again
- * the moment any of those happen. Factored out so every such call site can
- * re-apply it, rather than only the first world ever being lit. */
-static void reveal_all(World *w)
-{
-    int lx, ly;
-    for (ly = 0; ly < WORLD_H; ly++)
-        for (lx = 0; lx < WORLD_W; lx++)
-            w->reveal[ly][lx] = 255;
-}
 #endif /* WAYFARER_SELFTEST */
 
 /* ---- main --------------------------------------------------------------- */
@@ -9317,6 +10478,9 @@ int main(int argc, char **argv)
     if (arg_flag(argc, argv, "--font-test"))     return font_selftest();
     if (arg_flag(argc, argv, "--hud-test"))
         return hud_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
+    if (arg_flag(argc, argv, "--map-test"))
+        return map_selftest(arg_int(argc, argv, "--seeds", 8),
+                            (Uint64)arg_int(argc, argv, "--seed", 1));
     if (arg_flag(argc, argv, "--save-test"))
         return save_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
     if (arg_flag(argc, argv, "--audio-test"))
@@ -9442,9 +10606,12 @@ int main(int argc, char **argv)
         if (where) {
             int want_water = (SDL_strcmp(where, "pond") == 0);
             int want_edge  = (SDL_strcmp(where, "edge") == 0);
+            int want_map   = (SDL_strcmp(where, "map") == 0);
             int best = -1, bestd = 1 << 30, tx, ty;
             int sx = (int)g->p.x / TILE, sy = (int)g->p.y / TILE;
-            if (want_water || want_edge) {
+            if (want_map) {
+                best = g->w.map_tile;
+            } else if (want_water || want_edge) {
                 /* The open tile NEAREST HER that has the wanted wall to its
                  * east, so --leanx 1 walks into it. Nearest so the shot is of
                  * terrain she could plausibly have reached. */
@@ -9472,6 +10639,26 @@ int main(int argc, char **argv)
                 prev_py = g->p.y;
             }
         }
+    }
+    /* --map: hand her this area's map and open the screen, for the same reason
+     * --lit, --restored and --standon exist. The map screen is unreachable from
+     * a --frames run - it needs a fragment found somewhere across the biome and
+     * then a keypress - so without this the one thing that can settle how it
+     * LOOKS, a screenshot, could never be taken of it.
+     *
+     * Goes through the real g->maps bit and the real hud.map_open, so what is
+     * photographed is the shipping screen, not a test-only drawing path. Worth
+     * pairing with --dev: trails are routed with the abilities she HOLDS, so a
+     * fresh player sees several of them stop dead at a gate.
+     *
+     * AFTER --standon, which has a `map` case of its own that stands her where
+     * the fragment lies - this clears map_tile, so running first would leave
+     * that case nothing to find. */
+    if (arg_flag(argc, argv, "--map")) {
+        g->maps |= (Uint8)(1u << (g->area - 1));
+        g->w.map_tile = -1;
+        hud.map_open = 1;
+        hud.bm_dirty = 1;
     }
 #endif
 
@@ -9554,13 +10741,28 @@ int main(int argc, char **argv)
                     break;
                 case SDLK_e:
                 case SDLK_SPACE:
-                    if (try_interact(g, &audio) < 0) {
+                    /* Mote, then map fragment, then portal - the same order
+                     * prompt_draw resolves the first two in, so the keycap
+                     * always names what the key is about to do. */
+                    if (try_interact(g, &audio) < 0 && !try_take_map(g, &audio)) {
 #if WAYFARER_SELFTEST
                         if (try_use_portal(g, sc, &audio) && lit_mode)
                             reveal_all(&g->w);
 #else
                         (void)try_use_portal(g, sc, &audio);
 #endif
+                    }
+                    break;
+                /* M for the map, and only once this area's fragment has been
+                 * found. The refusal is a toast rather than silence: a key that
+                 * does nothing and says nothing is indistinguishable from a key
+                 * that is broken. */
+                case SDLK_m:
+                    if (game_has_map(g)) {
+                        hud.map_open = !hud.map_open;
+                        hud.bm_dirty = 1;
+                    } else {
+                        hud_toast("you have no map of this place");
                     }
                     break;
                 case SDLK_F5:
@@ -9609,6 +10811,8 @@ int main(int argc, char **argv)
                         prev_px = g->p.x;
                         prev_py = g->p.y;
                         hud.mm_dirty = 1;
+                        hud.map_open = 0;
+                        hud.bm_dirty = 1;
                         hud.win_shown = area_complete(g);
                         /* The music restarts with the world, resumed at the
                          * loaded counts and biome rather than back at silence
@@ -9662,6 +10866,14 @@ int main(int argc, char **argv)
              * rate limit and the real move_axis. */
             if (lean_x || lean_y) { mx = (float)lean_x; my = (float)lean_y; }
 #endif
+            /* The map covers the world, so walking underneath it - into a pond,
+             * into a refusal toast she cannot see - is input she did not mean
+             * to give. Her INTENT is held; the simulation is not paused, so
+             * fog, restoration easing and toasts all keep running underneath.
+             * Placed after the --lean injection so it holds against that too,
+             * which is what lets a screenshot of the map screen be taken with
+             * a direction held down. */
+            if (hud.map_open) { mx = 0.0f; my = 0.0f; }
             len = SDL_sqrtf(mx * mx + my * my);
             int face;
 
@@ -9788,13 +11000,25 @@ int main(int argc, char **argv)
                  * mote it points at or by a trunk between them - it is UI, and
                  * the one thing on screen that must not be occluded. Before the
                  * HUD, which owns the frame's edges and outranks it. */
-                prompt_draw(draw, &g->w, g->ents, g->p.x, g->p.y,
-                            cam_x, cam_y, clock);
                 /* Drawn against `draw`, whose dimensions are read from the
                  * surface rather than LOGICAL_*: with no backbuffer we render at
                  * native resolution, and a HUD placed by LOGICAL_* would land
-                 * off screen. */
-                hud_draw(draw, g);
+                 * off screen.
+                 *
+                 * The map screen is opaque and takes the whole surface, so it
+                 * REPLACES the prompt and the HUD rather than covering them -
+                 * drawing either underneath would be work nobody sees. The
+                 * has-map test is belt and braces: map_open can only be set
+                 * through a key that already checked it, and every path that
+                 * changes area clears it, but a map screen for an area whose
+                 * map was never found is the one state this must not reach. */
+                if (hud.map_open && game_has_map(g)) {
+                    bigmap_draw(draw, g, sc);
+                } else {
+                    prompt_draw(draw, &g->w, g->ents, g->p.x, g->p.y,
+                                cam_x, cam_y, clock);
+                    hud_draw(draw, g);
+                }
             }
         }
         present(win, fb, draw == back ? back : NULL);
@@ -9853,6 +11077,7 @@ int main(int argc, char **argv)
     SDL_free(dl);
     SDL_free(sc);
     if (hud.mm) SDL_FreeSurface(hud.mm);
+    if (hud.bm) SDL_FreeSurface(hud.bm);
     if (fogpal) SDL_free(fogpal);
     if (back) SDL_FreeSurface(back);
     if (back_px) SDL_free(back_px);

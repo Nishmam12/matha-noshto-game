@@ -16,6 +16,7 @@ build/
 # generates it was not, leaving the art pipeline one-way on a fresh clone.
 /tools/*
 !/tools/*.ps1
+!/tools/*.py
 w64devkit/
 SDL2*/
 sdl2-src/

@@ -5,6 +5,7 @@
 - Build Self-Test: `powershell -ExecutionPolicy Bypass -File .\build.ps1 -SelfTest`
 - Run All Self-Tests: `powershell -ExecutionPolicy Bypass -File .\tools\run-tests.ps1`
 - Run Single Test: `.\build\wayfarer-selftest.exe --<test-name> [--seeds N] [--seed N]`
+- Look at the map screen: `--map` (grant + open it), `--standon map` (stand on the fragment)
 - Re-bake art: `powershell -File tools\bake.ps1` — only when `assets\` changes
 
 ## Core Invariants & Rules
@@ -24,7 +25,13 @@
   `MessageBoxA` fallback — SDL's own box returns -1 showing nothing when *video* is what failed.
 - Multi-byte persistence stays hand-packed little-endian. No struct writes to disk.
 - Restoration state is one `Uint32` bitmask, so total collectibles across **all areas** is ≤ 32.
-  Area 1 owns bits 0–9.
+  Area 1 owns bits 0–9. That ceiling is why the **map fragment is not an eleventh entity**: three
+  areas already claim thirty bits. It lives in `Game.maps` (three bits, one per area) and in
+  `World.map_tile`, which is `-1` once taken — so "is it still lying there" has exactly one home,
+  and a load replays finding it as the delta of clearing that field.
+- The map screen's trails are routed by `bfs_gated`, which asks `tile_blocked` — the same function
+  that stops her. A trail must never be drawn through a gate she has no ability for; something
+  behind one gets **no trail**, and the legend says so.
 
 ## Audio
 - The callback is a **hard real-time deadline** (21.3 ms at 48 kHz / 1024 frames). Inside
@@ -46,6 +53,9 @@
   bit-for-bit unchanged, and `--save-test` asserts exactly that for every control.
 - Use `!(x >= 0)` rather than `(x < 0)` on floats from disk — it also rejects NaN.
 - Byte 20 (abilities) is redundant with the restored mask, deliberately: it is a checksum on it.
+- Byte 21 is the map-fragment mask (three bits) as of `SAVE_VERSION` 2; bytes 22–23 are still
+  reserved and must be zero. Like the restored mask, it cannot carry bits for an area past the one
+  the file says she is in.
 
 ## Art pipeline
 - `src/art_data.h` is **generated** by `tools/bake.ps1` and committed. Never edit by hand.
