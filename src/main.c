@@ -748,31 +748,143 @@ typedef enum { W_SAW, W_SQUARE, W_SINE, W_NOISE } Wave;
 #define NUM_LAYERS 5
 enum { LAYER_BASE = 0, LAYER_STRINGS, LAYER_PAD, LAYER_BELLS, LAYER_VOICE };
 
-/* Ambient C minor, 16 steps of 0.5 s = an 8 s loop over Cm-Ab-Eb-Bb
- * (i-VI-III-VII). 0.0f is a rest; legato layers hold the last note through it,
- * plucked layers let it ring out. */
-#define SYNTH_STEPS  16
+/* 0.0f is a rest; legato layers hold the last note through it, plucked layers
+ * let it ring out. Every table below writes a note only where it CHANGES, so a
+ * held note is a run of zeros and the tables read as a score rather than as a
+ * sampled signal. */
+#define SYNTH_STEPS  16      /* Underworld and Lumiara: 16 x 0.5 s = an 8 s loop */
 #define SYNTH_STEP_S 0.5f
 
-static const float SYNTH_BASE[1] = { 65.41f };   /* C2 drone */
+/* ---- Fantasy Forest: "8bit-Scene - Do You Remember Me" -------------------
+ *
+ * TRANSCRIBED, not sampled. The source is a 96 s 48 kHz stereo WAV; at 4 bytes
+ * a frame that is 18 MB against a 1.44 MB budget, and everything that fits -
+ * 8 kHz, 4-bit ADPCM - throws away every harmonic above 4 kHz and the whole
+ * layer-unlock design with it. So the track was ANALYSED and re-authored into
+ * the five layers this engine already had, which costs ~2.5 KB of tables and
+ * keeps both.
+ *
+ * What the analysis found (FFT peak-tracking per eighth-note, band-separated,
+ * over the first 16 bars - tools are in the commit message, not the repo):
+ *
+ *   tempo   160 BPM, so an eighth note is 0.1875 s and a bar is 1.5 s
+ *   key     Ab major - Ab Bb C Db Eb F G, and every note below is in it
+ *   form    a 16-bar loop, 4 bars per chord: Bbm - Ab - Bbm - Cm  (ii-I-ii-iii)
+ *   loop    128 eighths = 24.0 s, which is 96 / 4 - the source is four of these
+ *
+ * and the five bands map onto the five layers exactly as they stood:
+ *
+ *   BASE     60-190 Hz   the bass line, moving Bb2 - Ab2 - Bb2 - C3/G2
+ *   STRINGS  190-400 Hz  the accompaniment, arpeggiating each chord's tones
+ *   PAD      -           one sustained root per 4-bar chord (authored from the
+ *                        bass, not extracted: the source's pad is masked by the
+ *                        arpeggio and a peak tracker only ever found the latter)
+ *   BELLS    800-1700 Hz the high sparkle, and SPARSE on purpose - the source
+ *                        only plays it on about 40% of steps, and a pluck on
+ *                        every eighth for 24 s is a rattle, not a shimmer
+ *   VOICE    400-800 Hz  the lead melody
+ *
+ * Detections outside the key were rejected rather than transcribed: at these
+ * amplitudes a peak tracker picks up intermodulation between the square-wave
+ * layers, and a B natural in Ab major is that and not a note anybody played.
+ *
+ * HOW IT SOUNDS against the source is UNVERIFIED, per this file's convention
+ * for anything only a real ear can settle. What is verified is structural and
+ * checked by --audio-test: the pitches below, the 24.0 s loop, that every layer
+ * re-articulates at the loop point, that the mix still never reaches the clamp,
+ * and that the callback still makes its deadline at four times the step rate. */
+#define FOREST_STEPS  128
+#define FOREST_STEP_S 0.1875f    /* an eighth note at 160 BPM */
 
-static const float SYNTH_STRINGS[SYNTH_STEPS] = {
-    130.81f, 311.13f, 196.00f, 261.63f,   /* Cm: C3, Eb4, G3, C4   */
-    103.83f, 261.63f, 155.56f, 207.65f,   /* Ab: Ab2, C4, Eb3, Ab3 */
-    155.56f, 392.00f, 233.08f, 311.13f,   /* Eb: Eb3, G4, Bb3, Eb4 */
-    116.54f, 293.66f, 349.23f, 233.08f    /* Bb: Bb2, D4, F4, Bb3  */
+static const float SYNTH_BASE[FOREST_STEPS] = {   /* bass line */
+     116.54f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  0 Bb2                              */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  1                                  */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  2                                  */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  3                                  */
+     103.83f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  4 Ab2                              */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  5                                  */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  6                                  */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,   98.00f, /*  7                          G2 fill */
+     116.54f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  8 Bb2                              */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  9                                  */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 10                                  */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 11                                  */
+     130.81f,    0.0f,    0.0f,    0.0f,   98.00f,    0.0f,    0.0f,    0.0f, /* 12 C3          G2                   */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 13                                  */
+     130.81f,    0.0f,    0.0f,    0.0f,    0.0f,   98.00f,    0.0f,    0.0f, /* 14 C3               G2              */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f  /* 15                                  */
 };
-static const float SYNTH_PAD[SYNTH_STEPS] = {
-    130.81f, 0.0f, 0.0f, 0.0f,  103.83f, 0.0f, 0.0f, 0.0f,
-    155.56f, 0.0f, 0.0f, 0.0f,  116.54f, 0.0f, 0.0f, 0.0f
+static const float SYNTH_STRINGS[FOREST_STEPS] = {   /* chord-tone arpeggio */
+     233.08f,  349.23f,    0.0f,    0.0f,    0.0f,    0.0f,  233.08f,    0.0f, /*  0 Bb3 F4          Bb3      */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  1                          */
+        0.0f,    0.0f,  349.23f,    0.0f,    0.0f,    0.0f,    0.0f,  233.08f, /*  2      F4          Bb3     */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  3                          */
+     207.65f,    0.0f,    0.0f,    0.0f,    0.0f,  311.13f,    0.0f,    0.0f, /*  4 Ab3       Eb4            */
+     207.65f,    0.0f,  261.63f,    0.0f,  207.65f,    0.0f,    0.0f,    0.0f, /*  5 Ab3 C4    Ab3            */
+        0.0f,    0.0f,  311.13f,    0.0f,  207.65f,    0.0f,    0.0f,    0.0f, /*  6      Eb4  Ab3            */
+        0.0f,    0.0f,    0.0f,    0.0f,  277.18f,    0.0f,    0.0f,    0.0f, /*  7           Db4            */
+        0.0f,    0.0f,  349.23f,    0.0f,    0.0f,    0.0f,    0.0f,  233.08f, /*  8      F4          Bb3     */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  9                          */
+        0.0f,    0.0f,  349.23f,    0.0f,    0.0f,    0.0f,  233.08f,    0.0f, /* 10      F4       Bb3        */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 11                          */
+     261.63f,    0.0f,    0.0f,    0.0f,  392.00f,    0.0f,    0.0f,    0.0f, /* 12 C4        G4             */
+        0.0f,    0.0f,  311.13f,    0.0f,    0.0f,  261.63f,    0.0f,    0.0f, /* 13      Eb4     C4          */
+        0.0f,    0.0f,  311.13f,    0.0f,  392.00f,    0.0f,    0.0f,    0.0f, /* 14      Eb4  G4             */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f  /* 15                          */
 };
-static const float SYNTH_BELLS[SYNTH_STEPS] = {
-    0.0f, 0.0f, 523.25f, 0.0f,  0.0f, 622.25f, 0.0f, 0.0f,
-    0.0f, 0.0f, 783.99f, 0.0f,  0.0f, 932.33f, 0.0f, 0.0f
+static const float SYNTH_PAD[FOREST_STEPS] = {   /* one sustained root per chord */
+     233.08f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  0 Bb3 - Bbm */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  1 */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  2 */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  3 */
+     207.65f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  4 Ab3 - Ab  */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  5 */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  6 */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  7 */
+     233.08f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  8 Bb3 - Bbm */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  9 */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 10 */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 11 */
+     261.63f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 12 C4  - Cm  */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 13 */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 14 */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f  /* 15 */
 };
-static const float SYNTH_VOICE[SYNTH_STEPS] = {
-    261.63f, 0.0f, 311.13f, 0.0f,  392.00f, 349.23f, 311.13f, 293.66f,
-    261.63f, 0.0f, 311.13f, 0.0f,  392.00f, 0.0f, 349.23f, 0.0f
+static const float SYNTH_BELLS[FOREST_STEPS] = {   /* the high sparkle - sparse */
+     932.33f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  0 Bb5                  */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  1                      */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  2                      */
+        0.0f,    0.0f,    0.0f,    0.0f, 1396.91f,    0.0f,    0.0f,    0.0f, /*  3         F6           */
+    1244.51f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,  830.61f, /*  4 Eb6              Ab5 */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,  932.33f, /*  5                  Bb5 */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  6                      */
+        0.0f,    0.0f,    0.0f,    0.0f,  830.61f,    0.0f,    0.0f,    0.0f, /*  7         Ab5          */
+        0.0f,    0.0f, 1396.91f,  932.33f,    0.0f,    0.0f,    0.0f,    0.0f, /*  8   F6 Bb5             */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  9                      */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 10                      */
+        0.0f,    0.0f,    0.0f,    0.0f, 1396.91f,    0.0f,    0.0f,    0.0f, /* 11         F6           */
+    1567.98f, 1046.50f,    0.0f,    0.0f,    0.0f,    0.0f,  830.61f,    0.0f, /* 12 G6 C6        Ab5     */
+    1567.98f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, 1396.91f,    0.0f, /* 13 G6           F6      */
+        0.0f,    0.0f, 1244.51f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 14      Eb6             */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f  /* 15                      */
+};
+static const float SYNTH_VOICE[FOREST_STEPS] = {   /* the lead melody */
+     466.16f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,  523.25f,    0.0f, /*  0 Bb4          C5      */
+     554.37f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  1 Db5                  */
+     466.16f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,  523.25f,    0.0f, /*  2 Bb4          C5      */
+     554.37f,    0.0f,    0.0f,    0.0f,  698.46f,    0.0f,    0.0f,    0.0f, /*  3 Db5      F5          */
+     415.30f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,  554.37f,    0.0f, /*  4 Ab4          Db5     */
+     523.25f,    0.0f,    0.0f,    0.0f,    0.0f,  415.30f,  466.16f,    0.0f, /*  5 C5       Ab4 Bb4     */
+     415.30f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  6 Ab4                  */
+        0.0f,  523.25f,  783.99f,    0.0f,  554.37f,    0.0f,  523.25f,    0.0f, /*  7   C5 G5  Db5 C5      */
+     466.16f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,  523.25f,    0.0f, /*  8 Bb4          C5      */
+     554.37f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /*  9 Db5                  */
+     466.16f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,  523.25f,    0.0f, /* 10 Bb4          C5      */
+     554.37f,    0.0f,    0.0f,    0.0f,  466.16f,    0.0f,    0.0f,    0.0f, /* 11 Db5      Bb4         */
+     523.25f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 12 C5                   */
+     783.99f,    0.0f,    0.0f,    0.0f,  523.25f,    0.0f,  698.46f,    0.0f, /* 13 G5       C5  F5      */
+     523.25f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f, /* 14 C5                   */
+        0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f,    0.0f  /* 15                      */
 };
 
 /* Underworld: the drone drops to A1 (below Forest's C2) and the progression is
@@ -844,14 +956,17 @@ typedef struct {
 } LayerCfg;
 
 /* Indexed [BIOME_*][LAYER_*]. Wave/amp/attack/decay/cutoff stay identical
- * across biomes - only pitch content changes; see SYNTH_*_UW above. */
+ * across biomes - only pitch content and pattern length change; see
+ * SYNTH_*_UW above and the Forest tables. Holding the five amplitudes fixed is
+ * what keeps MIX_GAIN's headroom argument true across a re-scored biome: the
+ * worst case is still 0.95 before gain, so the clamp still cannot engage. */
 static const LayerCfg LAYER_CFG_TABLE[BIOME_COUNT][NUM_LAYERS] = {
     {
-        { W_SAW,  SYNTH_BASE,    1,  0.30f, 0.50f, 0.0f, 0.12f },
-        { W_SAW,  SYNTH_STRINGS, 16, 0.16f, 0.33f, 0.0f, 0.20f },
-        { W_SINE, SYNTH_PAD,     16, 0.13f, 0.20f, 0.0f, 0.30f },
-        { W_SINE, SYNTH_BELLS,   16, 0.16f, 0.0f,  1.5f, 0.60f },
-        { W_SINE, SYNTH_VOICE,   16, 0.20f, 1.00f, 0.0f, 0.45f }
+        { W_SAW,  SYNTH_BASE,    FOREST_STEPS, 0.30f, 0.50f, 0.0f, 0.12f },
+        { W_SAW,  SYNTH_STRINGS, FOREST_STEPS, 0.16f, 0.33f, 0.0f, 0.20f },
+        { W_SINE, SYNTH_PAD,     FOREST_STEPS, 0.13f, 0.20f, 0.0f, 0.30f },
+        { W_SINE, SYNTH_BELLS,   FOREST_STEPS, 0.16f, 0.0f,  1.5f, 0.60f },
+        { W_SINE, SYNTH_VOICE,   FOREST_STEPS, 0.20f, 1.00f, 0.0f, 0.45f }
     },
     {
         { W_SAW,  SYNTH_BASE_UW,    1,  0.30f, 0.50f, 0.0f, 0.12f },
@@ -867,6 +982,22 @@ static const LayerCfg LAYER_CFG_TABLE[BIOME_COUNT][NUM_LAYERS] = {
         { W_SINE, SYNTH_BELLS_LUM,   16, 0.16f, 0.0f,  1.5f, 0.60f },
         { W_SINE, SYNTH_VOICE_LUM,   16, 0.20f, 1.00f, 0.0f, 0.45f }
     }
+};
+
+/* The step CLOCK, per biome, because the Forest is now scored at its source
+ * track's tempo and the other two are not. Two parallel tables rather than one
+ * more field on LayerCfg: the clock is a property of the biome's TRACK, not of
+ * any one layer, and putting it on LayerCfg would let five layers of one biome
+ * disagree about what a step is.
+ *
+ * Indexed by Synth.area, which every caller sets from a BIOME_* constant
+ * (audio_request_reset's four call sites are the only writers) - so it is in
+ * range by construction, the same way LAYER_CFG_TABLE above already assumes. */
+static const int   SYNTH_LOOP_AT[BIOME_COUNT]   = {
+    FOREST_STEPS, SYNTH_STEPS, SYNTH_STEPS
+};
+static const float SYNTH_STEP_S_AT[BIOME_COUNT] = {
+    FOREST_STEP_S, SYNTH_STEP_S, SYNTH_STEP_S
 };
 
 /* Which fragment count unlocks each layer. Spread across FRAGMENT_COUNT rather
@@ -1045,7 +1176,9 @@ static float synth_step(Audio *a)
     Synth *s = &a->synth;
     float mix = 0.0f;
     int li;
-    int cur_step = (int)((double)s->sample / ((double)a->rate * SYNTH_STEP_S)) % SYNTH_STEPS;
+    int cur_step = (int)((double)s->sample /
+                         ((double)a->rate * SYNTH_STEP_S_AT[s->area]))
+                   % SYNTH_LOOP_AT[s->area];
 
     s->sample++;
 
@@ -1701,6 +1834,70 @@ static Uint8 gate_refusal(const World *w, Uint8 abilities, float cx, float cy)
             missing |= (Uint8)(terrain_requires[w->regions[reg].terrain] & ~abilities);
         }
     return missing;
+}
+
+/* Did a HARD WALL refuse this position, and is it one the Fantasy Forest has a
+ * sentence for?
+ *
+ * gate_refusal above answers for the LOCKS - a region tagged TERRAIN_WATER she
+ * cannot wade yet. It deliberately returns 0 for anything solid, because a
+ * boulder is scenery and no ability will ever move it. That left the two walls
+ * the player meets most often completely mute: a pond, which world_gen makes
+ * solid outright (GT_WATER, never a region at all), and the map's border ring.
+ * Both stop her dead against something she can plainly see, and the game said
+ * nothing - the same complaint that produced gate_refusal, one layer down.
+ *
+ * Only those two. An ordinary rock outcrop stays silent on purpose: it is the
+ * common case, it is unmistakably a rock, and reporting it would fire on every
+ * trunk-lined path in the area.
+ *
+ * FOREST ONLY, and asked of w->biome rather than Game.area so this stays a
+ * property of the world the way world_border and portal drawing already are.
+ * The Underworld and Lumiara have their own materials and their own vocabulary;
+ * "the water is too deep" is a sentence about a forest pond.
+ *
+ * Pure feedback, exactly like gate_refusal: it reads solid[][] and terr[][] and
+ * writes nothing, so THE invariant at the top of this section is untouched and
+ * no reachability proof has to be re-argued.
+ *
+ * Mutually exclusive with gate_refusal BY CONSTRUCTION, not by convention: that
+ * one returns early when player_blocked(ABIL_ALL) is true, this one returns
+ * early when it is false. Exactly one of them can speak for a given position,
+ * so the two can never double-report - and --move-test asserts it. */
+static Uint8 wall_refusal(const World *w, float cx, float cy)
+{
+    int x0, y0, x1, y1, tx, ty;
+    Uint8 hit = 0;
+
+    if (w->biome != BIOME_FOREST)             return 0;
+    if (!player_blocked(w, ABIL_ALL, cx, cy)) return 0;   /* open, or a gate */
+
+    foot_box(cx, cy, &x0, &y0, &x1, &y1);
+    for (ty = y0; ty <= y1; ty++)
+        for (tx = x0; tx <= x1; tx++) {
+            if (!solid_at(w, tx, ty)) continue;
+            /* Off-grid counts as the edge of the world. The border ring makes
+             * that unreachable in a generated world, but foot_box is arithmetic
+             * on a float and this is the one branch that would index terr[][]
+             * out of bounds if it ever were reachable. */
+            if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H ||
+                world_border(tx, ty))
+                hit |= ABIL_CLIMB;
+            else if (w->terr[ty][tx] == GT_WATER)
+                hit |= ABIL_WADE;
+        }
+    return hit;
+}
+
+/* The one question the movement code asks: what, if anything, refused this
+ * position, expressed as the ability that would have opened it. A gate first,
+ * because a gate is a lock she can still open and is the more useful thing to
+ * be told; a wall only when there is no gate to report. One function so the
+ * self-test drives exactly what the game runs. */
+static Uint8 refusal_at(const World *w, Uint8 abilities, float cx, float cy)
+{
+    Uint8 miss = gate_refusal(w, abilities, cx, cy);
+    return miss ? miss : wall_refusal(w, cx, cy);
 }
 
 /* Swept AABB in sub-pixel steps, one axis at a time.
@@ -3306,6 +3503,23 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, float density, U
 
 enum { DI_SPRITE = 0, DI_FRAGMENT, DI_SOUL };
 
+/* How far entity `i`'s mote is lifted off its tile this instant, in px. A slow
+ * bob, so a mote reads as alive rather than as scenery; the per-entity phase
+ * offset keeps two motes in view from pulsing in lockstep.
+ *
+ * A function rather than the expression inline because the E prompt hangs off
+ * the same point (see prompt_draw) and has to ride the SAME bob - two copies of
+ * this would be a keycap that drifts against the mote it is pointing at, at a
+ * beat frequency slow enough to look like a rendering bug. */
+static int entity_bob(int i, float clock)
+{
+    return (int)(SDL_sinf(clock * 2.4f + (float)i * 0.7f) * 2.0f + 2.0f);
+}
+
+/* The mote's own size in px, and the one place that answers it: props_draw
+ * draws the halo from it and the prompt clears the halo using it. */
+static int entity_mote_px(int is_soul) { return is_soul ? 7 : 5; }
+
 typedef struct {
     int feet_y;     /* sort key: ground-contact y, in screen space */
     int x, y;       /* where to place the anchor */
@@ -3740,9 +3954,7 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
             if (ex < tx0 || ex >= tx1 || ey < ty0 || ey >= ty1) continue;
             if (tile_level(w, ex, ey) < 3) continue;
             sx = ex * TILE + TILE / 2 - cam_x;
-            sy = ey * TILE + TILE - cam_y;
-            /* A slow bob, so a mote reads as alive rather than as scenery. */
-            sy -= (int)(SDL_sinf(clock * 2.4f + (float)i * 0.7f) * 2.0f + 2.0f);
+            sy = ey * TILE + TILE - cam_y - entity_bob(i, clock);
             draw_list_push_marker(dl, ents[i].is_soul ? DI_SOUL : DI_FRAGMENT, sx, sy,
                                   FOG_LEVELS - 1);
         }
@@ -3813,7 +4025,7 @@ static void props_draw(SDL_Surface *fb, const DrawList *dl)
          * find, and the fog is already telling you about the terrain. */
         {
             int soul = (it->kind == DI_SOUL);
-            int s = soul ? 7 : 5;
+            int s = entity_mote_px(soul);
             Uint32 core = soul ? SDL_MapRGB(fb->format, 0xf3, 0xda, 0xda)
                                : SDL_MapRGB(fb->format, 0xf3, 0xda, 0xb0);
             Uint32 halo = soul ? SDL_MapRGB(fb->format, 0x3e, 0x7d, 0x8d)
@@ -3822,6 +4034,96 @@ static void props_draw(SDL_Surface *fb, const DrawList *dl)
             fill_rect(fb, it->x - s / 2, it->y - s, s, s, core);
         }
     }
+}
+
+/* ---- The interact prompt ------------------------------------------------
+ *
+ * Brought back from the isometric build, where a bobbing E keycap over the
+ * thing E would act on was the only affordance the game had. This build lost it
+ * in the port and never replaced it: a mote in reach and a mote across the
+ * clearing look identical, so the interact key is something you learn by
+ * mashing it.
+ *
+ * PROCEDURAL, not baked, for the same reason as before: it costs no art data,
+ * retunes in one rebuild, and a real authored keycap later replaces the body of
+ * this one function. Deliberately not the bitmap font either - draw_text is a
+ * shipping function here, but a glyph drawn at FONT_SCALE 1 is 5x7 px and would
+ * read as a smudge on a 16 px tile. The E is four rectangles, sized so its
+ * proportions match the font's at roughly twice the weight.
+ *
+ * The cap is 11 px on a 16 px tile: measured against the mote it points at
+ * (5 px for a fragment, 7 for a Soul) and the player sprite (13x25). Larger and
+ * it hides the pickup; smaller and it is a speck. */
+#define PROMPT_W    11
+#define PROMPT_BOB   2       /* peak vertical travel, px */
+#define PROMPT_HZ    1.6f    /* bobs per second */
+
+/* The bob as a PURE function of time, with the clamp INSIDE it, so "the prompt
+ * never leaves its anchor by more than PROMPT_BOB" is a property of the
+ * function rather than of every caller remembering - and --hud-test can sweep
+ * it directly instead of inferring it from pixels. */
+static int prompt_bob(float t)
+{
+    int o = (int)(SDL_sinf(t * PROMPT_HZ * (float)TWO_PI) * (float)PROMPT_BOB);
+
+    if (o >  PROMPT_BOB) o =  PROMPT_BOB;
+    if (o < -PROMPT_BOB) o = -PROMPT_BOB;
+    return o;
+}
+
+/* A keycap whose BOTTOM edge sits at (cx, by), bobbing on `t` - the same
+ * "centre, feet" anchoring every other draw routine here takes, so callers pass
+ * a point above the thing being pointed at and the cap hangs off it.
+ *
+ * Never fogged, unlike everything else on screen. A prompt is UI: it reports
+ * what the interact key will do, and dimming it would hide the affordance
+ * exactly where she is standing and looking. */
+static void draw_prompt(SDL_Surface *fb, int cx, int by, float t)
+{
+    int x0 = cx - PROMPT_W / 2;
+    int y0 = by + prompt_bob(t) - PROMPT_W;
+    Uint32 edge  = SDL_MapRGB(fb->format, 0xb0, 0xa0, 0xe8);
+    Uint32 fill  = SDL_MapRGB(fb->format, 0x24, 0x1e, 0x46);
+    Uint32 glyph = SDL_MapRGB(fb->format, 0xff, 0xf4, 0xd8);
+    int gx = cx - 2, gy = y0 + 2;
+
+    fill_rect(fb, x0, y0, PROMPT_W, PROMPT_W, edge);            /* border plate */
+    fill_rect(fb, x0 + 1, y0 + 1, PROMPT_W - 2, PROMPT_W - 2, fill);
+    fill_rect(fb, gx, gy,     1, 7, glyph);                     /* spine  */
+    fill_rect(fb, gx, gy,     5, 1, glyph);                     /* top    */
+    fill_rect(fb, gx, gy + 3, 4, 1, glyph);                     /* middle */
+    fill_rect(fb, gx, gy + 6, 5, 1, glyph);                     /* bottom */
+}
+
+/* The prompt over the ONE entity E would act on, or nothing.
+ *
+ * Driven by entity_in_reach at the player's SIMULATION position - the same call
+ * on the same floats try_interact makes - rather than at the interpolated
+ * render position. That is the load-bearing detail: a cue drawn from a
+ * different position than the key reads would appear a frame early or late at
+ * the edge of the radius, promising an interact that does nothing. --hud-test
+ * asserts the two agree.
+ *
+ * The fog condition mirrors props_build's: where the mote is too deep in fog to
+ * be drawn, the prompt is not drawn either. A keycap hanging over blank forest
+ * is worse than no keycap. */
+static void prompt_draw(SDL_Surface *fb, const World *w, const Entity *ents,
+                        float px, float py, int cam_x, int cam_y, float clock)
+{
+    int i = entity_in_reach(w, ents, px, py);
+    int ex, ey, sx, sy;
+
+    if (i < 0)
+        return;
+    ex = ents[i].tile % WORLD_W;
+    ey = ents[i].tile / WORLD_W;
+    if (tile_level(w, ex, ey) < 3)
+        return;
+    sx = ex * TILE + TILE / 2 - cam_x;
+    sy = ey * TILE + TILE - cam_y - entity_bob(i, clock);
+    /* Clear of the mote's halo (one px beyond the core on every side) plus two,
+     * so the cap floats above it rather than resting on it. */
+    draw_prompt(fb, sx, sy - entity_mote_px(ents[i].is_soul) - 3, clock);
 }
 
 /* ---- Bitmap font --------------------------------------------------------
@@ -4644,17 +4946,30 @@ static int try_use_portal(Game *g, Scratch *sc, Audio *a)
     return 1;
 }
 
-/* Say which ability the gate wanted, once per bump rather than once per tick -
- * see gate_refusal. Ordered wade, climb, kindle so a tile gated on two names
- * the one she is likelier to find first. */
+/* What a refusal says, as a pure function of the ability bits, so the sentence
+ * and the condition that produces it cannot drift apart - --move-test asserts
+ * the mapping directly rather than restating it. Ordered wade, climb, kindle so
+ * a tile refused on two counts names the one she is likelier to open first, and
+ * so a pond that also touches the map edge reads as water rather than as cliff.
+ * NULL for "nothing to say", which is the only case that draws no toast. */
+static const char *refusal_text(Uint8 missing)
+{
+    if (!missing)                  return NULL;
+    if (missing & ABIL_WADE)       return "the water is too deep";
+    if (missing & ABIL_CLIMB)      return "too steep to climb";
+    return "too dark to enter";
+}
+
+/* Say it, once per bump rather than once per tick - see the call site's
+ * rate limit. */
 static void gate_report(Uint8 missing, Audio *a)
 {
-    if (!missing)
+    const char *s = refusal_text(missing);
+
+    if (!s)
         return;
     sfx_fire(a, SFX_DENY);
-    if (missing & ABIL_WADE)        hud_toast("the water is too deep");
-    else if (missing & ABIL_CLIMB)  hud_toast("too steep to climb");
-    else                            hud_toast("too dark to enter");
+    hud_toast(s);
 }
 
 #if WAYFARER_SELFTEST
@@ -5200,6 +5515,11 @@ static int move_selftest(int seeds, Uint64 base)
     Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
     Entity ents[ENTITY_COUNT];
     int fails = 0, s;
+    /* wall_refusal, measured over real generated forests - see the block after
+     * this loop. Counted rather than spot-checked: a check that happened to
+     * find no ponds would pass vacuously. */
+    int wr_water = 0, wr_border = 0, wr_rock_quiet = 0, wr_open_quiet = 0;
+    int wr_water_bad = 0, wr_border_bad = 0, wr_rock_bad = 0, wr_both = 0;
 
     if (!w || !sc) { printf("move    : out of memory\n"); SDL_free(w); SDL_free(sc); return 1; }
 
@@ -5210,6 +5530,41 @@ static int move_selftest(int seeds, Uint64 base)
 
         world_gen(w, sc, ents, seed, BIOME_FOREST);
         if (w->spawn_tile < 0) continue;
+
+        /* Every tile centre in the world, asked what the game would ask when she
+         * steps onto it. The foot box at a tile centre lies wholly inside that
+         * tile (proved above), so each answer is about ONE tile and nothing
+         * else - which is what makes "a pond says water, a boulder says
+         * nothing" a statement the sweep can actually check.
+         *
+         * The mutual-exclusion count is the load-bearing one: gate_refusal and
+         * wall_refusal partition the blocked positions between them, and if
+         * they ever both answered, one bump would fire two toasts. */
+        {
+            int tx, ty;
+            for (ty = 0; ty < WORLD_H; ty++)
+                for (tx = 0; tx < WORLD_W; tx++) {
+                    float cx = (float)tx * TILE + TILE * 0.5f;
+                    float cy = (float)ty * TILE + TILE * 0.5f;
+                    Uint8 gate = gate_refusal(w, ABIL_NONE, cx, cy);
+                    Uint8 wall = wall_refusal(w, cx, cy);
+                    if (gate && wall) wr_both++;
+                    if (!w->solid[ty][tx]) {
+                        /* Open ground: a WALL has nothing to say here whatever
+                         * the gates are doing. */
+                        if (wall) wr_open_quiet--; else wr_open_quiet++;
+                    } else if (world_border(tx, ty)) {
+                        if (wall == ABIL_CLIMB) wr_border++; else wr_border_bad++;
+                    } else if (w->terr[ty][tx] == GT_WATER) {
+                        if (wall == ABIL_WADE) wr_water++; else wr_water_bad++;
+                    } else {
+                        /* An ordinary rock outcrop. Silence is the requirement,
+                         * not an omission: it is the common wall, and a toast
+                         * on every boulder would bury the two that matter. */
+                        if (wall == 0) wr_rock_quiet++; else wr_rock_bad++;
+                    }
+                }
+        }
 
         SDL_zero(a);
         a.x = (float)(w->spawn_tile % WORLD_W) * TILE + TILE * 0.5f;
@@ -5281,6 +5636,118 @@ static int move_selftest(int seeds, Uint64 base)
                 printf("  seed %.0f: ended inside a wall after pushing west\n", (double)seed);
                 fails++;
             }
+        }
+    }
+
+    /* ---- wall_refusal: the two Forest walls that have something to say ----
+     *
+     * A pond and the map's border ring both stop her against something she can
+     * see, and until now both were silent - gate_refusal speaks only for the
+     * ability LOCKS and returns 0 for anything solid. */
+    if (wr_water_bad || wr_border_bad || wr_rock_bad || wr_both || wr_open_quiet < 0) {
+        printf("FAIL  move: wall_refusal wrong on %d water, %d border, %d rock"
+               " tile(s); %d position(s) answered by BOTH gate and wall;"
+               " open-ground tally %d\n",
+               wr_water_bad, wr_border_bad, wr_rock_bad, wr_both, wr_open_quiet);
+        fails++;
+    } else if (wr_water == 0 || wr_border == 0 || wr_rock_quiet == 0) {
+        /* A sweep that met no ponds, no border or no boulders proved nothing
+         * about them. */
+        printf("FAIL  move: wall_refusal never met one of its cases"
+               " (water %d, border %d, rock %d) - the sweep proves nothing\n",
+               wr_water, wr_border, wr_rock_quiet);
+        fails++;
+    } else {
+        printf("move    : wall_refusal says water on %d pond tiles, climb on %d"
+               " border tiles, nothing on %d outcrop tiles; gate and wall never"
+               " both answered\n", wr_water, wr_border, wr_rock_quiet);
+    }
+
+    /* The sentence each refusal produces, asserted against refusal_text rather
+     * than restated - the toast the player reads is the requirement, and it has
+     * to be pinned to the bit that causes it. */
+    {
+        const char *tw = refusal_text(ABIL_WADE);
+        const char *tc = refusal_text(ABIL_CLIMB);
+        if (!tw || SDL_strcmp(tw, "the water is too deep") != 0 ||
+            !tc || SDL_strcmp(tc, "too steep to climb") != 0 ||
+            refusal_text(ABIL_NONE) != NULL) {
+            printf("FAIL  move: refusal wording - wade says \"%s\", climb says"
+                   " \"%s\", nothing says \"%s\"\n",
+                   tw ? tw : "(null)", tc ? tc : "(null)",
+                   refusal_text(ABIL_NONE) ? refusal_text(ABIL_NONE) : "(null)");
+            fails++;
+        } else {
+            printf("move    : wade -> \"%s\", climb -> \"%s\", open -> silence\n", tw, tc);
+        }
+    }
+
+    /* NEGATIVE CONTROLS, on a world built by hand so each case is certain
+     * rather than hoped for: one pond tile, one border tile, one outcrop tile,
+     * one open tile. Two things the checker above cannot see on its own:
+     *
+     *   (a) BIOME. The same pond in the Underworld must say nothing - the
+     *       feature is Forest-only, and a check run only against Forest worlds
+     *       would pass just as happily on an implementation that ignored biome.
+     *   (b) The rock/water distinction is real. If wall_refusal answered from
+     *       `solid` alone it would pass every water and border assertion above
+     *       and fail here, on the boulder. */
+    {
+        static const struct { int tx, ty; Uint8 want; const char *what; } cases[] = {
+            { 64, 64, ABIL_WADE,  "pond"   },
+            {  0, 40, ABIL_CLIMB, "border" },
+            { 30, 30, 0,          "outcrop"},
+            { 50, 50, 0,          "grass"  }
+        };
+        int x, y, k, bad = 0, ctl_biome = 0, ctl_rock = 0;
+
+        SDL_memset(w, 0, sizeof(World));
+        for (y = 0; y < WORLD_H; y++)
+            for (x = 0; x < WORLD_W; x++) {
+                w->terr[y][x] = GT_GRASS;
+                w->region[y][x] = w->litreg[y][x] = REGION_NONE;
+            }
+        for (x = 0; x < WORLD_W; x++) {
+            w->solid[0][x] = w->solid[WORLD_H - 1][x] = 1;
+            w->terr[0][x] = w->terr[WORLD_H - 1][x] = GT_ROCK;
+        }
+        for (y = 0; y < WORLD_H; y++) {
+            w->solid[y][0] = w->solid[y][WORLD_W - 1] = 1;
+            w->terr[y][0] = w->terr[y][WORLD_W - 1] = GT_ROCK;
+        }
+        for (y = 62; y <= 66; y++)                      /* a pond */
+            for (x = 62; x <= 66; x++) { w->terr[y][x] = GT_WATER; w->solid[y][x] = 1; }
+        for (y = 29; y <= 31; y++)                      /* an outcrop */
+            for (x = 29; x <= 31; x++) { w->terr[y][x] = GT_ROCK; w->solid[y][x] = 1; }
+        w->region_count = 0;
+        w->spawn_region = -1;
+        w->biome = BIOME_FOREST;
+
+        for (k = 0; k < (int)(sizeof cases / sizeof cases[0]); k++) {
+            float cx = (float)cases[k].tx * TILE + TILE * 0.5f;
+            float cy = (float)cases[k].ty * TILE + TILE * 0.5f;
+            Uint8 got = refusal_at(w, ABIL_NONE, cx, cy);
+            if (got != cases[k].want) {
+                printf("  wall control: %s tile gave 0x%02X, expected 0x%02X\n",
+                       cases[k].what, got, cases[k].want);
+                bad++;
+            }
+            if (k == 2 && got == 0) ctl_rock = 1;   /* the boulder stayed silent */
+        }
+        w->biome = BIOME_UNDERWORLD;
+        if (wall_refusal(w, 64.0f * TILE + TILE * 0.5f, 64.0f * TILE + TILE * 0.5f) == 0 &&
+            wall_refusal(w, TILE * 0.5f, 40.0f * TILE + TILE * 0.5f) == 0)
+            ctl_biome = 1;
+        w->biome = BIOME_FOREST;
+
+        if (bad || !ctl_biome || !ctl_rock) {
+            printf("FAIL  move: wall control - %d case(s) wrong; biome gate %s;"
+                   " boulder-stays-quiet %s\n", bad,
+                   ctl_biome ? "held" : "LEAKED", ctl_rock ? "held" : "BROKE");
+            fails++;
+        } else {
+            printf("move    : wall controls - pond/border/outcrop/grass all as"
+                   " specified, and the same pond is silent outside the Forest\n");
         }
     }
 
@@ -7598,6 +8065,159 @@ static int hud_selftest(Uint64 base)
         }
     }
 
+    /* ---- The interact prompt ------------------------------------------
+     *
+     * Three properties, and each fails silently on screen:
+     *   (a) the bob stays inside its stated travel and does actually move;
+     *   (b) NOTHING is drawn when nothing is in reach - a stale keycap left
+     *       hanging over empty forest is worse than no keycap at all;
+     *   (c) the cue and the KEY agree everywhere. A prompt driven from a
+     *       different radius, or from the interpolated render position instead
+     *       of the simulation one, promises an interact that does nothing.
+     */
+    {
+        /* (a) The bob. Swept over four full cycles rather than evaluated at a
+         * few points, because the failure mode is a sine that leaves its range
+         * somewhere in the middle of the cycle. */
+        int lo = 1 << 30, hi = -(1 << 30), ctl_out = 0, k;
+        for (k = 0; k < 400; k++) {
+            float t = (float)k * (4.0f / (PROMPT_HZ * 400.0f));
+            int o = prompt_bob(t);
+            int unclamped = (int)(SDL_sinf(t * PROMPT_HZ * (float)TWO_PI) *
+                                  (float)(PROMPT_BOB * 3));
+            if (o < lo) lo = o;
+            if (o > hi) hi = o;
+            /* NEGATIVE CONTROL: a bob three times the stated amplitude must be
+             * caught by the same bound test. Without this, a check that only
+             * ever saw a well-behaved function proves nothing about the bound. */
+            if (unclamped > PROMPT_BOB || unclamped < -PROMPT_BOB) ctl_out++;
+        }
+        if (lo < -PROMPT_BOB || hi > PROMPT_BOB) {
+            printf("FAIL  hud: prompt bob ranges [%d, %d], outside +/-%d\n",
+                   lo, hi, PROMPT_BOB);
+            fails++;
+        } else if (lo == hi) {
+            printf("FAIL  hud: prompt bob never moves - it is constant %d\n", lo);
+            fails++;
+        } else if (!ctl_out) {
+            printf("FAIL  hud: prompt bob negative control - an over-amplitude bob"
+                   " was not rejected, so the bound check proves nothing\n");
+            fails++;
+        } else {
+            printf("hud     : prompt bob ranges [%d, %d] within +/-%d and does move;"
+                   " control rejected %d/400 over-amplitude samples\n",
+                   lo, hi, PROMPT_BOB, ctl_out);
+        }
+    }
+    {
+        /* (b) and (c), driven against a real generated world. The first placed
+         * entity is used as the subject; its tile is force-revealed so the fog
+         * condition cannot make the whole block vacuous. */
+        int subj = -1, cam_x, cam_y, ex, ey;
+        for (i = 0; i < ENTITY_COUNT; i++)
+            if (g->ents[i].tile >= 0) { subj = i; break; }
+        for (i = 0; i < ENTITY_COUNT; i++) g->ents[i].restored = 0;
+
+        if (subj < 0) {
+            printf("FAIL  hud: seed %.0f placed no entities - the prompt checks"
+                   " cannot run\n", (double)base);
+            fails++;
+        } else {
+            int near_px, far_px, glyph_px, restored_px, disagree = 0, ctl_disagree = 0, k;
+            float cx, cy;
+            ex = g->ents[subj].tile % WORLD_W;
+            ey = g->ents[subj].tile / WORLD_W;
+            g->w.reveal[ey][ex] = 255;
+            cx = (float)ex * TILE + TILE * 0.5f;
+            cy = (float)ey * TILE + TILE * 0.5f;
+            cam_x = (int)cx - LOGICAL_W / 2;
+            cam_y = (int)cy - LOGICAL_H / 2;
+
+            SDL_FillRect(fb, NULL, 0);
+            prompt_draw(fb, &g->w, g->ents, cx, cy, cam_x, cam_y, 0.0f);
+            near_px = count_lit(fb, 0, 0, LOGICAL_W, LOGICAL_H);
+
+            /* Well outside INTERACT_RADIUS of everything: half the map away. */
+            SDL_FillRect(fb, NULL, 0);
+            prompt_draw(fb, &g->w, g->ents, cx + WORLD_W * TILE * 0.5f, cy,
+                        cam_x, cam_y, 0.0f);
+            far_px = count_lit(fb, 0, 0, LOGICAL_W, LOGICAL_H);
+
+            /* The glyph, counted by its own colour: a cap drawn as a blank
+             * plate would satisfy "lit something" and say nothing to anyone. */
+            SDL_FillRect(fb, NULL, 0);
+            prompt_draw(fb, &g->w, g->ents, cx, cy, cam_x, cam_y, 0.0f);
+            {
+                Uint32 want = SDL_MapRGB(fb->format, 0xff, 0xf4, 0xd8);
+                int px, py;
+                glyph_px = 0;
+                for (py = 0; py < LOGICAL_H; py++) {
+                    const Uint32 *row = (const Uint32 *)((const Uint8 *)fb->pixels
+                                                         + py * fb->pitch);
+                    for (px = 0; px < LOGICAL_W; px++)
+                        if ((row[px] & 0x00FFFFFFu) == (want & 0x00FFFFFFu)) glyph_px++;
+                }
+            }
+
+            /* A restored entity is scenery. Prompting over it would promise an
+             * interact that does nothing. */
+            g->ents[subj].restored = 1;
+            SDL_FillRect(fb, NULL, 0);
+            prompt_draw(fb, &g->w, g->ents, cx, cy, cam_x, cam_y, 0.0f);
+            restored_px = count_lit(fb, 0, 0, LOGICAL_W, LOGICAL_H);
+            g->ents[subj].restored = 0;
+
+            /* (c) Cue and key agree. Swept radially through the boundary, in
+             * sub-pixel steps, so the exact tile where the two could disagree
+             * is actually visited. */
+            for (k = 0; k < 240; k++) {
+                float d = (float)k * 0.25f;                 /* 0 .. 60 px */
+                float qx = cx + d, qy = cy;
+                int acts = (entity_in_reach(&g->w, g->ents, qx, qy) >= 0);
+                int shown;
+                SDL_FillRect(fb, NULL, 0);
+                prompt_draw(fb, &g->w, g->ents, qx, qy, cam_x, cam_y, 0.0f);
+                shown = count_lit(fb, 0, 0, LOGICAL_W, LOGICAL_H) > 0;
+                if (acts != shown) disagree++;
+                /* NEGATIVE CONTROL: a cue driven at twice the radius must be
+                 * caught disagreeing with the key. Without it, "they agree"
+                 * would pass on an implementation that always drew, or never
+                 * did, at every sampled distance. */
+                if ((d <= INTERACT_RADIUS * 2.0f) != acts) ctl_disagree++;
+            }
+
+            if (far_px != 0) {
+                printf("FAIL  hud: the prompt drew %d px with nothing in reach\n", far_px);
+                fails++;
+            } else if (near_px == 0) {
+                printf("FAIL  hud: the prompt drew nothing standing on an entity\n");
+                fails++;
+            } else if (glyph_px == 0) {
+                printf("FAIL  hud: the prompt drew a blank cap - no E on it\n");
+                fails++;
+            } else if (restored_px != 0) {
+                printf("FAIL  hud: the prompt drew %d px over a RESTORED entity\n",
+                       restored_px);
+                fails++;
+            } else if (disagree) {
+                printf("FAIL  hud: cue and key disagreed at %d of 240 distances\n",
+                       disagree);
+                fails++;
+            } else if (!ctl_disagree) {
+                printf("FAIL  hud: prompt negative control - a double-radius cue"
+                       " agreed everywhere, so the sweep proves nothing\n");
+                fails++;
+            } else {
+                printf("hud     : prompt %d px in reach (%d of them glyph), 0 px out"
+                       " of reach, 0 px over a restored entity\n",
+                       near_px, glyph_px);
+                printf("hud     : cue and key agree at all 240 sampled distances;"
+                       " control caught a double-radius cue at %d of them\n",
+                       ctl_disagree);
+            }
+        }
+    }
+
     /* Every HUD string must fit the 480 px frame. A toast wider than the screen
      * centres to a negative x and is clipped at both ends. */
     {
@@ -8087,6 +8707,45 @@ static int save_selftest(Uint64 base)
  *
  * --layers runs the full five-layer engine so the callback is measured under
  * the load a finished area imposes, not an idle one. */
+
+/* Is this frequency a semitone of Ab major - the Forest score's key?
+ *
+ * Two claims in one, and both matter: that the value is a REAL note rather
+ * than an arbitrary float (a transposition bug, or a mistyped digit, lands
+ * between semitones), and that it is one of the seven the transcription is
+ * allowed to contain. Out-of-key detections were rejected during transcription
+ * as intermodulation between the source's square-wave layers rather than notes
+ * anybody played; this is what holds that line in the committed tables. */
+static int freq_in_key(float hz)
+{
+    /* Ab major as pitch classes from C: C, Db, Eb, F, G, Ab, Bb. */
+    static const int scale[7] = { 0, 1, 3, 5, 7, 8, 10 };
+    double m, frac;
+    int n, pc, k;
+
+    if (!(hz > 0.0f)) return 0;
+    m = 69.0 + 12.0 * (SDL_log((double)hz / 440.0) / SDL_log(2.0));
+    n = (int)(m + 0.5);
+    frac = m - (double)n;
+    if (frac < 0.0) frac = -frac;
+    if (frac > 0.02) return 0;          /* not sitting on a semitone at all */
+    pc = ((n % 12) + 12) % 12;
+    for (k = 0; k < 7; k++)
+        if (scale[k] == pc) return 1;
+    return 0;
+}
+
+/* What step `i` of a table SOUNDS at, expanding the "note on change, 0.0f to
+ * hold" convention the tables are written in. */
+static float pat_held(const float *pat, int n, int i)
+{
+    int k;
+    for (k = i; k >= 0; k--)
+        if (pat[k] > 0.0f) return pat[k];
+    (void)n;
+    return 0.0f;
+}
+
 static int audio_selftest(int argc, char **argv, int ms)
 {
     Audio a;
@@ -8303,6 +8962,164 @@ static int audio_selftest(int argc, char **argv, int ms)
                FRAGMENT_COUNT, (unsigned)prev);
     }
 
+    /* ---- The Fantasy Forest score ---------------------------------------
+     *
+     * The Forest is scored from a supplied track (see the tables). Four things
+     * are checked, none of which needs an ear:
+     *
+     *   1. the loop is the source's own 16 bars at its own tempo;
+     *   2. every layer speaks at the loop point, so loop N sounds like loop 1;
+     *   3. every note in every table is a real semitone of Ab major;
+     *   4. what the SYNTH ACTUALLY EMITS is the melody the table says - measured
+     *      by rendering the voice layer through the real synth_step and counting
+     *      zero crossings, not by re-reading the table.
+     *
+     * How it SOUNDS against the source is not asserted anywhere - that is an
+     * ear's job, and this file records such claims as unverified. */
+    {
+        static const struct { const float *pat; const char *name; } forest[NUM_LAYERS] = {
+            { SYNTH_BASE, "base" }, { SYNTH_STRINGS, "strings" },
+            { SYNTH_PAD, "pad" }, { SYNTH_BELLS, "bells" }, { SYNTH_VOICE, "voice" }
+        };
+        int li, k, off_key = 0, silent_at_loop = 0, ctl_off_key = 0, strikes[NUM_LAYERS];
+        double loop_s = (double)SYNTH_LOOP_AT[BIOME_FOREST] *
+                        (double)SYNTH_STEP_S_AT[BIOME_FOREST];
+        double uw_s   = (double)SYNTH_LOOP_AT[BIOME_UNDERWORLD] *
+                        (double)SYNTH_STEP_S_AT[BIOME_UNDERWORLD];
+
+        /* 1. The loop. 24 s is 16 bars at 160 BPM and divides the source's 96 s
+         *    exactly, so the game's loop point is one of the track's own. The
+         *    Underworld must NOT have been dragged along with it - a single
+         *    global step clock is exactly the mistake this checks for. */
+        if (loop_s < 23.999 || loop_s > 24.001) {
+            printf("FAIL  audio: the Forest loop is %.4f s, not the source's 24 s\n", loop_s);
+            fails++;
+        } else if (uw_s < 7.999 || uw_s > 8.001) {
+            printf("FAIL  audio: re-scoring the Forest changed the Underworld loop"
+                   " to %.4f s (was 8 s)\n", uw_s);
+            fails++;
+        } else {
+            printf("audio   : Forest loop %.2f s (%d x %.4f s = 16 bars at 160 BPM),"
+                   " Underworld still %.2f s\n", loop_s, SYNTH_LOOP_AT[BIOME_FOREST],
+                   (double)SYNTH_STEP_S_AT[BIOME_FOREST], uw_s);
+        }
+
+        /* 2 and 3. */
+        for (li = 0; li < NUM_LAYERS; li++) {
+            strikes[li] = 0;
+            if (!(forest[li].pat[0] > 0.0f)) {
+                printf("  the %s layer is silent at step 0 - it would not"
+                       " re-articulate at the loop point\n", forest[li].name);
+                silent_at_loop++;
+            }
+            for (k = 0; k < FOREST_STEPS; k++) {
+                if (!(forest[li].pat[k] > 0.0f)) continue;
+                strikes[li]++;
+                if (!freq_in_key(forest[li].pat[k])) {
+                    printf("  %s[%d] = %.2f Hz is not a semitone of Ab major\n",
+                           forest[li].name, k, (double)forest[li].pat[k]);
+                    off_key++;
+                }
+            }
+        }
+        /* NEGATIVE CONTROL for 3: notes that are out of key, and a note that is
+         * not a semitone at all, must both be rejected. Without this, "nothing
+         * off key" would pass just as well on a checker that accepted
+         * everything. 440 (A) and 493.88 (B) are the two naturals Ab major does
+         * not contain; 450 sits between semitones. */
+        if (!freq_in_key(440.0f))   ctl_off_key++;
+        if (!freq_in_key(493.88f))  ctl_off_key++;
+        if (!freq_in_key(450.0f))   ctl_off_key++;
+        if (!freq_in_key(466.16f))  ctl_off_key--;   /* Bb4 IS in key */
+
+        if (off_key || silent_at_loop) {
+            printf("FAIL  audio: Forest score - %d off-key note(s), %d layer(s)"
+                   " silent at the loop point\n", off_key, silent_at_loop);
+            fails++;
+        } else if (ctl_off_key != 3) {
+            printf("FAIL  audio: key negative control scored %d/3 - the in-key"
+                   " check cannot reject, so it proves nothing\n", ctl_off_key);
+            fails++;
+        } else {
+            printf("audio   : Forest score - %d/%d/%d/%d/%d notes across"
+                   " base/strings/pad/bells/voice, all in Ab major, all five"
+                   " layers speak at the loop point\n",
+                   strikes[0], strikes[1], strikes[2], strikes[3], strikes[4]);
+        }
+        /* The sparkle is meant to be SPARSE. A pluck on every eighth for 24 s
+         * is a rattle, and the source only plays it on part of the loop. */
+        if (strikes[LAYER_BELLS] * 3 > FOREST_STEPS) {
+            printf("FAIL  audio: the bells layer strikes %d of %d steps - too"
+                   " dense to read as a sparkle\n", strikes[LAYER_BELLS], FOREST_STEPS);
+            fails++;
+        }
+    }
+
+    /* 4. What comes OUT. The voice layer alone, rendered through the real
+     * synth_step at the real rate, its fundamental measured per step by
+     * counting upward zero crossings. A table can say anything; this is what
+     * the speakers would get.
+     *
+     * Two full loops are rendered and only the SECOND is measured, so the
+     * envelope and the one-pole filter are settled - during the first 0.2 s the
+     * attack ramp has the output near zero and there is nothing to count. */
+    {
+        Audio v;
+        int step, pass, bad = 0, ctl_bad = 0;
+        int n = (int)(FOREST_STEP_S * (float)AUDIO_RATE);   /* 9000, exactly */
+        double win_s;
+
+        SDL_zero(v);
+        v.rate = AUDIO_RATE;
+        v.synth.area = BIOME_FOREST;
+        v.synth.layers = 1 << LAYER_VOICE;
+        win_s = (double)(n - n / 5) / (double)AUDIO_RATE;
+
+        for (pass = 0; pass < 2; pass++)
+            for (step = 0; step < FOREST_STEPS; step++) {
+                float prev = 0.0f, want;
+                double got;
+                int i2, cross = 0;
+                for (i2 = 0; i2 < n; i2++) {
+                    float x = synth_step(&v);
+                    if (i2 >= n / 5 && prev < 0.0f && x >= 0.0f) cross++;
+                    prev = x;
+                }
+                if (!pass) continue;
+                want = pat_held(SYNTH_VOICE, FOREST_STEPS, step);
+                got  = (double)cross / win_s;
+                /* 3%: a semitone is 5.9%, and one miscounted crossing over a
+                 * 0.15 s window is 1.4% at this register. */
+                if (want > 0.0f && SDL_fabs(got - want) > 0.03 * want) {
+                    if (bad < 4)
+                        printf("  voice step %d: table says %.2f Hz, the synth"
+                               " emitted %.1f Hz\n", step, (double)want, got);
+                    bad++;
+                }
+                /* NEGATIVE CONTROL: the same comparison against the melody an
+                 * octave up must FAIL. If it did not, the tolerance would be so
+                 * wide that the check above could not see a wrong note. */
+                if (want > 0.0f && SDL_fabs(got - want * 2.0f) > 0.03 * want * 2.0)
+                    ctl_bad++;
+            }
+
+        if (bad) {
+            printf("FAIL  audio: the synth emitted the wrong pitch on %d of %d"
+                   " melody steps\n", bad, FOREST_STEPS);
+            fails++;
+        } else if (ctl_bad < FOREST_STEPS - 4) {
+            printf("FAIL  audio: pitch negative control - an octave-transposed"
+                   " melody matched at %d of %d steps, so the tolerance is too"
+                   " wide to catch a wrong note\n",
+                   FOREST_STEPS - ctl_bad, FOREST_STEPS);
+            fails++;
+        } else {
+            printf("audio   : the rendered melody matches the score at all %d"
+                   " steps within 3%%; control rejected the octave-up melody at"
+                   " %d of them\n", FOREST_STEPS, ctl_bad);
+        }
+    }
+
     printf("audio   : %s (%d checks failed)\n", fails ? "FAIL" : "PASS", fails);
     SDL_free(a.cap);
     SDL_Quit();
@@ -8485,6 +9302,7 @@ int main(int argc, char **argv)
     int atlas_page = -1;
     int lit_mode;
     int cam_tx, cam_ty;
+    int lean_x = 0, lean_y = 0;
     int i;
 
     /* Dispatched before any window or audio exists, and the process exit code IS
@@ -8536,6 +9354,12 @@ int main(int argc, char **argv)
      * same world an ordinary run would produce. -1 means "follow her". */
     cam_tx = arg_int(argc, argv, "--camx", -1);
     cam_ty = arg_int(argc, argv, "--camy", -1);
+    /* --leanx/--leany: hold a walk direction for the whole run, so a --frames
+     * shot can photograph something that only exists WHILE she is pushing into
+     * it. The refusal toasts are exactly that, and --standon below is what puts
+     * her next to the thing to push into. See the injection in the tick loop. */
+    lean_x = arg_int(argc, argv, "--leanx", 0);
+    lean_y = arg_int(argc, argv, "--leany", 0);
 #endif
 
     limit = arg_int(argc, argv, "--frames", 0);
@@ -8597,6 +9421,56 @@ int main(int argc, char **argv)
         for (ri = 0; ri < g->w.region_count; ri++) {
             g->w.regions[ri].restoration = 1.0f;
             g->w.regions[ri].restore_to  = 1.0f;
+        }
+    }
+    /* --standon pond|edge|ent: stand her where a feature can be photographed.
+     *
+     * Same reason as --camx/--camy, one step further: the camera flag reaches
+     * the map edge but leaves her at spawn, and the three things added this
+     * round - the two refusal toasts and the interact prompt - are all
+     * properties of where SHE is, not of where the camera is. A fresh --frames
+     * run stands her in the middle of the largest clearing, which is by
+     * construction the one place none of them can happen.
+     *
+     * Only her position moves. The world is the world the seed generated, and
+     * everything downstream - refusal_at, the toast, the prompt - runs exactly
+     * as it would if she had walked here. */
+    {
+        const char *where = NULL;
+        for (i = 1; i < argc - 1; i++)
+            if (SDL_strcmp(argv[i], "--standon") == 0) where = argv[i + 1];
+        if (where) {
+            int want_water = (SDL_strcmp(where, "pond") == 0);
+            int want_edge  = (SDL_strcmp(where, "edge") == 0);
+            int best = -1, bestd = 1 << 30, tx, ty;
+            int sx = (int)g->p.x / TILE, sy = (int)g->p.y / TILE;
+            if (want_water || want_edge) {
+                /* The open tile NEAREST HER that has the wanted wall to its
+                 * east, so --leanx 1 walks into it. Nearest so the shot is of
+                 * terrain she could plausibly have reached. */
+                for (ty = 1; ty < WORLD_H - 1; ty++)
+                    for (tx = 1; tx < WORLD_W - 1; tx++) {
+                        int d = (tx - sx) * (tx - sx) + (ty - sy) * (ty - sy);
+                        if (g->w.solid[ty][tx] || d >= bestd) continue;
+                        if (want_edge  && tx != WORLD_W - 2) continue;
+                        if (want_water && g->w.terr[ty][tx + 1] != GT_WATER) continue;
+                        bestd = d; best = ty * WORLD_W + tx;
+                    }
+            } else {
+                for (i = 0; i < ENTITY_COUNT; i++)
+                    if (g->ents[i].tile >= 0) { best = g->ents[i].tile; break; }
+            }
+            if (best >= 0) {
+                g->p.x = (float)(best % WORLD_W) * TILE + TILE * 0.5f;
+                g->p.y = (float)(best / WORLD_W) * TILE + TILE * 0.5f;
+                /* One tile WEST of the mote for the entity case, so the shot
+                 * shows the keycap, the mote AND her as three separate things
+                 * rather than her sprite covering the other two. 16 px is well
+                 * inside INTERACT_RADIUS's 22. */
+                if (!want_water && !want_edge) g->p.x -= TILE;
+                prev_px = g->p.x;
+                prev_py = g->p.y;
+            }
         }
     }
 #endif
@@ -8778,7 +9652,17 @@ int main(int argc, char **argv)
                                (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT]));
             float my = (float)((keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN]) -
                                (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP]));
-            float len = SDL_sqrtf(mx * mx + my * my);
+            float len;
+#if WAYFARER_SELFTEST
+            /* --lean: hold a direction with no hands on the keyboard. The
+             * refusal toasts only exist while she is PUSHING into something, so
+             * a --frames screenshot run - which never presses a key - could
+             * never photograph one. Injected here rather than faked further
+             * down, so the shot goes through the real refusal_at, the real
+             * rate limit and the real move_axis. */
+            if (lean_x || lean_y) { mx = (float)lean_x; my = (float)lean_y; }
+#endif
+            len = SDL_sqrtf(mx * mx + my * my);
             int face;
 
             /* Normalised by the true vector length, so speed is the same in all
@@ -8787,14 +9671,16 @@ int main(int argc, char **argv)
             if (g->p.moving) {
                 float sx = (mx / len) * PLAYER_SPEED * TICK_DT;
                 float sy = (my / len) * PLAYER_SPEED * TICK_DT;
-                /* Ask about the gate BEFORE moving: afterwards she is standing
+                /* Ask about the refusal BEFORE moving: afterwards she is standing
                  * next to it and the step that was refused is gone. Rate-limited
                  * to one report per second by the toast's own remaining time, so
-                 * leaning on a ledge does not machine-gun the deny sound. */
+                 * leaning on a ledge or a pond bank does not machine-gun the deny
+                 * sound. refusal_at covers both the ability gates and the two
+                 * Forest walls that have something to say - see wall_refusal. */
                 if (hud.toast_left < HUD_TOAST_TICKS - 60) {
-                    Uint8 miss = gate_refusal(&g->w, g->p.abilities, g->p.x + sx, g->p.y);
+                    Uint8 miss = refusal_at(&g->w, g->p.abilities, g->p.x + sx, g->p.y);
                     if (!miss)
-                        miss = gate_refusal(&g->w, g->p.abilities, g->p.x, g->p.y + sy);
+                        miss = refusal_at(&g->w, g->p.abilities, g->p.x, g->p.y + sy);
                     gate_report(miss, &audio);
                 }
                 /* Two independent axis calls, in this order, so a diagonal into
@@ -8898,6 +9784,12 @@ int main(int argc, char **argv)
                         }
                 }
 #endif
+                /* After the sorted pass, so the keycap is never hidden by the
+                 * mote it points at or by a trunk between them - it is UI, and
+                 * the one thing on screen that must not be occluded. Before the
+                 * HUD, which owns the frame's edges and outranks it. */
+                prompt_draw(draw, &g->w, g->ents, g->p.x, g->p.y,
+                            cam_x, cam_y, clock);
                 /* Drawn against `draw`, whose dimensions are read from the
                  * surface rather than LOGICAL_*: with no backbuffer we render at
                  * native resolution, and a HUD placed by LOGICAL_* would land
