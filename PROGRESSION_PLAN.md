@@ -1,5 +1,11 @@
 # Wayfarer — Progression Overhaul Plan
 
+> **Superseded.** None of the phases below landed. The branch instead kept the original
+> one-way / full-completion gate and extended it to a 4th area (the Dungeon) — `try_use_portal`
+> (main.c:8302-8306) explicitly rejects this document's return-travel premise as unwanted scope.
+> Kept here as the historical record of why the redesign below was proposed. For current status
+> and the one real gap still open, see `HANDOVER.md`.
+
 > Carry-over document. Written for whoever picks this branch up next, on any machine.
 > Status when written: planned, not yet implemented. Branch `npc-addition`.
 
