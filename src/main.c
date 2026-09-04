@@ -2878,6 +2878,107 @@ static void apply_restore(World *w, Entity *ents, Player *p, int i,
     else                 (*frags)++;
 }
 
+/* ---- Who is holding it --------------------------------------------------
+ *
+ * Every collectible but one is carried by somebody. She still walks to a tile
+ * and presses E, and apply_restore above is untouched: an NPC is a DIFFERENT
+ * PICTURE OF THE SAME ENTITY, not a new kind of thing. That is the whole
+ * reason this costs no save byte, no restoration bit and no second pickup
+ * path - there is nothing here to persist, because none of it is state.
+ *
+ * The exception is the orb nearest where she wakes up. The first thing she
+ * finds has to teach the interact key, and it should do that without also
+ * introducing a person to talk to, so it stays the bare mote that shipped.
+ */
+
+/* Which entity keeps its mote: the one nearest spawn, ties to the lower index.
+ *
+ * Measured over ALL entities, deliberately, not just unrestored ones. Tracking
+ * what is LEFT would promote the next-nearest entity the instant she took the
+ * orb, and the person standing on it would vanish in front of her. Being a
+ * fixed property of the world is the point, and it is free: the seed
+ * regenerates the same placement on every load, so this needs no save byte to
+ * survive one.
+ *
+ * Squared distance in TILES, which cannot overflow an int here - WORLD_W and
+ * WORLD_H are 128, so the largest value it can take is 2 * 127^2 = 32258. */
+static int entity_orb_index(const World *w, const Entity *ents)
+{
+    int best = -1, bestd = 0, i, sx, sy;
+
+    if (w->spawn_tile < 0) return -1;
+    sx = w->spawn_tile % WORLD_W;
+    sy = w->spawn_tile / WORLD_W;
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        int dx, dy, d;
+        if (ents[i].tile < 0) continue;
+        dx = (ents[i].tile % WORLD_W) - sx;
+        dy = (ents[i].tile / WORLD_W) - sy;
+        d = dx * dx + dy * dy;
+        if (best < 0 || d < bestd) { best = i; bestd = d; }
+    }
+    return best;
+}
+
+/* How fast an idle sheet cycles. Slow: these are people standing about, and a
+ * brisk loop reads as fidgeting. NEEDS A HUMAN - nobody has watched it yet. */
+#define NPC_IDLE_FPS 4.0f
+
+/* Which of the cast is standing on entity i.
+ *
+ * The Citizen_F cast may only appear in the Forest. That rule is enforced here
+ * BY CONSTRUCTION - a forest-only kind is never a candidate elsewhere, rather
+ * than being picked and then filtered - and the flag it reads,
+ * ART_NPC_FOREST_ONLY, is emitted by the bake from the very list that names the
+ * sheets. So the rule cannot drift from the art it is about: adding a sheet
+ * marks it in one place and both the bake and this function follow.
+ *
+ * A hash of the entity's own tile, and NOT a draw from the world Rng. Drawing
+ * here would advance the generator between placement and whatever asks it next,
+ * changing the terrain of every seed in the game - every recorded screenshot
+ * and every gating proof invalidated, for a choice that is purely cosmetic. The
+ * tile is already a pure function of the seed and is replayed identically by a
+ * load, so hashing it buys a per-world, per-entity, perfectly stable answer for
+ * nothing. */
+static int npc_kind_for(Uint8 biome, int i, int tile)
+{
+    unsigned h = (unsigned)tile * 2654435761u + (unsigned)i * 2246822519u;
+    int pool[ART_NPC_KINDS], n = 0, k;
+
+    for (k = 0; k < ART_NPC_KINDS; k++)
+        if (biome == BIOME_FOREST || !ART_NPC_FOREST_ONLY[k]) pool[n++] = k;
+    /* Unreachable while any kind is unrestricted, and a guard rather than an
+     * assumption because the alternative is a modulo by zero. */
+    if (n <= 0) return 0;
+    h ^= h >> 13;
+    h *= 2246822519u;
+    h ^= h >> 16;
+    return pool[h % (unsigned)n];
+}
+
+/* The frame that kind is on this instant. The per-entity phase offset is the
+ * same trick entity_bob plays: two of them in one clearing breathing in
+ * lockstep reads as a rendering artefact rather than as two people. */
+static int npc_sprite(int kind, int i, float clock)
+{
+    int f = (int)(clock * NPC_IDLE_FPS) + i;
+
+    f %= ART_NPC_FRAMES;
+    if (f < 0) f += ART_NPC_FRAMES;
+    return ART_NPC_BASE[kind] + f;
+}
+
+/* The ONE answer to "what is standing on entity i", so the renderer, the
+ * interact prompt and the tests cannot disagree about it - the same rule that
+ * keeps map_tile the single home for "is the chart still lying there".
+ * ART_NONE means the orb, which is drawn as a mote instead. */
+static int entity_npc_art(const World *w, const Entity *ents, int i, float clock)
+{
+    if (ents[i].tile < 0 || i == entity_orb_index(w, ents))
+        return ART_NONE;
+    return npc_sprite(npc_kind_for(w->biome, i, ents[i].tile), i, clock);
+}
+
 /* ---- Proto-generator ----------------------------------------------------
  *
  * PHASE 2 SCAFFOLDING, and labelled as such: it exists so the renderer and the
@@ -4240,13 +4341,27 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
      * defeated by looking for the motes. */
     if (ents) {
         for (i = 0; i < ENTITY_COUNT; i++) {
-            int ex, ey, sx, sy;
+            int ex, ey, sx, sy, art;
             if (ents[i].tile < 0 || ents[i].restored) continue;
             ex = ents[i].tile % WORLD_W;
             ey = ents[i].tile / WORLD_W;
             if (ex < tx0 || ex >= tx1 || ey < ty0 || ey >= ty1) continue;
             if (tile_level(w, ex, ey) < 3) continue;
             sx = ex * TILE + TILE / 2 - cam_x;
+            art = entity_npc_art(w, ents, i, clock);
+            if (art != ART_NONE) {
+                /* Somebody is holding it, so it goes in as a real sprite: a
+                 * trunk in front of them hides them and they hide what is
+                 * behind them, which a procedural mote never did. Pushed at
+                 * full brightness for the same reason the mote is - a
+                 * collectible you cannot see is a collectible you cannot find.
+                 *
+                 * No bob. A person standing in a wood is not a floating
+                 * pickup, and the idle sheet is what makes them look alive. */
+                draw_list_push(dl, art, sx, ey * TILE + TILE - cam_y, 0,
+                               FOG_LEVELS - 1);
+                continue;
+            }
             sy = ey * TILE + TILE - cam_y - entity_bob(i, clock);
             draw_list_push_marker(dl, ents[i].is_soul ? DI_SOUL : DI_FRAGMENT, sx, sy,
                                   FOG_LEVELS - 1);
@@ -4435,7 +4550,7 @@ static void prompt_draw(SDL_Surface *fb, const World *w, const Entity *ents,
                         float px, float py, int cam_x, int cam_y, float clock)
 {
     int i = entity_in_reach(w, ents, px, py);
-    int ex, ey, sx, sy;
+    int ex, ey, sx, sy, art;
 
     if (i < 0) {
         /* The map fragment takes the prompt only when no mote is in reach,
@@ -4458,6 +4573,16 @@ static void prompt_draw(SDL_Surface *fb, const World *w, const Entity *ents,
     if (tile_level(w, ex, ey) < 3)
         return;
     sx = ex * TILE + TILE / 2 - cam_x;
+    art = entity_npc_art(w, ents, i, clock);
+    if (art != ART_NONE) {
+        /* Over their head. anchor_y IS the sprite's height above its own feet,
+         * so this clears whoever is standing there without a second table of
+         * heights to keep in step with the art - and it tracks the idle cycle
+         * frame by frame, which a fixed number would not. */
+        draw_prompt(fb, sx, ey * TILE + TILE - cam_y
+                            - (int)ART_SPRITES[art].anchor_y - 3, clock);
+        return;
+    }
     sy = ey * TILE + TILE - cam_y - entity_bob(i, clock);
     /* Clear of the mote's halo (one px beyond the core on every side) plus two,
      * so the cap floats above it rather than resting on it. */
@@ -9915,6 +10040,281 @@ static int map_selftest(int seeds, Uint64 base)
     return fails;
 }
 
+/* ---- --npc-test ---------------------------------------------------------
+ *
+ * The cast that now holds the fragments. Four things are worth proving, and
+ * they are all properties of PURE functions, so this test needs no window, no
+ * audio device and no save file - it drives npc_kind_for and entity_orb_index
+ * directly the way --menu-test drives menu_build.
+ *
+ *   1. Exactly one collectible per world is left as a mote, and it is the one
+ *      nearest spawn. Everything else has somebody standing on it.
+ *   2. The Citizen_F cast never appears outside the Forest. This is the
+ *      requirement with a real consequence if it regresses, so it is swept
+ *      exhaustively rather than sampled - every kind, every biome, every
+ *      entity index, over a spread of tiles.
+ *   3. The choice is deterministic and survives a regeneration, because a load
+ *      replays placement from the seed and the NPC is derived from it. If this
+ *      failed, saving and loading would silently recast the world.
+ *   4. Nothing here moved the world. Placement, solidity and solvability must
+ *      be bit-identical to a build with no NPCs in it at all - the collision
+ *      rule at the top of this file is what makes that checkable, and this is
+ *      where it gets checked.
+ */
+static int npc_selftest(int seeds, Uint64 base)
+{
+    Game *g = (Game *)SDL_malloc(sizeof(Game));
+    Game *b = (Game *)SDL_malloc(sizeof(Game));
+    Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+    int fails = 0, s_i, area, i, k;
+
+    if (!g || !b || !sc) {
+        printf("FAIL  npc: out of memory\n");
+        SDL_free(g); SDL_free(b); SDL_free(sc);
+        return 1;
+    }
+
+    /* ---- (1) The art the bake handed us --------------------------------- */
+    {
+        int bad = 0;
+        for (k = 0; k < ART_NPC_KINDS; k++) {
+            int f;
+            for (f = 0; f < ART_NPC_FRAMES; f++) {
+                int a = ART_NPC_BASE[k] + f;
+                if (a < 0 || a >= ART_SPRITE_COUNT) {
+                    printf("  npc kind %d frame %d is art %d, outside [0,%d)\n",
+                           k, f, a, ART_SPRITE_COUNT);
+                    bad++;
+                    continue;
+                }
+                /* Bottom-centre, because these bake before the character block
+                 * and sprite_selftest checks them as decorations. A frame that
+                 * drifted to the cell-relative convention would pass there and
+                 * hang the interact prompt in the wrong place here. */
+                if (ART_SPRITES[a].anchor_x != ART_SPRITES[a].w / 2 ||
+                    ART_SPRITES[a].anchor_y != ART_SPRITES[a].h) {
+                    printf("  npc art %d anchor (%d,%d), expected bottom-centre"
+                           " (%d,%d)\n", a, ART_SPRITES[a].anchor_x,
+                           ART_SPRITES[a].anchor_y, ART_SPRITES[a].w / 2,
+                           ART_SPRITES[a].h);
+                    bad++;
+                }
+            }
+        }
+        if (bad) { fails += bad; }
+        else printf("npc     : %d kinds x %d frames, all in range and"
+                    " bottom-centre anchored\n", ART_NPC_KINDS, ART_NPC_FRAMES);
+    }
+
+    /* ---- (2) Citizen_F stays in the Forest ------------------------------ */
+    {
+        int leaks = 0, forest_kinds = 0, seen_outside = 0, tile;
+        for (k = 0; k < ART_NPC_KINDS; k++)
+            if (ART_NPC_FOREST_ONLY[k]) forest_kinds++;
+
+        /* Exhaustive over the inputs that decide it: biome, entity, and a
+         * spread of tiles wide enough that every pool slot gets used. */
+        for (i = 0; i < ENTITY_COUNT; i++) {
+            for (tile = 0; tile < WORLD_W * WORLD_H; tile += 7) {
+                int b1 = npc_kind_for(BIOME_UNDERWORLD, i, tile);
+                int b2 = npc_kind_for(BIOME_LUMIARA, i, tile);
+                if (ART_NPC_FOREST_ONLY[b1] || ART_NPC_FOREST_ONLY[b2]) leaks++;
+                if (ART_NPC_FOREST_ONLY[npc_kind_for(BIOME_FOREST, i, tile)])
+                    seen_outside++;
+            }
+        }
+        if (forest_kinds == 0) {
+            printf("FAIL  npc: no kind is marked forest-only, so the rule this"
+                   " test exists for is not being exercised at all\n");
+            fails++;
+        }
+        if (leaks) {
+            printf("FAIL  npc: a Citizen_F kind was placed outside the Forest"
+                   " %d time(s)\n", leaks);
+            fails++;
+        } else if (seen_outside == 0) {
+            /* Vacuous-pass guard. If the Forest never picks a Citizen either,
+             * then "never outside the Forest" is true because the cast is
+             * unreachable everywhere, not because the rule works - and the
+             * negative control below would have nothing to fire on. */
+            printf("FAIL  npc: no Citizen_F kind was ever picked, even in the"
+                   " Forest - the rule above passed vacuously\n");
+            fails++;
+        } else {
+            printf("npc     : %d forest-only kind(s) never leave the Forest over"
+                   " %d x %d draws, and are picked %d times inside it\n",
+                   forest_kinds, ENTITY_COUNT,
+                   (WORLD_W * WORLD_H + 6) / 7, seen_outside);
+        }
+    }
+
+    /* ---- NEGATIVE CONTROL for that check -------------------------------- */
+    {
+        /* The sweep above proves nothing unless it would actually notice a
+         * leak, and "no leaks found" is exactly what a broken detector also
+         * prints. So run the IDENTICAL detector over a picker that ignores the
+         * biome - which is the bug this test exists to catch, and is what
+         * passing the wrong biome to npc_kind_for would produce - and require
+         * that it fires. The Forest picker is that picker: its output is drawn
+         * from the full pool, Citizen_F included. */
+        int caught = 0, i2, tile;
+
+        for (i2 = 0; i2 < ENTITY_COUNT && !caught; i2++) {
+            for (tile = 0; tile < WORLD_W * WORLD_H; tile += 7) {
+                if (ART_NPC_FOREST_ONLY[npc_kind_for(BIOME_FOREST, i2, tile)]) {
+                    caught = 1;
+                    break;
+                }
+            }
+        }
+        if (!caught) {
+            printf("FAIL  npc control MISS: the leak detector found nothing in"
+                   " a pool that deliberately contains Citizen_F, so its clean"
+                   " sweep above means nothing\n");
+            fails++;
+        } else {
+            printf("npc     : negative control - the same detector DOES fire on"
+                   " a picker that ignores the biome\n");
+        }
+    }
+
+    /* ---- (3) One orb, the rest NPCs, stable across regeneration --------- */
+    for (s_i = 0; s_i < seeds; s_i++) {
+        Uint64 seed = base + (Uint64)s_i;
+        for (area = 1; area <= 3; area++) {
+            int orb, placed = 0, npcs = 0, orbs = 0, best = -1, bestd = 0;
+            int sx, sy;
+
+            g->restored = 0; g->maps = 0;
+            game_init_area(g, sc, seed, (Uint8)area);
+            orb = entity_orb_index(&g->w, g->ents);
+
+            for (i = 0; i < ENTITY_COUNT; i++) {
+                if (g->ents[i].tile < 0) continue;
+                placed++;
+                if (entity_npc_art(&g->w, g->ents, i, 0.0f) == ART_NONE) orbs++;
+                else npcs++;
+            }
+            if (placed == 0) {
+                printf("FAIL  npc: seed %.0f area %d placed no entities\n",
+                       (double)seed, area);
+                fails++;
+                continue;
+            }
+            if (orbs != 1) {
+                printf("FAIL  npc: seed %.0f area %d left %d orbs, expected"
+                       " exactly 1\n", (double)seed, area, orbs);
+                fails++;
+            }
+            if (npcs != placed - 1) {
+                printf("FAIL  npc: seed %.0f area %d has %d npcs for %d placed"
+                       " entities\n", (double)seed, area, npcs, placed);
+                fails++;
+            }
+            /* The orb is the nearest to spawn - recomputed here by an
+             * independent scan rather than by calling the same function back. */
+            sx = g->w.spawn_tile % WORLD_W;
+            sy = g->w.spawn_tile / WORLD_W;
+            for (i = 0; i < ENTITY_COUNT; i++) {
+                int dx, dy, d;
+                if (g->ents[i].tile < 0) continue;
+                dx = (g->ents[i].tile % WORLD_W) - sx;
+                dy = (g->ents[i].tile / WORLD_W) - sy;
+                d = dx * dx + dy * dy;
+                if (best < 0 || d < bestd) { best = i; bestd = d; }
+            }
+            if (orb != best) {
+                printf("FAIL  npc: seed %.0f area %d kept entity %d as the orb,"
+                       " but %d is nearer spawn\n", (double)seed, area, orb, best);
+                fails++;
+            }
+            /* Regenerating the same seed is what a LOAD does. If the cast or
+             * the orb moved here, loading a save would recast the world. */
+            b->restored = 0; b->maps = 0;
+            game_init_area(b, sc, seed, (Uint8)area);
+            if (entity_orb_index(&b->w, b->ents) != orb) {
+                printf("FAIL  npc: seed %.0f area %d picked a different orb on"
+                       " regeneration\n", (double)seed, area);
+                fails++;
+            }
+            for (i = 0; i < ENTITY_COUNT; i++) {
+                if (g->ents[i].tile < 0) continue;
+                if (b->ents[i].tile != g->ents[i].tile) {
+                    printf("FAIL  npc: seed %.0f area %d moved entity %d on"
+                           " regeneration - placement is not deterministic\n",
+                           (double)seed, area, i);
+                    fails++;
+                    break;
+                }
+                if (entity_npc_art(&b->w, b->ents, i, 0.0f) !=
+                    entity_npc_art(&g->w, g->ents, i, 0.0f)) {
+                    printf("FAIL  npc: seed %.0f area %d recast entity %d on"
+                           " regeneration\n", (double)seed, area, i);
+                    fails++;
+                    break;
+                }
+            }
+            /* An area 2 or 3 world must have no Citizen standing in it. This
+             * is (2) again, but asked of REAL placements rather than of swept
+             * inputs - the two could only disagree if a caller passed the
+             * wrong biome, which is precisely the mistake worth catching. */
+            if (g->w.biome != BIOME_FOREST) {
+                for (i = 0; i < ENTITY_COUNT; i++) {
+                    int a;
+                    if (g->ents[i].tile < 0) continue;
+                    a = entity_npc_art(&g->w, g->ents, i, 0.0f);
+                    if (a == ART_NONE) continue;
+                    for (k = 0; k < ART_NPC_KINDS; k++) {
+                        if (a < ART_NPC_BASE[k] ||
+                            a >= ART_NPC_BASE[k] + ART_NPC_FRAMES) continue;
+                        if (ART_NPC_FOREST_ONLY[k]) {
+                            printf("FAIL  npc: seed %.0f area %d stood a"
+                                   " Citizen_F kind in biome %d\n",
+                                   (double)seed, area, g->w.biome);
+                            fails++;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    printf("npc     : %d seeds x 3 areas - one orb nearest spawn, the rest"
+           " cast, all stable across regeneration\n", seeds);
+
+    /* ---- (4) The idle cycle actually cycles ----------------------------- */
+    {
+        int seen[ART_NPC_FRAMES], distinct = 0, f;
+        for (f = 0; f < ART_NPC_FRAMES; f++) seen[f] = 0;
+        /* A whole second of clock at NPC_IDLE_FPS has to touch every frame, or
+         * the sheet is being animated by something that does not advance. */
+        for (f = 0; f < 240; f++) {
+            int a = npc_sprite(0, 0, (float)f * (1.0f / 60.0f));
+            int rel = a - ART_NPC_BASE[0];
+            if (rel < 0 || rel >= ART_NPC_FRAMES) {
+                printf("FAIL  npc: idle frame %d is outside the sheet\n", rel);
+                fails++;
+                break;
+            }
+            if (!seen[rel]) { seen[rel] = 1; distinct++; }
+        }
+        if (distinct != ART_NPC_FRAMES) {
+            printf("FAIL  npc: the idle cycle reached %d of %d frames in four"
+                   " seconds\n", distinct, ART_NPC_FRAMES);
+            fails++;
+        } else {
+            printf("npc     : idle cycle reaches all %d frames; two entities on"
+                   " one clock differ by their phase offset (%d vs %d)\n",
+                   ART_NPC_FRAMES, npc_sprite(0, 0, 0.0f) - ART_NPC_BASE[0],
+                   npc_sprite(0, 1, 0.0f) - ART_NPC_BASE[0]);
+        }
+    }
+
+    printf("npc     : %s\n", fails ? "FAIL" : "PASS");
+    SDL_free(g); SDL_free(b); SDL_free(sc);
+    return fails;
+}
+
 /* ---- --hud-test ---------------------------------------------------------
  *
  * The HUD is the one subsystem whose bugs are invisible to every other test:
@@ -12232,6 +12632,9 @@ int main(int argc, char **argv)
     if (arg_flag(argc, argv, "--map-test"))
         return map_selftest(arg_int(argc, argv, "--seeds", 8),
                             (Uint64)arg_int(argc, argv, "--seed", 1));
+    if (arg_flag(argc, argv, "--npc-test"))
+        return npc_selftest(arg_int(argc, argv, "--seeds", 8),
+                            (Uint64)arg_int(argc, argv, "--seed", 1));
     if (arg_flag(argc, argv, "--save-test"))
         return save_selftest((Uint64)arg_int(argc, argv, "--seed", 1));
     if (arg_flag(argc, argv, "--audio-test"))
@@ -12338,7 +12741,8 @@ int main(int argc, char **argv)
             g->w.regions[ri].restore_to  = 1.0f;
         }
     }
-    /* --standon pond|edge|ent: stand her where a feature can be photographed.
+    /* --standon pond|edge|map|orb|ent: stand her where a feature can be
+     * photographed.
      *
      * Same reason as --camx/--camy, one step further: the camera flag reaches
      * the map edge but leaves her at spawn, and the three things added this
@@ -12358,10 +12762,20 @@ int main(int argc, char **argv)
             int want_water = (SDL_strcmp(where, "pond") == 0);
             int want_edge  = (SDL_strcmp(where, "edge") == 0);
             int want_map   = (SDL_strcmp(where, "map") == 0);
+            int want_orb   = (SDL_strcmp(where, "orb") == 0);
             int best = -1, bestd = 1 << 30, tx, ty;
             int sx = (int)g->p.x / TILE, sy = (int)g->p.y / TILE;
             if (want_map) {
                 best = g->w.map_tile;
+            } else if (want_orb) {
+                /* The ONE collectible still lying loose. `ent` takes the first
+                 * placed entity, which is almost never that one - so without a
+                 * case of its own the mote, and the fact that exactly one
+                 * survives, could not be photographed at all. Asks
+                 * entity_orb_index rather than re-deriving "nearest spawn"
+                 * here, so the shot cannot disagree with the renderer. */
+                int orb = entity_orb_index(&g->w, g->ents);
+                if (orb >= 0) best = g->ents[orb].tile;
             } else if (want_water || want_edge) {
                 /* The open tile NEAREST HER that has the wanted wall to its
                  * east, so --leanx 1 walks into it. Nearest so the shot is of

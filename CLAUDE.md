@@ -8,6 +8,8 @@
 - Look at the map screen: `--map` (grant + open it), `--standon map` (stand on the fragment)
 - Look at the menu: `--menu` (open it), `--paused` (the pause form),
   `--menupage settings|controls|load|replace|confirm`
+- Look at the cast: `--standon ent` (an NPC holding a fragment), `--standon orb` (the one
+  collectible still lying loose), `--area2` / `--area3` for the other biomes' NPCs
 - Re-bake art: `powershell -File tools\bake.ps1` — only when `assets\` changes
 
 ## Core Invariants & Rules
@@ -34,6 +36,38 @@
 - The map screen's trails are routed by `bfs_gated`, which asks `tile_blocked` — the same function
   that stops her. A trail must never be drawn through a gate she has no ability for; something
   behind one gets **no trail**, and the legend says so.
+
+## The cast
+- **Every collectible but one is held by an NPC.** The exception is the orb nearest spawn, which
+  stays the bare mote the game shipped with: the first thing she finds has to teach the interact
+  key without also introducing a person to talk to. `entity_orb_index` is that rule, and it
+  measures over **all** entities, not the unrestored ones - tracking what is *left* would promote
+  the next-nearest entity the moment she took the orb and the person standing on it would vanish
+  in front of her.
+- An NPC is a **different picture of the same entity**, not a new kind of thing. `apply_restore`,
+  `entity_in_reach`, `INTERACT_RADIUS` and the restored bitmask are all untouched, which is why
+  this costs **no save byte and no `SAVE_VERSION` bump**. Nothing about the cast is persisted
+  because none of it is state.
+- `npc_kind_for` hashes the entity's **tile**, and never draws from the world `Rng`. A draw here
+  would advance the generator between placement and whatever asks it next, changing the terrain of
+  every seed in the game - every recorded screenshot and every gating proof invalidated, for a
+  choice that is purely cosmetic. The tile is already a pure function of the seed and a load
+  replays it, so the cast survives save/load for free.
+- **The Citizen_F cast (Peasant, Tavern) may only stand in the Forest.** The flag lives in
+  `ART_NPC_FOREST_ONLY`, which the *bake* emits from the same list that names the sheets, so the
+  rule and the art it is about cannot drift. `npc_kind_for` enforces it **by construction** - a
+  forest-only kind is never a candidate elsewhere, rather than being picked and then filtered.
+- NPCs are **render-only**. They are never written into `solid[][]`, so `tile_blocked` cannot see
+  them and a person can never seal a world. `--npc-test` asserts placement and solvability are
+  unchanged; `--reach-test` and `--play-test` are what would catch it if they were not.
+- `entity_npc_art` is the ONE answer to "what is standing on entity i", so the renderer, the
+  interact prompt and the tests cannot disagree - the same rule that keeps `World.map_tile` the
+  single home for "is the chart still lying there".
+- NPC frames bake **before** the character block, because `sprite_selftest` treats everything from
+  `ART_CH_IDLE_DOWN_0` onward as a character frame. That means they are checked as *decorations*
+  and must be **bottom-centre** anchored. Safe only because every frame of a sheet trims to the
+  same x, width and bottom row - the bake **asserts** that rather than assuming it, since a sheet
+  that breathed sideways would start skating silently.
 
 ## Audio
 - The callback is a **hard real-time deadline** (21.3 ms at 48 kHz / 1024 frames). Inside
@@ -139,6 +173,13 @@
   cell-relative anchor** (cell centre x, one row below the lowest foot row) — bottom-centre of
   a per-frame trim would make the walk cycle skate. Changing a convention means re-baking.
 - Bake only what a caller in `main.c` actually draws.
+- The palette caps at **254**. NPC colours within `NPC_SNAP_D2` (100, squared RGB) of an existing
+  entry are snapped onto it: without that the NPC art alone adds 57 colours to a 202-entry palette
+  and **the bake fails**. It snaps only toward colours that already exist and never merges two NPC
+  colours together.
+- **`tools/bake.py` is what generates the committed header**, not `bake.ps1`. They read different
+  Underworld packs (`Underworld2/Tiled_files` vs `Underworld/PNG`) and `bake.ps1` is stale - baking
+  with it changes the Underworld rubble tiles and fails `--tile-test`. `bake.py` needs Pillow.
 
 ## Conventions
 - When adding or modifying self-tests, **always include a negative control** — a deliberately

@@ -86,8 +86,9 @@ self-test binary adds `--dev` (all abilities), `--lit` (reveal the whole map —
 *look at* the minimap and the restored palette in a fresh run), `--shot FILE` with `--frames N`,
 and `--atlas` / `Tab` for the baked-art inspector.
 
-Three more exist purely so a `--frames` run can be *pointed at* something: `--standon pond|edge|ent`
-stands her beside the nearest pond bank, the map's border ring, or a collectible, and
+Three more exist purely so a `--frames` run can be *pointed at* something:
+`--standon pond|edge|map|orb|ent` stands her beside the nearest pond bank, the map's border ring,
+the map fragment, the one loose orb, or a collectible, and
 `--leanx N` / `--leany N` hold a walk direction with no hands on the keyboard. The refusal toasts
 only exist *while* she is pushing into a wall, so without these a screenshot run — which never
 presses a key, and which spawns her in the middle of the largest clearing — could never

@@ -149,6 +149,52 @@ $CharSheets = @(
     @{ n = 'WALK_LEFT';  f = 'walk_left_down.png' }
 )
 
+# ---- NPCs ---------------------------------------------------------------
+# Idle sheets for the characters that now HOLD the fragments and Souls. Each is
+# a single row of $NpcFrames cells; cell size differs per delivery, so it is
+# per-sheet rather than one global constant.
+#
+# ANCHORING. These are baked BEFORE the character block (see the NOTE ON ORDER
+# below it), which means sprite_selftest classifies them as DECORATIONS and
+# requires the bottom-centre anchor - not the character block's cell-relative
+# one. That is safe here and NOT a shortcut, but only because of a property the
+# art actually has: within one sheet, every frame trims to the same x, the same
+# width and the same bottom row. Under that condition bottom-centre and
+# cell-relative place the frames identically, so the idle cycle cannot skate.
+# It is asserted at bake time rather than assumed, because a future sheet that
+# breathes sideways would silently start skating otherwise.
+#
+# Tavern_B is not listed: it is PIXEL-IDENTICAL to Tavern_A (verified by
+# hashing the decoded frames), so baking it would buy two NPC kinds that render
+# the same. Citizen_A ships only .aseprite with no PNG export and cannot be
+# baked at all.
+#
+# 'Forest' marks the Citizen_F cast, which main.c must never place outside the
+# Forest biome. The flag is carried through to the header so that rule has ONE
+# source of truth shared by the bake and the game - see NPC_FOREST_ONLY.
+$NpcFrames = 4
+$NpcSheets = @(
+    @{ n = 'KNIGHT';  f = 'Knight\Idle\Idle-Sheet.png';                    cell = 32; forest = $false }
+    @{ n = 'ROGUE';   f = 'Rogue\Idle\Idle-Sheet.png';                     cell = 32; forest = $false }
+    @{ n = 'WIZARD';  f = 'Wizzard\Idle\Idle-Sheet.png';                   cell = 32; forest = $false }
+    @{ n = 'PEASANT'; f = 'Citizen_F\Peasant_A\Idle\Idle-Sheet.png';       cell = 64; forest = $true  }
+    @{ n = 'TAVERN';  f = 'Citizen_F\Tavern_A\Idle\Idle_Side-Sheet.png';   cell = 64; forest = $true  }
+)
+
+# The NPC art is flat pixel art, but it arrives with its own near-duplicates of
+# colours the global palette already holds: a straight bake adds 57 entries to
+# a 202-entry palette against a 254 cap, which does not fit. Rather than drop a
+# sheet, every NPC colour within $NPC_SNAP_D2 of an existing entry is snapped to
+# it - the same "quantize into the budget" move the Lumiara block makes, at a
+# far smaller scale because this art is already flat.
+#
+# 100 is squared RGB distance, so at most ~10 units of total drift - below the
+# point where a 16 px sprite changes appearance, and measured to bring 57 new
+# colours down to 36 (palette 202 -> 238). It snaps ONLY toward colours that
+# already exist; it never merges two NPC colours into each other, so the art
+# keeps every distinction it draws with.
+$NPC_SNAP_D2 = 100
+
 # ---- PNG decode ---------------------------------------------------------
 # GetPixel is far too slow at this volume, so LockBits + one marshalled copy.
 # GDI+ normalises whatever the PNG actually is into 32bppArgb, so any bit depth,
@@ -980,6 +1026,76 @@ foreach ($o in $LumObjects) {
 }
 if (-not $Quiet) { Write-Host ("  lum objects {0} decorations, one PNG each" -f $LumObjects.Count) }
 
+# --- NPCs --- (before the character block - see the NOTE ON ORDER above)
+#
+# The snap runs against the palette AS IT STANDS when the NPC block starts, so
+# it can only ever reuse a colour some earlier biome already paid for. Captured
+# once here rather than read live, so a colour this block itself adds cannot
+# become a snap target for a later NPC pixel - that would make the result
+# depend on sheet order.
+$NpcSnapBase = @($script:PalList.ToArray())
+# A HASHTABLE, not a plain counter. GetNewClosure() runs the body in its own
+# module scope, so a `$script:` variable assigned in there names something in
+# that module and not in this file - the counter increments a copy nobody reads
+# and reports a permanent, silent 0. A hashtable is captured by reference, so
+# mutating a key crosses the boundary. The count is the only evidence the snap
+# is doing anything, so it has to be true.
+$NpcSnap = @{ hits = 0 }
+$NpcTint = {
+    param([int]$r, [int]$g, [int]$b)
+    $bestD = [int]::MaxValue; $best = $null
+    foreach ($c in $NpcSnapBase) {
+        $dr = $r - $c[0]; $dg = $g - $c[1]; $db = $b - $c[2]
+        $d = $dr*$dr + $dg*$dg + $db*$db
+        if ($d -lt $bestD) { $bestD = $d; $best = $c }
+    }
+    if ($null -ne $best -and $bestD -le $NPC_SNAP_D2) {
+        $NpcSnap.hits++
+        return @($best[0], $best[1], $best[2])
+    }
+    return @($r, $g, $b)
+}.GetNewClosure()
+
+$npcPalBefore = $script:PalList.Count
+foreach ($s in $NpcSheets) {
+    $path = Join-Path (Join-Path $ASSETS 'NPCs') $s.f
+    $img  = Get-PixelData $path
+    $cell = $s.cell
+    if ($img.W -ne ($cell * $NpcFrames) -or $img.H -ne $cell) {
+        throw ("bake: NPC {0} expected {1}x{2}, got {3}x{4}" -f $s.f, ($cell * $NpcFrames), $cell, $img.W, $img.H)
+    }
+    # Pass 1: measure every frame and PROVE bottom-centre is safe for this
+    # sheet before a single pixel is baked. See the anchoring note above.
+    $boxes = @()
+    for ($f = 0; $f -lt $NpcFrames; $f++) {
+        $box = Get-OpaqueBox $img ($f * $cell) 0 $cell $cell
+        if ($null -eq $box) { throw ("bake: NPC {0} frame {1} is empty" -f $s.f, $f) }
+        $boxes += $box
+    }
+    for ($f = 1; $f -lt $NpcFrames; $f++) {
+        if ($boxes[$f].X -ne $boxes[0].X -or $boxes[$f].W -ne $boxes[0].W) {
+            throw ("bake: NPC {0} frame {1} trims to x={2} w={3}, frame 0 to x={4} w={5} - a bottom-centre anchor would make this idle skate sideways; give this sheet the cell-relative treatment instead" -f `
+                $s.f, $f, $boxes[$f].X, $boxes[$f].W, $boxes[0].X, $boxes[0].W)
+        }
+        $bf = $boxes[$f].Y + $boxes[$f].H - 1
+        $b0 = $boxes[0].Y + $boxes[0].H - 1
+        if ($bf -ne $b0) {
+            throw ("bake: NPC {0} frame {1} has its lowest pixel on row {2}, frame 0 on row {3} - a bottom-centre anchor would make this idle bob vertically" -f `
+                $s.f, $f, $bf, $b0)
+        }
+    }
+    # Pass 2: bake, bottom-centre, exactly like a decoration.
+    for ($f = 0; $f -lt $NpcFrames; $f++) {
+        $box = $boxes[$f]
+        $idx = Get-IndexArray $img (($f * $cell) + $box.X) $box.Y $box.W $box.H $NpcTint
+        Add-Sprite ("NPC_{0}_{1}" -f $s.n, $f) $idx $box.W $box.H ([int][Math]::Floor($box.W / 2)) $box.H
+    }
+}
+if (-not $Quiet) {
+    Write-Host ("  npcs        {0} sheets x {1} idle frames; {2} px snapped to existing palette, {3} new colours" -f `
+        $NpcSheets.Count, $NpcFrames, $NpcSnap.hits, ($script:PalList.Count - $npcPalBefore))
+}
+
 # --- character --- (must stay last - see the NOTE ON ORDER above)
 $charLowestFoot = -1
 foreach ($s in $CharSheets) {
@@ -1074,6 +1190,26 @@ for ($r = 0; $r -lt $TilesRows; $r++) {
 }
 [void]$sb.AppendLine("};")
 [void]$sb.AppendLine("")
+[void]$sb.AppendLine("/* NPCs. ART_NPC_BASE[k] is kind k's frame 0; its frames are consecutive,")
+[void]$sb.AppendLine(" * so frame f is ART_NPC_BASE[k] + f. ART_NPC_FOREST_ONLY[k] is the whole")
+[void]$sb.AppendLine(" * Citizen_F placement rule: 1 means that kind may only stand in the Forest")
+[void]$sb.AppendLine(" * biome. It is emitted from the bake's own sheet list rather than restated")
+[void]$sb.AppendLine(" * in main.c, so the art and the rule about the art cannot drift apart. */")
+[void]$sb.AppendLine("#define ART_NPC_KINDS  $($NpcSheets.Count)")
+[void]$sb.AppendLine("#define ART_NPC_FRAMES $NpcFrames")
+$npcBase = @(); $npcOnly = @(); $npcName = @()
+foreach ($n in $NpcSheets) {
+    $first = ("NPC_{0}_0" -f $n.n)
+    $at = -1
+    for ($i = 0; $i -lt $records.Count; $i++) { if ($records[$i].Name -eq $first) { $at = $i; break } }
+    if ($at -lt 0) { throw "bake: NPC record $first missing from the sprite table" }
+    $npcBase += ("{0,4}" -f $at)
+    $npcOnly += ("{0,2}" -f $(if ($n.forest) { 1 } else { 0 }))
+    $npcName += ('"' + $n.n.ToLower() + '"')
+}
+[void]$sb.AppendLine("static const short ART_NPC_BASE[ART_NPC_KINDS] = {" + ($npcBase -join ',') + " };")
+[void]$sb.AppendLine("static const unsigned char ART_NPC_FOREST_ONLY[ART_NPC_KINDS] = {" + ($npcOnly -join ',') + " };")
+[void]$sb.AppendLine("")
 [void]$sb.AppendLine("#define ART_PAL_N     $($script:PalList.Count)")
 [void]$sb.AppendLine("#define ART_PAL_BYTES $($palBytes.Count)")
 [void]$sb.AppendLine("static const unsigned char ART_PAL[ART_PAL_BYTES] = {" + (Format-ByteArray $palBytes))
@@ -1099,8 +1235,8 @@ $ratio = 0.0
 if ($dataBytes.Count -gt 0) { $ratio = $script:RawPx / $dataBytes.Count }
 Write-Host ""
 Write-Host ("BAKE OK    {0}" -f $OutFile) -ForegroundColor Green
-Write-Host ("sprites    {0}  ({1} tiles + {2} decorations + {3} character frames)" -f `
-    $records.Count, $tileCount, $Decor.Count, ($CharSheets.Count * $CharFrames))
+Write-Host ("sprites    {0}  ({1} tiles + {2} decorations + {3} npc frames + {4} character frames)" -f `
+    $records.Count, $tileCount, $Decor.Count, ($NpcSheets.Count * $NpcFrames), ($CharSheets.Count * $CharFrames))
 Write-Host ("palette    {0,7:N0} bytes  ({1} colours, global)" -f $palBytes.Count, $script:PalList.Count)
 Write-Host ("rle data   {0,7:N0} bytes  (from {1:N0} trimmed px = {2:N2}x)" -f $dataBytes.Count, $script:RawPx, $ratio)
 Write-Host ("records    {0,7:N0} bytes  ({1} x 16)" -f $recBytes, $records.Count)

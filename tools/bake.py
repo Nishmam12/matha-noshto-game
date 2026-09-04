@@ -26,6 +26,49 @@ CHAR_CX = 24
 CHAR_FOOT = 44
 
 LUM_PALETTE_BUDGET = 48
+
+# ---- NPCs ---------------------------------------------------------------
+# Idle sheets for the characters that now hold the fragments and Souls. One row
+# of NPC_FRAMES cells each; cell size differs per delivery, so it is per-sheet.
+#
+# ANCHORING. These bake BEFORE the character block, because sprite_selftest in
+# main.c classifies "everything from ART_CH_IDLE_DOWN_0 onward" as a character
+# frame. That means they are checked as DECORATIONS and must use the
+# bottom-centre anchor, not the character block's cell-relative one. Safe here -
+# but only because of a property this art actually has: within one sheet every
+# frame trims to the same x, the same width and the same bottom row, and under
+# that condition the two conventions place the frames identically, so the idle
+# cannot skate. Asserted at bake time rather than assumed, because a future
+# sheet that breathes sideways would start skating silently.
+#
+# Tavern_B is absent deliberately: it is pixel-identical to Tavern_A (verified
+# by hashing the decoded frames), so baking it would buy two NPC kinds that
+# render the same. Citizen_A ships only .aseprite with no PNG and cannot bake.
+#
+# "forest" marks the Citizen_F cast, which main.c must never place outside the
+# Forest biome. It is carried into the header as ART_NPC_FOREST_ONLY so the
+# rule and the art it is about have ONE source of truth.
+NPC_FRAMES = 4
+NPC_SHEETS = [
+    {"n": "KNIGHT",  "f": ["Knight", "Idle", "Idle-Sheet.png"],                     "cell": 32, "forest": False},
+    {"n": "ROGUE",   "f": ["Rogue", "Idle", "Idle-Sheet.png"],                      "cell": 32, "forest": False},
+    {"n": "WIZARD",  "f": ["Wizzard", "Idle", "Idle-Sheet.png"],                    "cell": 32, "forest": False},
+    {"n": "PEASANT", "f": ["Citizen_F", "Peasant_A", "Idle", "Idle-Sheet.png"],     "cell": 64, "forest": True},
+    {"n": "TAVERN",  "f": ["Citizen_F", "Tavern_A", "Idle", "Idle_Side-Sheet.png"], "cell": 64, "forest": True},
+]
+
+# This art is flat, but it arrives with its own near-duplicates of colours the
+# global palette already holds: baked straight it adds 57 entries to a 202-entry
+# palette against a 254 cap, which does not fit. Rather than drop a sheet, any
+# NPC colour within NPC_SNAP_D2 of an existing entry is snapped onto it - the
+# same "quantize into the budget" move the Lumiara block makes, at a far smaller
+# scale because this art needs no median cut.
+#
+# 100 is SQUARED rgb distance, so at most ~10 units of total drift, below where
+# a 16 px sprite changes appearance. Measured: 57 new colours -> 36 (palette
+# 202 -> 238). It snaps only toward colours that already exist and never merges
+# two NPC colours together, so the art keeps every distinction it draws with.
+NPC_SNAP_D2 = 100
 LUM_TILE_SMOOTH = 0.70
 LUM_TILE_FLATTEN = 0.62
 LUM_TILE_DIM = 0.93
@@ -532,6 +575,67 @@ def main():
     print("  lum tiles & objects baked")
 
     # --- Character sheets (MUST STAY LAST) ---
+    # --- NPCs --- (before the character block - see ANCHORING above)
+    #
+    # The snap runs against the palette AS IT STANDS when this block starts, so
+    # it can only reuse a colour some earlier biome already paid for. Captured
+    # once rather than read live, so a colour this block itself adds cannot
+    # become a snap target for a later NPC pixel - that would make the result
+    # depend on sheet order.
+    npc_snap_base = list(pal_list)
+    npc_snap_hits = [0]
+
+    def npc_tint(r, g, b):
+        best, best_d = None, 1 << 30
+        for c in npc_snap_base:
+            dr, dg, db = r - c[0], g - c[1], b - c[2]
+            d = dr * dr + dg * dg + db * db
+            if d < best_d:
+                best_d, best = d, c
+        if best is not None and best_d <= NPC_SNAP_D2:
+            npc_snap_hits[0] += 1
+            return best[0], best[1], best[2]
+        return r, g, b
+
+    npc_dir = os.path.join(ASSETS, "NPCs")
+    npc_pal_before = len(pal_list)
+    npc_base = []
+    for sn in NPC_SHEETS:
+        path = os.path.join(npc_dir, *sn["f"])
+        im = Image.open(path).convert("RGBA")
+        cell = sn["cell"]
+        if im.width != cell * NPC_FRAMES or im.height != cell:
+            raise RuntimeError(
+                f"NPC {sn['n']} expected {cell * NPC_FRAMES}x{cell}, got {im.width}x{im.height}")
+        # Pass 1: measure every frame and PROVE bottom-centre is safe for this
+        # sheet before a single pixel is baked. See ANCHORING above.
+        boxes = []
+        for f in range(NPC_FRAMES):
+            box = get_opaque_box(im, f * cell, 0, cell, cell)
+            if box is None:
+                raise RuntimeError(f"NPC {sn['n']} frame {f} is empty")
+            boxes.append(box)
+        for f in range(1, NPC_FRAMES):
+            if boxes[f][0] != boxes[0][0] or boxes[f][2] != boxes[0][2]:
+                raise RuntimeError(
+                    f"NPC {sn['n']} frame {f} trims to x={boxes[f][0]} w={boxes[f][2]}, frame 0 "
+                    f"to x={boxes[0][0]} w={boxes[0][2]} - a bottom-centre anchor would make this "
+                    f"idle skate sideways; give it the cell-relative treatment instead")
+            bf = boxes[f][1] + boxes[f][3] - 1
+            b0 = boxes[0][1] + boxes[0][3] - 1
+            if bf != b0:
+                raise RuntimeError(
+                    f"NPC {sn['n']} frame {f} has its lowest pixel on row {bf}, frame 0 on row "
+                    f"{b0} - a bottom-centre anchor would make this idle bob vertically")
+        # Pass 2: bake, bottom-centre, exactly like a decoration.
+        npc_base.append(len(records))
+        for f in range(NPC_FRAMES):
+            bx, by, bw, bh = boxes[f]
+            idx = get_index_array(im, f * cell + bx, by, bw, bh, npc_tint)
+            add_sprite(f"NPC_{sn['n']}_{f}", idx, bw, bh, bw // 2, bh)
+    print(f"  npcs        {len(NPC_SHEETS)} sheets x {NPC_FRAMES} idle frames; "
+          f"{npc_snap_hits[0]} px snapped, {len(pal_list) - npc_pal_before} new colours")
+
     char_dir = os.path.join(ASSETS, "Character")
     char_sheets = [
         {"n": "CH_IDLE_DOWN",  "f": "idle_down.png"},
@@ -566,7 +670,9 @@ def main():
     if len(pal_list) > 254:
         raise ValueError(f"Palette count {len(pal_list)} > 254 limit!")
 
-    with open(OUT_FILE, "w", encoding="utf-8") as out:
+    # newline="\n": .gitattributes normalises this header to LF, and text mode
+    # would emit CRLF on Windows, showing all ~6600 of its lines as changed.
+    with open(OUT_FILE, "w", encoding="utf-8", newline="\n") as out:
         out.write("/* GENERATED by tools/bake.py from assets/. Do not edit by hand.\n")
         out.write(" *\n")
         out.write(" * One global palette; index 0 is transparent in every sprite.\n")
@@ -610,6 +716,19 @@ def main():
             row_strs = [f"{tile_at[r][c]:4d}" for c in range(TILES_COLS)]
             out.write(f"    {{{', '.join(row_strs)} }}, /* row {r} */\n")
         out.write("};\n\n")
+
+        # NPCs
+        out.write("/* NPCs. ART_NPC_BASE[k] is kind k's frame 0; its frames are consecutive,\n")
+        out.write(" * so frame f is ART_NPC_BASE[k] + f. ART_NPC_FOREST_ONLY[k] is the whole\n")
+        out.write(" * Citizen_F placement rule: 1 means that kind may only stand in the Forest\n")
+        out.write(" * biome. It is emitted from the bake's own sheet list rather than restated\n")
+        out.write(" * in main.c, so the art and the rule about the art cannot drift apart. */\n")
+        out.write(f"#define ART_NPC_KINDS  {len(NPC_SHEETS)}\n")
+        out.write(f"#define ART_NPC_FRAMES {NPC_FRAMES}\n")
+        out.write("static const short ART_NPC_BASE[ART_NPC_KINDS] = { "
+                  + ",".join(f"{b:4d}" for b in npc_base) + " };\n")
+        out.write("static const unsigned char ART_NPC_FOREST_ONLY[ART_NPC_KINDS] = { "
+                  + ",".join(f"{1 if n['forest'] else 0:2d}" for n in NPC_SHEETS) + " };\n\n")
 
         # Palette
         out.write(f"#define ART_PAL_N     {len(pal_list)}\n")
