@@ -511,6 +511,40 @@ enum { GT_GRASS = 0, GT_OLIVE, GT_DIRT, GT_WATER, GT_ROCK, GT_COUNT };
  * biome branch at all. See LUMIARA_BIOME_PLAN.md for why. */
 enum { BIOME_FOREST = 0, BIOME_UNDERWORLD = 1, BIOME_LUMIARA = 2, BIOME_COUNT };
 
+/* Which biome an area is made of, and the ONE place that answers it.
+ *
+ * It used to be an inline conditional repeated at five call sites - area
+ * construction, two self-test harnesses and both audio resets - which is
+ * exactly the shape of drift this file legislates against everywhere else: a
+ * reordering had to be made identically in five places or the music would play
+ * over the wrong biome while the world generated correctly, and nothing would
+ * have caught it.
+ *
+ * Area 2 is Lumiara and Area 3 is the Underworld, which is the reverse of the
+ * order the biomes were built in. The story is what decides this: Area 2 is the
+ * mystical realm where memory and soul come apart, and floating islands over a
+ * violet void is that place; Area 3 is the castle, and the castle is reached by
+ * going DOWN. The seed salts stay attached to the AREA number rather than to
+ * the biome, so "area 2" is one world for one save whichever tileset dresses
+ * it. */
+static Uint8 biome_for_area(Uint8 area)
+{
+    return (Uint8)(area == 1 ? BIOME_FOREST
+                 : area == 2 ? BIOME_LUMIARA
+                 : BIOME_UNDERWORLD);
+}
+
+/* The inverse, so a World - which knows its biome and deliberately does NOT
+ * know its area - can still be asked which act of the story it is. Two
+ * functions rather than one table because they are each three lines and a table
+ * of three entries read in both directions is harder to check by eye than the
+ * pair; --story-test asserts they round-trip for all three areas, which is what
+ * actually keeps them honest. */
+static Uint8 area_for_biome(Uint8 biome)
+{
+    return (Uint8)(biome == BIOME_FOREST ? 1 : biome == BIOME_LUMIARA ? 2 : 3);
+}
+
 /* ---- Regions and abilities ----------------------------------------------
  *
  * The world is partitioned into at most 32 connected regions (32 because `adj`
@@ -2878,47 +2912,272 @@ static void apply_restore(World *w, Entity *ents, Player *p, int i,
     else                 (*frags)++;
 }
 
+/* ---- The story ----------------------------------------------------------
+ *
+ * Nine people, four conversations each, and a soul apiece. That is the whole
+ * cast, and this is the whole of what the game remembers about it.
+ *
+ * FILE-SCOPE, on the same terms `hud` and `menu` already are: the no-statics
+ * rule at the top of this file is about WORLD-SIZED arrays landing in .data,
+ * and this is eleven bytes plus two ints. It is not part of Game because it is
+ * not part of an area - Game.w, Game.ents and Game.p are all replaced wholesale
+ * when she steps through a portal, and who she has spoken to must survive that
+ * exactly the way Game.restored and Game.maps do. Putting it here also means
+ * the two render sites that ask "is anybody standing on this entity"
+ * (props_build and prompt_draw) keep the signatures they have; the alternative
+ * was threading a talk[] pointer through both.
+ *
+ * What is NOT here, deliberately: castle state, whether the portal is open, and
+ * whether an area is finished. All three are DERIVED - see castle_state and
+ * area_complete - because a stored copy of a derivable fact is a second home
+ * for it, and second homes drift. The brief that asked for this asked for a
+ * castle_state variable; it gets a castle_state FUNCTION instead, which cannot
+ * disagree with the memories that decide it.
+ */
+#define NPC_PER_AREA SOUL_COUNT              /* one person per soul, by design */
+#define NPC_TOTAL    (NPC_PER_AREA * 3)
+#define TALK_LINES   4
+
+/* What a soul does to the world when it is remembered. One per person, and
+ * carried in the cast table rather than derived from the cast index, so
+ * reordering the cast moves a name and its event together instead of silently
+ * handing Mira's river to Rowan. */
+enum { SEV_NONE = 0, SEV_RIVER, SEV_BELLS, SEV_VILLAGE, SEV_FLOAT, SEV_MOON,
+       SEV_REPLAY, SEV_LIGHTS, SEV_RECORDS, SEV_VOICES, SEV_COUNT };
+
+/* How long an event holds the world, in fixed ticks. Six seconds: long enough
+ * to look up and see it, short enough that it reads as something that happened
+ * rather than as a new permanent state of the world. */
+#define SEV_TICKS 360
+
+/* How long the guiding star stays lit after a memory, and how far off her
+ * shoulder it rides. Up here with the other story constants rather than beside
+ * the drawing, because try_interact is what lights it and try_interact comes
+ * first. */
+#define STAR_TICKS 1200                  /* 20 s */
+#define STAR_ORBIT 30.0f                 /* px from her, so it never covers her */
+
+/* Story flags. Only facts that cannot be derived from the memories and the
+ * conversations live here. */
+/* There is deliberately no SF_KEY here. The castle key was a flag for exactly
+ * as long as it took the save test to reject an Area 3 game that had every
+ * memory of the realm between and no bit saying so: "she has the key" is
+ * "Area 2 is finished", and Area 2 being finished is thirty bits of mask that
+ * are already saved, already validated, and already replayed by a load. See
+ * castle_key. Only the two things that genuinely cannot be recomputed live
+ * here. */
+#define SF_KING  0x01u   /* the final chamber has been entered */
+#define SF_BEAST 0x02u   /* it woke */
+#define SF_BITS  0x03u
+
+typedef struct {
+    const char *name;
+    /* Two rows, because 5x7 at this width fits about fifty characters and a
+     * line of dialogue that wraps by luck reads as a bug. Row two may be "". */
+    const char *line[TALK_LINES][2];
+    Uint8       event;
+} CastMember;
+
+/* The cast, in entity order: area 1's three souls, then area 2's, then area
+ * 3's. Index is (area - 1) * NPC_PER_AREA + (entity - FRAGMENT_COUNT), which is
+ * a pure function of the seed the same way the placement is, so a load replays
+ * who is standing where for free.
+ *
+ * No character here uses a double quote: 0x22 is an all-zero row in FONT_5X7
+ * and would ship as a hole. --story-test checks every line against font_bits
+ * with a control, the same way --menu-test checks every label. */
+static const CastMember CAST[NPC_TOTAL] = {
+    /* ---- Area 1, the Mainland ---- */
+    { "mira", {
+        { "you are awake.", "" },
+        { "you have found a memory.", "i wondered which of you would." },
+        { "you were here before.", "" },
+        { "you were not supposed to come back.", "" } }, SEV_RIVER },
+    { "rowan", {
+        { "the castle is forbidden.", "" },
+        { "i know you.", "that is the trouble." },
+        { "the bells.", "so you do remember the bells." },
+        { "if you hear the bells, do not follow them.",
+          "that is how we lost you." } }, SEV_BELLS },
+    { "elen", {
+        { "people started disappearing.", "" },
+        { "then they started forgetting names.", "mine went last week." },
+        { "there is something familiar about your voice.", "" },
+        { "you once asked me to hide something.",
+          "that something was a memory." } }, SEV_VILLAGE },
+    /* ---- Area 2, the realm between ---- */
+    { "nera", {
+        { "memories do not belong to you.", "" },
+        { "you are carrying somebody else's memories.", "" },
+        { "the souls remember what the memories forget.", "" },
+        { "you were the one who separated them.", "" } }, SEV_FLOAT },
+    { "the child", {
+        { "you are late.", "" },
+        { "you used to bring people here.", "" },
+        { "you are remembering too quickly.", "" },
+        { "when you meet the king,", "do not let him remember you." } },
+      SEV_MOON },
+    { "orin", {
+        { "the kingdom studied souls.", "" },
+        { "the king ordered the research sealed.", "" },
+        { "you were part of that research.", "" },
+        { "you shut the entire system down.", "" } }, SEV_REPLAY },
+    /* ---- Area 3, the castle ---- */
+    { "alden", {
+        { "welcome back.", "" },
+        { "the king has been waiting.", "" },
+        { "you used to live here.", "the east rooms. you kept them dark." },
+        { "you were not the king's prisoner.", "you were his advisor." } },
+      SEV_LIGHTS },
+    { "lysa", {
+        { "the records are incomplete.", "" },
+        { "somebody removed your name.", "" },
+        { "the records say you asked to have your memories erased.", "" },
+        { "i thought the king ordered it.",
+          "but the order was signed by you." } }, SEV_RECORDS },
+    { "the keeper", {
+        { "you should not have returned.", "" },
+        { "the memories are not yours anymore.", "" },
+        { "the souls have begun returning.", "" },
+        { "when you set the last fragment before the king,",
+          "he will remember what you made him forget." } }, SEV_VOICES },
+};
+
+/* What a memory shows her, by AREA and by HOW MANY she has already found - not
+ * by which entity she happened to walk into.
+ *
+ * That indirection is the whole answer to "collecting memories in an unexpected
+ * order". Placement is procedural and she may sweep the map any way she likes;
+ * the story is not procedural and must not arrive shuffled. Keying the text off
+ * frags_restored means the first memory found in an area is always the first
+ * memory of that area, whichever tile it was lying on, and no ordering
+ * constraint has to be pushed back into place_entities - where it would have to
+ * be reconciled with the ability gating and the completability proof. Nothing
+ * here needs saving: the text is shown once, at the moment of pickup, and
+ * frags_restored is already reconstructed by a load. */
+static const char *const MEMORY[3][FRAGMENT_COUNT][2] = {
+    { /* ---- Area 1: what happened here ---- */
+      { "a man stands where you are standing.", "he is wearing your face." },
+      { "the village, with its windows lit.",
+        "one of them turns and looks at you." },
+      { "a woman at the water, counting people into a boat.",
+        "she counts you twice." },
+      { "the castle, with banners.", "you know which door is yours." },
+      { "bells. everyone in the memory is running.",
+        "you are the only one walking." },
+      { "rowan, mid-sentence. the rest is missing.",
+        "he is asking you not to do something." },
+      { "firelight. the castle. a shape above it.",
+        "you cannot see what anybody is looking at." } },
+    { /* ---- Area 2: what memories are ---- */
+      { "you have been here before, and not by the portal.", "" },
+      { "a hall of jars. each one is breathing.", "" },
+      { "a voice explains that a soul is the part that remembers being there.",
+        "the voice is yours." },
+      { "a list of names, with a line drawn through most of them.", "" },
+      { "the king signs something without reading it.", "you hand him the pen." },
+      { "the jars again. this time they are open.", "" },
+      { "you are walking into the dark on purpose.",
+        "somebody is calling you back." } },
+    { /* ---- Area 3: what you did ---- */
+      { "your rooms. the east ones. you kept them dark.", "" },
+      { "you and the king, arguing about a door.", "" },
+      { "the research, still running. it should not have been.", "" },
+      { "you decide something. the memory refuses to show what.", "" },
+      { "you ask to be made empty.", "the king says no. you ask again." },
+      { "a hand that is yours, signing your own name away.", "" },
+      { "the last thing you chose to forget.", "it is still not showing you." } },
+};
+
+/* Everything the game remembers about the story. See the block comment above
+ * for why this is file-scope and why so little of it is here.
+ *
+ * A named type rather than an anonymous one purely so game_load can keep a
+ * copy across the regeneration it does into scratch: generating a world calls
+ * story_sync, which writes here, and a load that then FAILS must leave the
+ * running game bit-for-bit unchanged - dialogue still on screen included. That
+ * rule is why the save is validated into a scratch Game before anything is
+ * committed, and this is the one piece of live state that sat outside it. */
+typedef struct {
+    Uint8 talk[NPC_TOTAL];  /* conversations had, 0 to TALK_LINES */
+    Uint8 flags;            /* SF_* */
+    /* The event playing right now. Transient and NOT saved, on the same grounds
+     * the eased restoration floats are not: a half-finished event is animation,
+     * not progress, and a load that resumed one part-way would be replaying a
+     * moment rather than restoring a state. */
+    Uint8 ev;
+    int   ev_left;
+    /* The end sequence: one tick counter, because the king, the souls, the
+     * beast and the cut to black are a single timeline and not four states.
+     * Zero when it is not running. */
+    int   end_t;
+    /* How long the guiding star has left, and the highest castle state the
+     * player has actually been shown. Both transient, both re-derived by
+     * story_sync when a world arrives - see there for why announcing a castle
+     * step is a note about the PLAYER rather than a fact about the castle. */
+    int   star_left;
+    Uint8 castle_seen;
+} Story;
+
+static Story story;
+
+/* Which cast member is standing on entity `i` of `area`, or -1 if that entity
+ * is a memory rather than a person.
+ *
+ * People stand on SOULS ONLY. Every memory fragment is a bare mote lying in the
+ * world, which is both the story (a memory is a thing that happened; a soul is
+ * somebody it happened to) and the reason entity_orb_index is gone: it existed
+ * so that the first thing she found would teach the interact key without also
+ * introducing a person, and now the seven memories of every area do that. */
+static int cast_index(Uint8 area, int i)
+{
+    if (i < FRAGMENT_COUNT || i >= ENTITY_COUNT) return -1;
+    if (area < 1 || area > 3) return -1;
+    return ((int)area - 1) * NPC_PER_AREA + (i - FRAGMENT_COUNT);
+}
+
+/* How far a mote is lifted BEYOND its usual bob while an event is running.
+ * Read by props_build through entity_bob's caller rather than by entity_bob
+ * itself, so the interact prompt keeps riding the same arc as the mote it
+ * points at - the one thing entity_bob exists to guarantee. */
+static int story_ev_lift(void)
+{
+    if (story.ev != SEV_FLOAT && story.ev != SEV_REPLAY) return 0;
+    /* Rises over the first second, holds, and settles over the last. */
+    if (story.ev_left > SEV_TICKS - 60) return (SEV_TICKS - story.ev_left) / 4;
+    if (story.ev_left < 60)             return story.ev_left / 4;
+    return 15;
+}
+
+/* Whether that person has said all four of their lines and gone. */
+static int cast_gone(int k)
+{
+    return k >= 0 && k < NPC_TOTAL && story.talk[k] >= TALK_LINES;
+}
+
 /* ---- Who is holding it --------------------------------------------------
  *
- * Every collectible but one is carried by somebody. She still walks to a tile
- * and presses E, and apply_restore above is untouched: an NPC is a DIFFERENT
- * PICTURE OF THE SAME ENTITY, not a new kind of thing. That is the whole
- * reason this costs no save byte, no restoration bit and no second pickup
- * path - there is nothing here to persist, because none of it is state.
+ * The three SOULS of an area are carried by people; the seven memories are
+ * motes lying where they fell. She still walks to a tile and presses E, and
+ * apply_restore is untouched: an NPC is a DIFFERENT PICTURE OF THE SAME ENTITY,
+ * not a new kind of thing. That is what keeps the cast free of the restoration
+ * bitmask entirely.
  *
- * The exception is the orb nearest where she wakes up. The first thing she
- * finds has to teach the interact key, and it should do that without also
- * introducing a person to talk to, so it stays the bare mote that shipped.
+ * This used to be "everything but the orb nearest spawn", with entity_orb_index
+ * naming the exception so that the first thing she found taught the interact
+ * key without also introducing a person. Souls-only subsumes that rule and
+ * deletes it: the seven memories of every area are all bare motes, so the first
+ * find is a mote wherever she starts walking, and it is now true in all three
+ * areas rather than once per world. It also says the thing the story needs
+ * said - a memory is what happened, a soul is who it happened to - in the art
+ * rather than in a line of dialogue.
+ *
+ * What IS new state is story.talk[]: a person who has said all four of their
+ * lines is gone, and the soul they were standing on is a mote from then on.
+ * That is the one piece of the cast that is persisted, and it is persisted
+ * because a conversation is something the player did, not something the seed
+ * decided.
  */
-
-/* Which entity keeps its mote: the one nearest spawn, ties to the lower index.
- *
- * Measured over ALL entities, deliberately, not just unrestored ones. Tracking
- * what is LEFT would promote the next-nearest entity the instant she took the
- * orb, and the person standing on it would vanish in front of her. Being a
- * fixed property of the world is the point, and it is free: the seed
- * regenerates the same placement on every load, so this needs no save byte to
- * survive one.
- *
- * Squared distance in TILES, which cannot overflow an int here - WORLD_W and
- * WORLD_H are 128, so the largest value it can take is 2 * 127^2 = 32258. */
-static int entity_orb_index(const World *w, const Entity *ents)
-{
-    int best = -1, bestd = 0, i, sx, sy;
-
-    if (w->spawn_tile < 0) return -1;
-    sx = w->spawn_tile % WORLD_W;
-    sy = w->spawn_tile / WORLD_W;
-    for (i = 0; i < ENTITY_COUNT; i++) {
-        int dx, dy, d;
-        if (ents[i].tile < 0) continue;
-        dx = (ents[i].tile % WORLD_W) - sx;
-        dy = (ents[i].tile / WORLD_W) - sy;
-        d = dx * dx + dy * dy;
-        if (best < 0 || d < bestd) { best = i; bestd = d; }
-    }
-    return best;
-}
 
 /* How fast an idle sheet cycles. Slow: these are people standing about, and a
  * brisk loop reads as fidgeting. NEEDS A HUMAN - nobody has watched it yet. */
@@ -2969,12 +3228,23 @@ static int npc_sprite(int kind, int i, float clock)
 }
 
 /* The ONE answer to "what is standing on entity i", so the renderer, the
- * interact prompt and the tests cannot disagree about it - the same rule that
- * keeps map_tile the single home for "is the chart still lying there".
- * ART_NONE means the orb, which is drawn as a mote instead. */
+ * interact prompt and the tests cannot disagree - the same rule that keeps
+ * World.map_tile the single home for whether the chart is still lying there.
+ * ART_NONE means draw the mote instead, and it now means that in three
+ * separate cases: the entity is a memory and never had anybody on it, the
+ * entity has already been restored, or the person standing on it has said
+ * their fourth line and gone.
+ *
+ * That last case is the disappearance. There is no removal step and no second
+ * list of who is left - the person stops being drawn because story.talk says
+ * they are finished, and what is underneath was always there. A player who
+ * walks back to where Rowan was finds a soul on his tile and no Rowan, which
+ * is the whole of what the story asks for. */
 static int entity_npc_art(const World *w, const Entity *ents, int i, float clock)
 {
-    if (ents[i].tile < 0 || i == entity_orb_index(w, ents))
+    int k = cast_index(area_for_biome(w->biome), i);
+
+    if (ents[i].tile < 0 || ents[i].restored || k < 0 || cast_gone(k))
         return ART_NONE;
     return npc_sprite(npc_kind_for(w->biome, i, ents[i].tile), i, clock);
 }
@@ -3246,7 +3516,7 @@ static void world_spawn(World *w, Scratch *sc)
  * would otherwise spawn standing on it every game). Deterministic and RNG-free
  * - render-only, so it needs none of world_gen's collision guarantees, only a
  * valid fallback. Called for every biome; unused (never drawn, never checked)
- * in BIOME_LUMIARA - Area 3 is terminal, so its own portal_tile just sits
+ * in BIOME_UNDERWORLD - Area 3 is terminal, so its own portal_tile just sits
  * there unused - but always left valid rather than only set "when needed" -
  * see the no-garbage-fields rule this file follows for World. */
 static void world_place_portal(World *w)
@@ -3815,7 +4085,13 @@ enum { DI_SPRITE = 0, DI_FRAGMENT, DI_SOUL, DI_MAP };
  * beat frequency slow enough to look like a rendering bug. */
 static int entity_bob(int i, float clock)
 {
-    return (int)(SDL_sinf(clock * 2.4f + (float)i * 0.7f) * 2.0f + 2.0f);
+    /* The soul event's extra lift is added HERE rather than at the mote's draw
+     * call, because that is the whole reason this is a function: the interact
+     * prompt hangs off the same point, and a mote that floated while its
+     * keycap stayed put would be exactly the drift this was factored out to
+     * prevent. */
+    return (int)(SDL_sinf(clock * 2.4f + (float)i * 0.7f) * 2.0f + 2.0f)
+         + story_ev_lift();
 }
 
 /* The mote's own size in px, and the one place that answers it: props_draw
@@ -4323,12 +4599,25 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
      * Biome-gated rather than area-gated - World does not know about
      * Game.area and does not need to: portal_tile is computed for every biome
      * (see world_place_portal) but only ever drawn where a gate is meaningful,
-     * which is everywhere except Lumiara - Area 3 is terminal. */
-    if (w->portal_tile >= 0 && (w->biome == BIOME_FOREST || w->biome == BIOME_UNDERWORLD)) {
+     * which is everywhere except the Underworld - Area 3 is terminal.
+     *
+     * A gate is drawn as the place it LEADS TO rather than the place it stands
+     * in, which is why the Forest's is the still Lumiara ring and Lumiara's is
+     * the animated Underworld mouth. Standing in a clearing looking at a slab
+     * of violet starfield is the only warning she gets about what is on the
+     * other side, and a portal that matched its own biome would give her
+     * none. */
+    if (w->portal_tile >= 0) {
         int ptx = w->portal_tile % WORLD_W, pty = w->portal_tile / WORLD_W;
         if (ptx >= tx0 && ptx < tx1 && pty >= ty0 && pty < ty1) {
+            /* Every biome now, where it used to be everywhere but the terminal
+             * area. Area 3's tile is no longer spare: it is the final chamber,
+             * and a chamber that was not drawn was an ending no player could
+             * find. It gets the STILL ring rather than the animated mouth that
+             * brought her in - the mouths lead somewhere, and this one does
+             * not. */
             int art = ART_LUM_PORTAL;
-            if (w->biome == BIOME_FOREST)
+            if (w->biome == BIOME_LUMIARA)
                 art = ART_UW_PORTAL_A + ((int)(clock * 6.0f) % 6);
             draw_list_push(dl, art,
                            ptx * TILE + TILE / 2 - cam_x,
@@ -4557,8 +4846,23 @@ static void prompt_draw(SDL_Surface *fb, const World *w, const Entity *ents,
          * which is exactly the order the interact key resolves the two in - a
          * keycap pointing at one thing while the key acts on another is worse
          * than no keycap at all. --map-test asserts the two agree. */
-        if (!map_in_reach(w, px, py))
+        if (!map_in_reach(w, px, py)) {
+            /* Last, the way the key resolves it last: the gate she can step
+             * through, or the chamber she cannot. Offered whatever the state of
+             * her progress, because pressing E on an unfinished chamber says so
+             * out loud - a keycap that only appeared once she had already
+             * finished would be a door she never knew was there. */
+            if (w->portal_tile >= 0) {
+                int qx = w->portal_tile % WORLD_W, qy = w->portal_tile / WORLD_W;
+                float dx = (float)qx * TILE + TILE * 0.5f - px;
+                float dy = (float)qy * TILE + TILE * 0.5f - py;
+                if (dx * dx + dy * dy <= INTERACT_RADIUS * INTERACT_RADIUS &&
+                    tile_level(w, qx, qy) >= 3)
+                    draw_prompt(fb, qx * TILE + TILE / 2 - cam_x,
+                                qy * TILE + TILE - cam_y - TILE - 3, clock);
+            }
             return;
+        }
         ex = w->map_tile % WORLD_W;
         ey = w->map_tile / WORLD_W;
         if (tile_level(w, ex, ey) < 3)
@@ -4792,6 +5096,170 @@ typedef struct {
     Uint8  maps;
 } Game;
 
+/* How Game.restored is laid out: 30 bits, 0-9 Area 1's ENTITY_COUNT entities,
+ * 10-19 Area 2's, 20-29 Area 3's. All three are always in scope regardless of
+ * which area is active, because ents[] only ever holds the ACTIVE area's 10.
+ *
+ * These live with the struct they describe rather than with the save file they
+ * are also written to. They were in the file-format section, which read as
+ * though the layout were a property of the bytes on disk; it is a property of
+ * the mask in memory, and the save merely stores it. Moving them here is also
+ * what lets everything the story derives - which is all downstream of this
+ * mask - be defined before the world that carries it. */
+#define SAVE_AREA1_BITS  ((Uint32)((1u << ENTITY_COUNT) - 1u))
+#define SAVE_AREA2_SHIFT ENTITY_COUNT
+#define SAVE_AREA3_SHIFT (2 * ENTITY_COUNT)
+#define SAVE_ALL_BITS    ((Uint32)((1u << (3 * ENTITY_COUNT)) - 1u))
+
+/* Where the ACTIVE area's slice of the restoration mask lives. */
+static Uint32 game_area_shift(Uint8 area)
+{
+    return area == 1 ? 0u : area == 2 ? (Uint32)SAVE_AREA2_SHIFT
+                                      : (Uint32)SAVE_AREA3_SHIFT;
+}
+
+/* The complete thirty-bit mask as of RIGHT NOW.
+ *
+ * g->restored carries the INACTIVE areas' bits, folded in by
+ * game_transition_to_area as it switched away; the ACTIVE area's bits live in
+ * ents[].restored and are not written back until she leaves or the game is
+ * saved. Anything that wants to ask about the whole game - the save, the
+ * transition, and now everything the story derives - has to reconcile those
+ * two halves, and this is the one place that does it. It was written out by
+ * hand in two places before the story needed a third, which is two more than a
+ * fact this easy to get subtly wrong should ever have. */
+static Uint32 game_live_mask(const Game *g)
+{
+    Uint32 shift = game_area_shift(g->area);
+    Uint32 active = 0;
+    int i;
+
+    for (i = 0; i < ENTITY_COUNT; i++)
+        if (g->ents[i].restored)
+            active |= 1u << i;
+    return (g->restored & (SAVE_ALL_BITS & ~(SAVE_AREA1_BITS << shift)))
+         | (active << shift);
+}
+
+/* ---- What the story derives ---------------------------------------------
+ *
+ * Everything in here is a FUNCTION of state that already exists, and that is
+ * the point. The brief this was built from asked for stored variables named
+ * castle_state, portal_open and memory_count; storing any of them would have
+ * created a second home for a fact the restoration mask already holds, and the
+ * failure mode of a second home is that it is right on the day it is written
+ * and wrong forever afterwards. A load replays these for free because it
+ * replays the mask they are computed from.
+ */
+
+/* How many of `area`'s seven memories she has found, read out of the mask
+ * rather than out of frags_restored - frags_restored describes the ACTIVE area
+ * only, and the castle has to be legible from the Mainland. */
+static int story_area_frags(const Game *g, Uint8 area)
+{
+    Uint32 bits = (game_live_mask(g) >> ((area - 1) * ENTITY_COUNT))
+                & (Uint32)((1u << FRAGMENT_COUNT) - 1u);
+    int n = 0, i;
+
+    for (i = 0; i < FRAGMENT_COUNT; i++)
+        if (bits & (1u << i)) n++;
+    return n;
+}
+
+/* Likewise for souls: the top SOUL_COUNT bits of that area's slice. */
+static int story_area_souls(const Game *g, Uint8 area)
+{
+    Uint32 bits = (game_live_mask(g) >> ((area - 1) * ENTITY_COUNT + FRAGMENT_COUNT))
+                & (Uint32)((1u << SOUL_COUNT) - 1u);
+    int n = 0, i;
+
+    for (i = 0; i < SOUL_COUNT; i++)
+        if (bits & (1u << i)) n++;
+    return n;
+}
+
+/* The castle has exactly THREE states, and they are counted off the Mainland's
+ * memories because that is what the story says changes it: she remembers, and
+ * the castle answers. Three and not seven - a state per memory would be seven
+ * silhouettes to author and seven transitions nobody would ever see the
+ * difference between, and the brief was explicit about not wanting one
+ * environment variable per collectible.
+ *
+ * 0 SLEEPING   - intact, fogged, quiet, and not enterable.
+ * 1 DISTURBED  - after four memories. Small wrongnesses. Still not enterable.
+ * 2 REVEALED   - after all seven. Something in it is awake. Still not
+ *                enterable: the way in is through the realm between, which is
+ *                what makes the castle key mean anything. */
+static int castle_state(const Game *g)
+{
+    int m = story_area_frags(g, 1);
+    return m >= FRAGMENT_COUNT ? 2 : m >= 4 ? 1 : 0;
+}
+
+/* Whether area `area` is finished, from the mask, for any area - not just the
+ * one loaded. area_complete() above is the ACTIVE area's version of this and
+ * stays as it is, because it is what the win banner and the portal already
+ * ask; this is what the castle key and the end sequence ask. */
+static int story_area_done(const Game *g, Uint8 area)
+{
+    return story_area_frags(g, area) >= FRAGMENT_COUNT
+        && story_area_souls(g, area) >= SOUL_COUNT;
+}
+
+/* Whether the castle will open to her. Finishing the realm between IS the key -
+ * there is no object, nothing is placed, and nothing is stored. A player who
+ * has taken every memory and every soul out of Area 2 has it, and a player who
+ * has not, has not, and neither of those facts can be anywhere but in the
+ * mask. */
+static int castle_key(const Game *g)
+{
+    return story_area_done(g, 2);
+}
+
+/* ---- The text box -------------------------------------------------------
+ *
+ * One panel for dialogue, for memories and for the end sequence, because they
+ * are the same thing on screen: somebody or something says two lines and a name
+ * sits above them. Three panels would be three chances for the memory box and
+ * the dialogue box to drift apart in padding, colour and dismissal.
+ *
+ * It does NOT pause and it does NOT hold her still. The map screen holds her
+ * still and the menu pauses outright; this is closer to the toast it grew out
+ * of - she can walk away mid-sentence, which is the correct amount of respect
+ * to show a game about somebody who is not listening properly.
+ */
+#define SAY_TICKS 300          /* 5 s, then it fades on its own */
+#define SAY_COLS  56
+
+static struct {
+    char who[16];
+    char l1[SAY_COLS + 1];
+    char l2[SAY_COLS + 1];
+    int  left;
+} say;
+
+static void say_open(const char *who, const char *l1, const char *l2)
+{
+    SDL_strlcpy(say.who, who ? who : "", sizeof(say.who));
+    SDL_strlcpy(say.l1, l1 ? l1 : "", sizeof(say.l1));
+    SDL_strlcpy(say.l2, l2 ? l2 : "", sizeof(say.l2));
+    say.left = SAY_TICKS;
+}
+
+/* Bring the transient parts of the story into line with a Game that has just
+ * been generated, loaded, or stepped into another area. Called from exactly
+ * the places that do those three things, so a load can never arrive with a
+ * conversation still on screen or three castle toasts queued up. */
+static void story_sync(const Game *g)
+{
+    say.left = 0;
+    story.ev = SEV_NONE;
+    story.ev_left = 0;
+    story.star_left = 0;
+    story.castle_seen = (Uint8)castle_state(g);
+}
+
+
 /* Area 2 and Area 3's worlds are each a deterministic salt of the root seed,
  * not a second random source - same seed, same salt, same world, every
  * time. Distinct 64-bit constants (not the plan doc's 0xDEADBEEF/0xCAFEBABE -
@@ -4818,9 +5286,7 @@ static void game_init_area(Game *g, Scratch *sc, Uint64 seed, Uint8 area)
     Uint64 area_seed = (area == 1) ? seed
                       : (area == 2) ? (seed ^ AREA2_SEED_SALT)
                       : (seed ^ AREA3_SEED_SALT);
-    Uint8  biome      = (area == 1) ? BIOME_FOREST
-                       : (area == 2) ? BIOME_UNDERWORLD
-                       : BIOME_LUMIARA;
+    Uint8  biome      = biome_for_area(area);
 
     SDL_zero(g->p);
     g->seed = seed;
@@ -4836,13 +5302,20 @@ static void game_init_area(Game *g, Scratch *sc, Uint64 seed, Uint8 area)
         g->p.y = (float)(WORLD_H * TILE) * 0.5f;
     }
     g->p.facing = FACE4_DOWN;
+    story_sync(g);
 }
 
-/* Fresh Area 1 game: nothing banked yet. */
+/* Fresh Area 1 game: nothing banked yet, and nobody spoken to.
+ *
+ * SDL_zero(story) is the counterpart of restored = 0: a new game in a session
+ * that has already finished one must not begin with Mira already gone. It is
+ * here rather than in game_init_area because stepping through a portal is also
+ * a new area and must NOT forget who she has met. */
 static void game_init(Game *g, Scratch *sc, Uint64 seed)
 {
     g->restored = 0;
     g->maps = 0;
+    SDL_zero(story);
     game_init_area(g, sc, seed, 1);
 }
 
@@ -4890,9 +5363,18 @@ static int area_complete(const Game *g)
  * misinterpreted but because the format changed, and a version field that only
  * moves when a change would otherwise corrupt something is a version field
  * nobody can reason about. v1 saves are rejected, not migrated: there is one
- * construction path from a file to a game, and a migration would be a second. */
-#define SAVE_VERSION  3
-#define SAVE_SIZE     36
+ * construction path from a file to a game, and a migration would be a second.
+ *
+ * Bumped again to 4 when the story arrived. Bytes 36-44 are the nine
+ * conversation counts and byte 45 is the story flags; 46-47 are the new
+ * reserved-must-be-zero pair. This rejects every v3 file on disk, which is the
+ * documented cost of a bump and was taken deliberately: a v3 save has no record
+ * of who she has spoken to, and there is no honest value to invent for it. Nine
+ * plain bytes rather than the twenty-seven bits they would pack into, because
+ * the file has never been tight and a hand-packed bitfield would be the one
+ * part of it that could not be read in a hex dump. */
+#define SAVE_VERSION  4
+#define SAVE_SIZE     48
 /* Six slots, probed by name. SDL2 has no directory-listing API at all, so a
  * fixed set of filenames is the only way to enumerate saves without dropping to
  * platform-specific code - and a fixed set is what the rest of this file is
@@ -4918,14 +5400,6 @@ static void save_slot_path(char *dst, size_t cap, int slot)
 /* Byte 21: three legal bits, one per area. */
 #define SAVE_MAPS_BITS 0x07u
 
-/* Byte 24-27's restored mask now spans 30 bits: 0-9 Area 1's ENTITY_COUNT
- * entities, 10-19 Area 2's, 20-29 Area 3's. All three are always in scope
- * regardless of which area is currently active, because ents[] only ever
- * holds the ACTIVE area's 10 - see Game.restored. */
-#define SAVE_AREA1_BITS  ((Uint32)((1u << ENTITY_COUNT) - 1u))
-#define SAVE_AREA2_SHIFT ENTITY_COUNT
-#define SAVE_AREA3_SHIFT (2 * ENTITY_COUNT)
-#define SAVE_ALL_BITS    ((Uint32)((1u << (3 * ENTITY_COUNT)) - 1u))
 
 static void save_put32(Uint8 *p, Uint32 v)
 {
@@ -4967,16 +5441,9 @@ static int game_save(const Game *g, const char *path)
      * offset, same as game_save always has. keep_mask is everything EXCEPT
      * the active area's own slice - not "the other area", now that there are
      * two others - so the active slice can be safely OR'd back in fresh. */
-    Uint32 active = 0, restored, fx, fy;
-    Uint32 shift = (g->area == 1) ? 0 : (g->area == 2) ? SAVE_AREA2_SHIFT : SAVE_AREA3_SHIFT;
-    Uint32 keep_mask = SAVE_ALL_BITS & ~(SAVE_AREA1_BITS << shift);
+    Uint32 restored = game_live_mask(g), fx, fy;
     SDL_RWops *rw;
     int i;
-
-    for (i = 0; i < ENTITY_COUNT; i++)
-        if (g->ents[i].restored)
-            active |= 1u << i;
-    restored = (g->restored & keep_mask) | (active << shift);
 
     buf[0] = SAVE_MAGIC_0;
     buf[1] = SAVE_MAGIC_1;
@@ -4992,6 +5459,13 @@ static int game_save(const Game *g, const char *path)
     buf[22] = 0;
     buf[23] = 0;
     save_put32(buf + 24, restored);
+    /* Bytes 36-44: one byte per person, 0 to TALK_LINES. Byte 45: the flags
+     * that are not derivable from anything else in the file. */
+    for (i = 0; i < NPC_TOTAL; i++)
+        buf[36 + i] = story.talk[i];
+    buf[45] = story.flags;
+    buf[46] = 0;
+    buf[47] = 0;
     /* 0 is what a failed time() looks like, and a 0 here would sort this save
      * as older than every other one forever. 1 is a lie about WHEN, but it is
      * only ever compared, never displayed, so the lie costs an ordering nobody
@@ -5030,6 +5504,7 @@ static int save_header_ok(const Uint8 *buf)
     if (buf[2] != SAVE_VERSION)                           return -1;
     if (buf[3] != 1 && buf[3] != 2 && buf[3] != 3)        return -1;
     if (buf[22] != 0 || buf[23] != 0)                     return -1;
+    if (buf[46] != 0 || buf[47] != 0)                     return -1;
     area = buf[3];
 
     /* Same shape of check as the restored mask's below, and it falls out of the
@@ -5070,6 +5545,27 @@ static int save_header_ok(const Uint8 *buf)
      * value is accepted, however implausible - see the note at SAVE_SLOTS. */
     if (save_get64(buf + 28) == 0)
         return -1;
+
+    /* The story. A conversation count above TALK_LINES is not a person who has
+     * said more than they have to say - it is a corrupt file. */
+    {
+        int i, talked = 0;
+        for (i = 0; i < NPC_TOTAL; i++) {
+            if (buf[36 + i] > TALK_LINES) return -1;
+            /* Nobody in an area she has not reached can have said anything.
+             * The same live invariant the restored mask is checked against
+             * above, applied to the cast: the portal is what let her meet
+             * them, and the portal needed the earlier area finished. */
+            if (i / NPC_PER_AREA >= area && buf[36 + i] != 0) return -1;
+            if (buf[36 + i] >= TALK_LINES) talked++;
+        }
+        (void)talked;
+        if (buf[45] & (Uint8)~(Uint8)SF_BITS) return -1;
+        /* Nothing that happens in the throne room can have happened anywhere
+         * but the castle. */
+        if ((buf[45] & (SF_KING | SF_BEAST)) && area != 3) return -1;
+        if ((buf[45] & SF_BEAST) && !(buf[45] & SF_KING))  return -1;
+    }
 
     return 0;
 }
@@ -5196,6 +5692,7 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     Uint8 area;
     float px, py;
     Uint8 abilities, maps;
+    Story keep;
     int i;
 
     if (!rw)
@@ -5225,6 +5722,10 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     tmp = (Game *)SDL_malloc(sizeof(Game));
     if (!tmp)
         return -1;
+    /* game_init_area calls story_sync, which writes to the file-scope story.
+     * Held and put back on every failure path below, so a refused load leaves
+     * a conversation that was on screen still on screen. */
+    keep = story;
     game_init_area(tmp, sc, seed, area);
 
     shift = (area == 1) ? 0 : (area == 2) ? SAVE_AREA2_SHIFT : SAVE_AREA3_SHIFT;
@@ -5233,10 +5734,12 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
         if (active & (1u << i))
             game_restore(tmp, i);
     if (tmp->p.abilities != abilities) {   /* the checksum described above */
+        story = keep;
         SDL_free(tmp);
         return -1;
     }
     if (player_blocked(&tmp->w, abilities, px, py)) {
+        story = keep;
         SDL_free(tmp);                     /* a position generation never produced */
         return -1;
     }
@@ -5260,6 +5763,19 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
 
     SDL_memcpy(g, tmp, sizeof(Game));      /* every check passed: commit */
     SDL_free(tmp);
+
+    /* The story, committed only now and only from the buffer save_header_ok
+     * has already judged - the same discipline the settings file follows.
+     * story_sync afterwards rather than trusting what game_init_area left
+     * behind, because castle_seen has to be re-derived from the mask that was
+     * just replayed or the first tick would announce a castle step the player
+     * was shown three sessions ago. */
+    for (i = 0; i < NPC_TOTAL; i++)
+        story.talk[i] = buf[36 + i];
+    story.flags = buf[45];
+    story.end_t = 0;
+    story_sync(g);
+
     *seed_out = seed;
     return 0;
 }
@@ -5764,7 +6280,7 @@ static void menu_bar(char *dst, size_t cap, const char *label, int v)
 
 static const char *menu_area_name(Uint8 area)
 {
-    return area == 1 ? "forest" : area == 2 ? "underworld" : "lumiara";
+    return area == 1 ? "forest" : area == 2 ? "lumiara" : "underworld";
 }
 
 /* One slot's row. What a header can honestly say and nothing more: which world
@@ -6378,34 +6894,658 @@ static void bigmap_draw(SDL_Surface *fb, const Game *g, Scratch *sc)
     draw_text(fb, lx, ly, "m   close the map", warm);
 }
 
+/* ---- Soul events --------------------------------------------------------
+ *
+ * Nine souls, nine reactions, ONE mechanism: a kind and a countdown. Nine
+ * separate systems was the obvious way to build this and the wrong one - the
+ * brief asked for small reusable environmental events precisely so that the
+ * ninth would cost what the first did.
+ *
+ * Every effect is expressed through machinery that already existed:
+ * restoration targets light a region, entity_bob lifts a mote, the audio
+ * atomics fire a voice or a chime, and the fog LUT tints a frame. Nothing here
+ * reaches into the renderer with a special case of its own.
+ *
+ * NOT persisted - see the story struct. An event is six seconds of animation;
+ * what it leaves behind (a lit region, a collected soul) is state and is saved
+ * by the things that already own it.
+ */
+static const char *const SEV_SAY[SEV_COUNT] = {
+    "",
+    "the river is running backwards.",
+    "bells, from a tower that is not there.",
+    "there are lights in the empty houses.",
+    "every memory you have not found is in the air.",
+    "there is a second moon.",
+    "all of it again, at once, out of order.",
+    "the castle is lighting itself room by room.",
+    "the writing on everything is changing.",
+    "all of them are talking at the same time.",
+};
+
+/* Light every region that has any water in it. What Mira's river reversal and
+ * Elen's village both need is "make the world react over there", and the
+ * cheapest honest version of that with the systems in this file is to push a
+ * region's restoration target - the same call a collected fragment makes, so
+ * the fog opens exactly the way it does when something is remembered. */
+static void story_light_regions(Game *g, int watery_only)
+{
+    int tx, ty, r;
+    Uint8 want[REGION_COUNT];
+
+    SDL_memset(want, 0, sizeof(want));
+    for (ty = 0; ty < WORLD_H; ty++)
+        for (tx = 0; tx < WORLD_W; tx++) {
+            Uint8 lr = g->w.litreg[ty][tx];
+            if (lr >= REGION_COUNT) continue;
+            if (!watery_only || g->w.terr[ty][tx] == GT_WATER) want[lr] = 1;
+        }
+    for (r = 0; r < g->w.region_count; r++)
+        if (want[r]) g->w.regions[r].restore_to = 1.0f;
+}
+
+/* Begin the reaction a soul causes. One entry point, so a soul collected by
+ * the interact key and a soul collected by a debug flag cause the same six
+ * seconds. */
+static void story_event_begin(Game *g, Audio *a, int ev)
+{
+    if (ev <= SEV_NONE || ev >= SEV_COUNT)
+        return;
+    story.ev = (Uint8)ev;
+    story.ev_left = SEV_TICKS;
+    say_open("", SEV_SAY[ev], "");
+
+    switch (ev) {
+    case SEV_RIVER:                     /* mira: the water answers */
+        story_light_regions(g, 1);
+        sfx_fire(a, SFX_SOUL);
+        break;
+    case SEV_VILLAGE:                   /* elen: the houses are occupied */
+    case SEV_LIGHTS:                    /* alden: the castle lights itself */
+        story_light_regions(g, 0);
+        sfx_fire(a, SFX_CHIME);
+        break;
+    case SEV_BELLS:                     /* rowan: bells with no tower */
+        SDL_AtomicAdd(&a->layer_fire, 1);
+        sfx_fire(a, SFX_CHIME);
+        break;
+    case SEV_VOICES:                    /* the keeper: all of them at once */
+    case SEV_REPLAY:                    /* orin: everything again, at once */
+        SDL_AtomicAdd(&a->voice_fire, 1);
+        sfx_fire(a, SFX_SOUL);
+        break;
+    default:                            /* float, moon, records */
+        sfx_fire(a, SFX_SOUL);
+        break;
+    }
+    hud.mm_dirty = 1;
+    hud.bm_dirty = 1;
+}
+
+
+/* Whether the second moon should be drawn this frame, and how bright. Returns
+ * 0-255. The moon is an OVERLAY rather than a thing in the sky, because this is
+ * a top-down game and there is no sky in frame to put it in; drawing it over
+ * the world is the honest version of "you look up". */
+static int story_moon_alpha(void)
+{
+    int t;
+    if (story.ev != SEV_MOON) return 0;
+    t = SEV_TICKS - story.ev_left;
+    if (t < 60) return t * 4;
+    if (story.ev_left < 60) return story.ev_left * 4;
+    return 240;
+}
+
+/* ---- Conversations ------------------------------------------------------
+ *
+ * Four lines each, in order, one per press of E. What paces them is not a
+ * timer and not a quest graph: a person will not say their nth line until she
+ * has found n memories in the area they are standing in.
+ *
+ * That single rule is the whole of the "controlled sequence" the story needs,
+ * and it is built out of a number the game was already keeping. It makes the
+ * conversations interleave with exploration by construction rather than by an
+ * authored dependency list, it cannot deadlock (memories are placed by a
+ * generator that has already PROVED every one of them reachable), and it makes
+ * Mira's second line - you have found a memory - true at the moment she says
+ * it instead of hopefully.
+ *
+ * A person who is not ready repeats their last line rather than saying nothing.
+ * Silence from somebody standing right in front of you is indistinguishable
+ * from a broken key, which is the same reason the map refusal is a toast.
+ */
+static void story_talk(Game *g, Audio *a, int k)
+{
+    int t;
+
+    if (k < 0 || k >= NPC_TOTAL) return;
+    t = story.talk[k];
+    if (t >= TALK_LINES) return;          /* they are gone; nothing to say */
+
+    if (t > 0 && g->frags_restored < t) {
+        say_open(CAST[k].name, CAST[k].line[t - 1][0], CAST[k].line[t - 1][1]);
+        return;
+    }
+    say_open(CAST[k].name, CAST[k].line[t][0], CAST[k].line[t][1]);
+    story.talk[k] = (Uint8)(t + 1);
+    sfx_fire(a, SFX_CHIME);
+
+    /* The fourth line is the last thing they say. They are not removed from
+     * anything - entity_npc_art simply stops drawing them from the next frame,
+     * and the soul they were standing on has been under them the whole time.
+     * No death, no cutscene, no particle: the player walks back later and
+     * finds a mote where a person was. */
+    if (story.talk[k] >= TALK_LINES)
+        hud.bm_dirty = 1;
+}
+
 /* The one interaction key, in one function, so the tests drive exactly what E
- * runs. Returns the entity restored, or -1. */
+ * runs. Returns the entity restored or spoken to, or -1.
+ *
+ * Order: a person is spoken to, a soul with nobody left standing on it is
+ * collected, a memory is collected. The first two are the SAME ENTITY at
+ * different points in its life, which is why there is no second reach test and
+ * no second list - entity_in_reach found it, and cast_index says whether it is
+ * currently a person. */
 static int try_interact(Game *g, Audio *a)
 {
     int i = entity_in_reach(&g->w, g->ents, g->p.x, g->p.y);
+    int k, n;
     char buf[64];
 
     if (i < 0)
         return -1;
+
+    k = cast_index(g->area, i);
+    if (k >= 0 && !cast_gone(k)) {
+        story_talk(g, a, k);
+        return i;
+    }
+
+    /* Read BEFORE the restore, because the restore is what increments it: the
+     * nth memory found in an area shows the nth memory of that area's story,
+     * whichever tile it happened to be lying on. See the MEMORY table. */
+    n = g->frags_restored;
     game_restore(g, i);
     hud.mm_dirty = 1;
+
     if (g->ents[i].is_soul) {
         SDL_AtomicAdd(&a->voice_fire, 1);
-        sfx_fire(a, SFX_SOUL);
-        SDL_snprintf(buf, sizeof(buf), "a soul is remembered  %d/%d",
-                     g->souls_restored, SOUL_COUNT);
+        /* The world reacts. This is the difference between the two collectible
+         * kinds that the whole story rests on: a memory tells her what
+         * happened, a soul tells her who it happened to, and only the second
+         * one changes anything outside her head. */
+        if (k >= 0)
+            story_event_begin(g, a, CAST[k].event);
+        else
+            sfx_fire(a, SFX_SOUL);
     } else {
         SDL_AtomicAdd(&a->layer_fire, 1);
         sfx_fire(a, SFX_CHIME);
-        if (g->ents[i].grants == ABIL_WADE)        SDL_snprintf(buf, sizeof(buf), "you remember wading");
-        else if (g->ents[i].grants == ABIL_CLIMB)  SDL_snprintf(buf, sizeof(buf), "you remember climbing");
-        else if (g->ents[i].grants == ABIL_KINDLE) SDL_snprintf(buf, sizeof(buf), "you remember the light");
-        else SDL_snprintf(buf, sizeof(buf), "a fragment returns  %d/%d",
-                          g->frags_restored, FRAGMENT_COUNT);
+        if (n >= 0 && n < FRAGMENT_COUNT && g->area >= 1 && g->area <= 3)
+            say_open("", MEMORY[g->area - 1][n][0], MEMORY[g->area - 1][n][1]);
+        /* One memory points at the next. See star_target for the three places
+         * it deliberately points at something else. */
+        story.star_left = STAR_TICKS;
+        /* The ability is announced under the memory rather than instead of it:
+         * three of an area's seven memories are also what let her cross, and a
+         * player who is told only that she remembers wading has been told the
+         * mechanic and none of the story. */
+        if (g->ents[i].grants) {
+            SDL_snprintf(buf, sizeof(buf), "%s",
+                         g->ents[i].grants == ABIL_WADE  ? "you remember wading"
+                       : g->ents[i].grants == ABIL_CLIMB ? "you remember climbing"
+                       : "you remember the light");
+            hud_toast(buf);
+        }
     }
-    hud_toast(buf);
+
+    /* The castle key. Not a pickup lying somewhere in the realm between - it is
+     * what finishing that realm MEANS. Said once, and once is guaranteed
+     * without a latch: this line is only reached by a collection, and the
+     * collection that makes castle_key true is by definition the last one the
+     * area has to give. */
+    if (g->area == 2 && castle_key(g))
+        say_open("", "something in the castle has noticed.",
+                 "it has been waiting to.");
     return i;
 }
+
+/* ---- The end ------------------------------------------------------------
+ *
+ * The king, the assembly, the beast and the cut to black are ONE timeline
+ * driven by one tick counter, not four states with transitions between them.
+ * A scene that only ever plays forwards does not need a state machine, and a
+ * state machine here would need a rule for every pair of states that can never
+ * happen.
+ *
+ * It runs in the final chamber, which is Area 3's portal_tile. That field has
+ * been computed for every biome since portals existed and documented as unused
+ * in the terminal area - it is the one tile in the castle that generation
+ * already guarantees is open, reachable from spawn, and not on top of anything
+ * else. It needed no new placement pass and no new proof.
+ */
+#define END_BEATS 11
+#define END_BEAT_TICKS 150            /* 2.5 s a beat */
+
+static const char *const END_SAY[END_BEATS][3] = {
+    { "the king",  "you have taken your time.", "" },
+    { "",          "you know me.", "" },
+    { "the king",  "of course.", "" },
+    { "",          "who am i?", "" },
+    { "the king",  "that depends which memories you brought with you.", "" },
+    { "",          "the fragments lift out of your hands.",
+                   "they are arranging themselves." },
+    { "",          "you are standing beside him in every one of them.",
+                   "you were never brought here." },
+    { "the king",  "you were my advisor.", "you asked me to forget that." },
+    { "the king",  "you were not supposed to collect the souls.", "" },
+    { "",          "then why did you let me?", "" },
+    { "",          "", "" },          /* the silence. it is a beat of its own */
+};
+
+/* Where the end sequence has got to, as a beat index. Past the table means the
+ * beast; well past it means black. */
+static int story_end_beat(void) { return (story.end_t - 1) / END_BEAT_TICKS; }
+
+#define END_BEAST_BEAT  END_BEATS              /* it starts moving */
+#define END_BLACK_BEAT  (END_BEATS + 2)        /* the screen is gone */
+#define END_LAST_BEAT   (END_BEATS + 3)        /* the counter stops here */
+
+/* Whether E is standing in front of the final chamber with everything the
+ * chamber asks for. Separate from try_use_portal because it is not a portal:
+ * nothing is on the other side. */
+static int final_chamber_in_reach(const Game *g)
+{
+    float ex, ey, dx, dy;
+
+    if (g->area != 3 || g->w.portal_tile < 0) return 0;
+    ex = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
+    ey = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
+    dx = ex - g->p.x;
+    dy = ey - g->p.y;
+    return dx * dx + dy * dy <= INTERACT_RADIUS * INTERACT_RADIUS;
+}
+
+/* Start it, once. The guard is SF_KING rather than a local latch because a
+ * save written mid-sequence and reloaded must not play it again - and because
+ * "has the king seen her" is a fact about the story, not about this run of the
+ * program. */
+static int try_final_chamber(Game *g, Audio *a)
+{
+    if (!final_chamber_in_reach(g))
+        return 0;
+    if (!story_area_done(g, 3)) {
+        hud_toast("the chamber is not finished with you yet");
+        sfx_fire(a, SFX_DENY);
+        return 1;
+    }
+    if (story.flags & SF_KING)
+        return 1;                       /* already seen; the door does nothing */
+    story.flags |= SF_KING;
+    story.end_t = 1;
+    SDL_AtomicAdd(&a->voice_fire, 1);
+    return 1;
+}
+
+/* Say whatever beat `beat` says. Split out of the tick so that --endbeat can
+ * reach a beat without reproducing the table lookup beside it - the debug flag
+ * jumping to beat 8 and showing beat 8's line has to be the same code path, or
+ * the screenshot is of something the game never renders. */
+static void story_end_say(Game *g, Audio *a, int beat)
+{
+    if (beat < END_BEATS) {
+        say_open(END_SAY[beat][0], END_SAY[beat][1], END_SAY[beat][2]);
+        if (beat == 5) {
+            /* The assembly. Reuses the float event rather than inventing a
+             * second way to lift a mote: what she is seeing is the same thing
+             * Nera's soul showed her, which is the point being made. */
+            story_event_begin(g, a, SEV_FLOAT);
+        }
+        if (END_SAY[beat][1][0])
+            SDL_AtomicAdd(&a->voice_fire, 1);
+    } else if (beat == END_BEAST_BEAT) {
+        story.flags |= SF_BEAST;
+        say_open("", "something underneath the castle turns over.", "");
+        story_event_begin(g, a, SEV_VOICES);
+        story_light_regions(g, 0);
+    } else if (beat == END_BEAST_BEAT + 1) {
+        say_open("", "it is opening one eye.",
+                 "it is much larger than the room.");
+        SDL_AtomicAdd(&a->voice_fire, 1);
+    }
+}
+
+/* Advance it. Called from the fixed tick, so the pacing is 2.5 seconds a beat
+ * whatever the frame rate is doing - the same reason hud_tick is on the tick. */
+static void story_end_tick(Game *g, Audio *a)
+{
+    int beat, prev;
+
+    if (story.end_t <= 0)
+        return;
+    prev = story_end_beat();
+    if (story.end_t < END_LAST_BEAT * END_BEAT_TICKS + 1)
+        story.end_t++;
+    beat = story_end_beat();
+    if (beat == prev)
+        return;                          /* mid-beat; nothing to say */
+
+    story_end_say(g, a, beat);
+}
+
+/* How hard the room is shaking, in pixels, and 0 when it is not. A sine rather
+ * than a random walk, so two runs of the sequence shake identically - the same
+ * determinism rule the music is held to. */
+static int story_shake(float clock)
+{
+    int beat;
+    if (story.end_t <= 0) return 0;
+    beat = story_end_beat();
+    if (beat < END_BEAST_BEAT) return 0;
+    if (beat >= END_BLACK_BEAT) return 0;
+    return (int)(SDL_sinf(clock * 41.0f) * 3.0f);
+}
+
+/* 0-255: how much black is over the picture. The cut is a ramp rather than a
+ * hard cut because the beast is meant to be still arriving when it lands. */
+static int story_black(void)
+{
+    int beat, into;
+    if (story.end_t <= 0) return 0;
+    beat = story_end_beat();
+    if (beat < END_BEAST_BEAT + 1) return 0;
+    if (beat >= END_BLACK_BEAT) return 255;
+    into = story.end_t - (END_BEAST_BEAT + 1) * END_BEAT_TICKS;
+    if (into < 0) into = 0;
+    return into * 255 / END_BEAT_TICKS;
+}
+
+static int story_ended(void) { return story_black() >= 255; }
+
+/* ---- Drawing the story --------------------------------------------------
+ *
+ * Four things: the text panel, the guiding star, the second moon and the cut
+ * to black. They are here rather than in the HUD because they are not status -
+ * the HUD tells her how much is left, and these tell her what is happening.
+ */
+
+/* A panel across the foot of the screen. Sized to the text it holds so a
+ * one-line memory does not sit in a two-line box, and drawn with the same warm
+ * and pale pair the HUD and the menu already use - a third palette would make
+ * the story look like it came from a different game. */
+static void say_draw(SDL_Surface *fb)
+{
+    Uint32 ink, warm, pale, edge;
+    int rows, h, y, x, wpx;
+
+    if (say.left <= 0)
+        return;
+    rows = say.l2[0] ? 2 : 1;
+    if (say.who[0]) rows++;
+
+    ink  = SDL_MapRGB(fb->format, 0x10, 0x12, 0x18);
+    edge = SDL_MapRGB(fb->format, 0x3a, 0x42, 0x52);
+    warm = SDL_MapRGB(fb->format, 0xf0, 0xd8, 0xb0);
+    pale = SDL_MapRGB(fb->format, 0x9a, 0xa8, 0xb8);
+
+    /* Flush to the bottom edge rather than inset, because the HUD's seed line
+     * and its toast both live in the last twelve pixels: an inset panel left
+     * them poking out underneath it, which a screenshot found immediately and
+     * no test could have. While somebody is talking, the panel outranks both. */
+    h = rows * FONT_LINE + 12;
+    y = fb->h - h;
+    fill_rect(fb, 0, y, fb->w, h, ink);
+    fill_rect(fb, 0, y, fb->w, 1, edge);
+
+    x = 8;
+    y += 6;
+    if (say.who[0]) {
+        draw_text(fb, x, y, say.who, pale);
+        y += FONT_LINE;
+    }
+    /* Centred, because a line of speech that starts at the same x as the name
+     * above it reads as a caption rather than as somebody talking. */
+    wpx = text_w(say.l1);
+    draw_text(fb, (fb->w - wpx) / 2, y, say.l1, warm);
+    if (say.l2[0]) {
+        y += FONT_LINE;
+        wpx = text_w(say.l2);
+        draw_text(fb, (fb->w - wpx) / 2, y, say.l2, warm);
+    }
+}
+
+/* ---- The guiding star ---------------------------------------------------
+ *
+ * A mote of light off her shoulder, pointing at something. It appears when a
+ * memory is taken and fades after twenty seconds, so it is a thing that
+ * happens rather than a marker that is always on.
+ *
+ * It is deliberately NOT always truthful. The brief asked for the pattern to
+ * break occasionally, and the breaks are keyed off how many memories the area
+ * has given up - a pure function of state that is already saved, so a load
+ * resumes the same lie rather than a fresh one. At three it points at the map
+ * she has not picked up; at five it points at a person instead of a memory; at
+ * six it does not appear at all. None of this is announced anywhere.
+ *
+ * Returns the tile it is pointing at, or -1 for nothing. Split out from the
+ * drawing so --story-test can assert the breaks without a surface. */
+static int star_target(const Game *g)
+{
+    int found = story_area_frags(g, g->area);
+    int i, best = -1;
+    float bx = 0.0f, by = 0.0f, bd = 0.0f;
+    int want_soul = (found == 5);
+
+    if (found == 6)
+        return -1;                       /* the star simply is not there */
+    if (found == 3 && g->w.map_tile >= 0)
+        return g->w.map_tile;
+
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        float ex, ey, dx, dy, d;
+        if (g->ents[i].tile < 0 || g->ents[i].restored) continue;
+        if (want_soul != (int)g->ents[i].is_soul) continue;
+        ex = (float)(g->ents[i].tile % WORLD_W);
+        ey = (float)(g->ents[i].tile / WORLD_W);
+        dx = ex - g->p.x / TILE;
+        dy = ey - g->p.y / TILE;
+        d  = dx * dx + dy * dy;
+        if (best < 0 || d < bd) { best = g->ents[i].tile; bd = d; bx = dx; by = dy; }
+    }
+    (void)bx; (void)by;
+    return best;
+}
+
+static void star_draw(SDL_Surface *fb, const Game *g, float rpx, float rpy,
+                      int cam_x, int cam_y, float clock)
+{
+    int t = star_target(g);
+    float ex, ey, dx, dy, len;
+    int sx, sy, tw;
+    Uint32 col;
+
+    if (story.star_left <= 0 || t < 0)
+        return;
+    ex = (float)(t % WORLD_W) * TILE + TILE * 0.5f;
+    ey = (float)(t / WORLD_W) * TILE + TILE * 0.5f;
+    dx = ex - rpx;
+    dy = ey - rpy;
+    len = SDL_sqrtf(dx * dx + dy * dy);
+    if (len < 1.0f)
+        return;
+    sx = (int)(rpx + dx / len * STAR_ORBIT) - cam_x;
+    sy = (int)(rpy + dy / len * STAR_ORBIT) - cam_y;
+
+    /* Twinkles, and fades over the last two seconds rather than vanishing -
+     * a marker that blinks out on a frame reads as a bug. */
+    tw = (int)(SDL_sinf(clock * 3.1f) * 40.0f) + 200;
+    if (story.star_left < 120) tw = tw * story.star_left / 120;
+    if (tw < 0) tw = 0;
+    col = SDL_MapRGB(fb->format, (Uint8)tw, (Uint8)tw, (Uint8)(tw > 40 ? tw - 40 : 0));
+    fill_rect(fb, sx - 1, sy, 3, 1, col);
+    fill_rect(fb, sx, sy - 1, 1, 3, col);
+}
+
+/* ---- Overlays -----------------------------------------------------------
+ *
+ * Both blend rather than replace, and both walk the surface through
+ * SDL_GetRGB/SDL_MapRGB rather than assuming a channel order. That is slower
+ * than mask arithmetic and it does not matter: the moon runs for six seconds
+ * once per game and the fade runs once, ever.
+ */
+static void screen_blend(SDL_Surface *s, int x0, int y0, int w, int h,
+                         Uint8 tr, Uint8 tg, Uint8 tb, int amt)
+{
+    int iy, ix;
+
+    if (amt <= 0) return;
+    if (amt > 255) amt = 255;
+    if (x0 < 0) { w += x0; x0 = 0; }
+    if (y0 < 0) { h += y0; y0 = 0; }
+    if (x0 + w > s->w) w = s->w - x0;
+    if (y0 + h > s->h) h = s->h - y0;
+    if (w <= 0 || h <= 0) return;
+
+    for (iy = 0; iy < h; iy++) {
+        Uint32 *row = (Uint32 *)((Uint8 *)s->pixels + (y0 + iy) * s->pitch);
+        for (ix = 0; ix < w; ix++) {
+            Uint8 r, gg, b;
+            SDL_GetRGB(row[x0 + ix], s->format, &r, &gg, &b);
+            r  = (Uint8)(r  + (tr - r)  * amt / 255);
+            gg = (Uint8)(gg + (tg - gg) * amt / 255);
+            b  = (Uint8)(b  + (tb - b)  * amt / 255);
+            row[x0 + ix] = SDL_MapRGB(s->format, r, gg, b);
+        }
+    }
+}
+
+/* A soft-edged disc. Rectangles will not do: stacking concentric squares to
+ * fake one produced a hard white BOX on screen, which is exactly the class of
+ * bug this project keeps finding by looking rather than by testing. Solid to
+ * `core`, then falling off to nothing at `r`. */
+#define MOON_R    26
+#define MOON_CORE 13
+
+static void screen_disc(SDL_Surface *s, int cx, int cy, int r, int core,
+                        Uint8 tr, Uint8 tg, Uint8 tb, int amt)
+{
+    int iy, ix, x0 = cx - r, y0 = cy - r, x1 = cx + r, y1 = cy + r;
+
+    if (amt <= 0 || r <= 0) return;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > s->w) x1 = s->w;
+    if (y1 > s->h) y1 = s->h;
+
+    for (iy = y0; iy < y1; iy++) {
+        Uint32 *row = (Uint32 *)((Uint8 *)s->pixels + iy * s->pitch);
+        for (ix = x0; ix < x1; ix++) {
+            int dx = ix - cx, dy = iy - cy;
+            int d2 = dx * dx + dy * dy, a2, i;
+            Uint8 c[3], t[3];
+            if (d2 > r * r) continue;
+            if (d2 <= core * core) {
+                a2 = amt;
+            } else {
+                /* Linear in the RADIUS, not in the squared radius, or the
+                 * halo bunches up against the core and reads as an edge. */
+                int d = (int)SDL_sqrtf((float)d2);
+                a2 = amt * (r - d) / (r - core) / 3;
+            }
+            SDL_GetRGB(row[ix], s->format, &c[0], &c[1], &c[2]);
+            t[0] = tr; t[1] = tg; t[2] = tb;
+            for (i = 0; i < 3; i++)
+                c[i] = (Uint8)(c[i] + (t[i] - c[i]) * a2 / 255);
+            row[ix] = SDL_MapRGB(s->format, c[0], c[1], c[2]);
+        }
+    }
+}
+
+/* The second moon, and the fade. One function because they are both "something
+ * is over the whole picture" and main should ask that question once. */
+static void story_overlay(SDL_Surface *fb)
+{
+    int a = story_moon_alpha();
+
+    /* High and off centre so it does not read as a UI element. There is no sky
+     * in a top-down frame to hang it in, so it hangs over everything instead -
+     * which is the honest rendering of looking up in a game that never shows
+     * the horizon. */
+    if (a > 0)
+        screen_disc(fb, fb->w * 2 / 3, fb->h / 5, MOON_R, MOON_CORE,
+                    0xd8, 0xe0, 0xf4, a);
+    screen_blend(fb, 0, 0, fb->w, fb->h, 0, 0, 0, story_black());
+}
+
+/* The last screen. Deliberately the only place in the game that states a
+ * number about her rather than about the world, and deliberately the number
+ * that has not moved. */
+/* Four lines, and NOT the four percentages the brief asked for: FONT_5X7
+ * leaves 0x25 blank, so every one of them shipped as "100" with the sign
+ * silently missing - found in a screenshot, after --story-test had passed,
+ * because the test swept the dialogue tables and this was a local array it
+ * could not see. Hoisted to file scope so the sweep reaches it, and reworded
+ * so it needs no punctuation the font does not have. The last line is the
+ * whole point of the screen and now says so in words rather than in a nought. */
+static const char *const END_CARD[4] = {
+    "every memory restored",
+    "every soul remembered",
+    "all of it remembered",
+    "none of you remembered",
+};
+
+static void story_end_card(SDL_Surface *fb)
+{
+    Uint32 warm = SDL_MapRGB(fb->format, 0xf0, 0xd8, 0xb0);
+    Uint32 pale = SDL_MapRGB(fb->format, 0x9a, 0xa8, 0xb8);
+    const char *const *rows = END_CARD;
+    int i, y;
+
+    if (!story_ended())
+        return;
+    y = fb->h / 2 - FONT_LINE * 3;
+    for (i = 0; i < 4; i++) {
+        int w = text_w_scaled(rows[i], 2);
+        draw_text_scaled(fb, (fb->w - w) / 2, y, rows[i],
+                         i == 3 ? warm : pale, 2);
+        y += FONT_LINE_AT(2) + 4;
+    }
+}
+
+/* ---- The story's tick ---------------------------------------------------
+ *
+ * One place where time passes for the story, on the FIXED tick rather than per
+ * frame, for the same reason hud_tick is: a conversation must last five
+ * seconds whatever the frame rate is doing.
+ */
+static void story_tick(Game *g, Audio *a)
+{
+    int cs;
+
+    if (say.left > 0)      say.left--;
+    if (story.star_left > 0) story.star_left--;
+    if (story.ev_left > 0) {
+        story.ev_left--;
+        if (story.ev_left == 0) story.ev = SEV_NONE;
+    }
+    story_end_tick(g, a);
+
+    /* The castle answers her memories. Announced once per step rather than
+     * held as a stored state: castle_state is derived, and castle_seen is only
+     * a note of what the player has been shown so the same step is not
+     * announced twice. It is transient - a load re-syncs it below rather than
+     * replaying three announcements. */
+    cs = castle_state(g);
+    if (cs > (int)story.castle_seen) {
+        story.castle_seen = (Uint8)cs;
+        sfx_fire(a, SFX_SOUL);
+        hud_toast(cs >= 2 ? "the castle is not asleep any more"
+                          : "something about the castle has changed");
+    }
+}
+
 
 /* The map fragment, on the same key and checked AFTER try_interact, so a mote
  * and a chart lying in the same reach resolve the way the prompt drew them.
@@ -6491,14 +7631,7 @@ static void game_reseed(Game *g, Scratch *sc, Audio *a, Uint64 seed)
  * not ask for. */
 static void game_transition_to_area(Game *g, Scratch *sc, Uint8 next_area)
 {
-    int i;
-    Uint32 shift = (g->area == 1) ? 0 : (g->area == 2) ? SAVE_AREA2_SHIFT : SAVE_AREA3_SHIFT;
-    Uint32 live_bits = 0;
-
-    for (i = 0; i < ENTITY_COUNT; i++)
-        if (g->ents[i].restored)
-            live_bits |= 1u << i;
-    g->restored = (g->restored & ~(SAVE_AREA1_BITS << shift)) | (live_bits << shift);
+    g->restored = game_live_mask(g);
     game_init_area(g, sc, g->seed, next_area);
     hud.mm_dirty  = 1;
     hud.win_shown = 0;
@@ -6533,12 +7666,16 @@ static int try_use_portal(Game *g, Scratch *sc, Audio *a)
          * an Area 2 save reseeds audio from the FILE's root seed the same
          * way, so this stays the one seed audio ever sees, whichever area is
          * active. */
-        audio_request_reset(a, g->seed, 0, 0, BIOME_UNDERWORLD);
-        hud_toast("the underworld opens");
+        audio_request_reset(a, g->seed, 0, 0, biome_for_area(2));
+        hud_toast("the way between opens");
     } else {
         game_transition_to_area(g, sc, 3);
-        audio_request_reset(a, g->seed, 0, 0, BIOME_LUMIARA);
-        hud_toast("the lumiara opens");
+        audio_request_reset(a, g->seed, 0, 0, biome_for_area(3));
+        /* Not a locked door being unlocked. Nothing was carried here and
+         * nothing is spent - the gate reacts to HER, which is the first thing
+         * in the game to treat her as somebody it already knows. */
+        say_open("", "the gate is already open.",
+                 "it was not, a moment ago.");
     }
     return 1;
 }
@@ -7721,7 +8858,7 @@ static int reach_selftest(int seeds, Uint64 base)
     {
     int area;
     for (area = 1; area <= 3; area++) {
-    Uint8 biome = (area == 1) ? BIOME_FOREST : (area == 2) ? BIOME_UNDERWORLD : BIOME_LUMIARA;
+    Uint8 biome = biome_for_area(area);
     for (s = 0; s < seeds; s++) {
         Uint64 seed = base + (Uint64)s;
         Uint64 area_seed = (area == 1) ? seed : (area == 2) ? (seed ^ AREA2_SEED_SALT) : (seed ^ AREA3_SEED_SALT);
@@ -7835,7 +8972,7 @@ static int play_selftest(int seeds, Uint64 base)
     {
     int area;
     for (area = 1; area <= 3; area++) {
-    Uint8 biome = (area == 1) ? BIOME_FOREST : (area == 2) ? BIOME_UNDERWORLD : BIOME_LUMIARA;
+    Uint8 biome = biome_for_area(area);
     for (s = 0; s < seeds; s++) {
         Uint64 seed = base + (Uint64)s;
         Uint64 area_seed = (area == 1) ? seed : (area == 2) ? (seed ^ AREA2_SEED_SALT) : (seed ^ AREA3_SEED_SALT);
@@ -10040,6 +11177,612 @@ static int map_selftest(int seeds, Uint64 base)
     return fails;
 }
 
+/* ---- The story ----------------------------------------------------------
+ *
+ * Nine conversations, twenty-one memories, nine soul events, three castle
+ * states and one ending, none of which need a window, a device or a save file
+ * to drive - the same property that lets --menu-test drive every page of the
+ * menu with none of those. What it cannot check is whether any of it READS
+ * well; that is what --standon ent and the screenshot recipes are for.
+ *
+ * Every section carries a negative control, because a checker that has never
+ * rejected anything proves nothing.
+ */
+static int story_line_holes(const char *s)
+{
+    int i, holes = 0;
+
+    for (i = 0; s[i]; i++)
+        if (s[i] != ' ' && font_bits((unsigned char)s[i], FONT_STRIDE) == 0)
+            holes++;
+    return holes;
+}
+
+static int story_selftest(int seeds, Uint64 base)
+{
+    Game *g = (Game *)SDL_malloc(sizeof(Game));
+    Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+    Audio *au = (Audio *)SDL_malloc(sizeof(Audio));
+    int fails = 0, i, k, t, s_i, area;
+
+    if (!g || !sc || !au) {
+        printf("FAIL  story: out of memory\n");
+        SDL_free(g); SDL_free(sc); SDL_free(au);
+        return 1;
+    }
+    SDL_zero(*au);
+
+    /* ---- (1) every line the game can say is drawable --------------------- */
+    {
+        int holes = 0, longest = 0, lines = 0;
+        const char *worst = "";
+        for (k = 0; k < NPC_TOTAL; k++) {
+            holes += story_line_holes(CAST[k].name);
+            for (t = 0; t < TALK_LINES; t++)
+                for (i = 0; i < 2; i++) {
+                    const char *L = CAST[k].line[t][i];
+                    int w = text_w(L);
+                    holes += story_line_holes(L);
+                    lines++;
+                    if (w > longest) { longest = w; worst = L; }
+                }
+        }
+        for (area = 0; area < 3; area++)
+            for (t = 0; t < FRAGMENT_COUNT; t++)
+                for (i = 0; i < 2; i++) {
+                    const char *L = MEMORY[area][t][i];
+                    int w = text_w(L);
+                    holes += story_line_holes(L);
+                    lines++;
+                    if (w > longest) { longest = w; worst = L; }
+                }
+        for (t = 0; t < END_BEATS; t++)
+            for (i = 0; i < 3; i++) {
+                const char *L = END_SAY[t][i];
+                int w = (i == 0) ? 0 : text_w(L);
+                holes += story_line_holes(L);
+                lines++;
+                if (w > longest) { longest = w; worst = L; }
+            }
+        for (t = 0; t < SEV_COUNT; t++) {
+            holes += story_line_holes(SEV_SAY[t]);
+            lines++;
+            if (text_w(SEV_SAY[t]) > longest) { longest = text_w(SEV_SAY[t]); worst = SEV_SAY[t]; }
+        }
+        /* The end card, which this sweep did NOT reach when it was a local
+         * array inside story_end_card: all four rows ended in a per-cent sign,
+         * FONT_5X7 leaves 0x25 blank, and every one of them shipped a hole
+         * that only a screenshot found. Drawn at scale 2, so its width budget
+         * is the one this measures against. */
+        for (t = 0; t < 4; t++) {
+            int w = text_w_scaled(END_CARD[t], 2);
+            holes += story_line_holes(END_CARD[t]);
+            lines++;
+            if (w > LOGICAL_W - 32) {
+                printf("FAIL  story: end card row %d is %d px at scale 2, over"
+                       " the %d px the screen has\n", t, w, LOGICAL_W - 32);
+                fails++;
+            }
+        }
+        if (holes) {
+            printf("FAIL  story: %d character(s) across the script have no"
+                   " glyph and would ship as holes\n", holes);
+            fails++;
+        }
+        /* The panel is inset 8 px a side and the text is centred inside that,
+         * so this is the real budget and not a guess. */
+        if (longest > LOGICAL_W - 32) {
+            printf("FAIL  story: the longest line is %d px, over the %d px the"
+                   " panel has: %s\n", longest, LOGICAL_W - 32, worst);
+            fails++;
+        }
+        if (!fails)
+            printf("story   : %d script lines, all drawable, longest %d px of"
+                   " %d\n", lines, longest, LOGICAL_W - 32);
+
+        /* Negative control: the detector must fire on a line that uses a
+         * character FONT_5X7 leaves blank. A double quote is the one the
+         * script is most likely to grow by accident. */
+        if (font_bits('"', FONT_STRIDE) != 0) {
+            printf("FAIL  story: negative control - a double quote HAS bits, so"
+                   " the hole check cannot catch a line that uses one\n");
+            fails++;
+        } else if (story_line_holes("he said \"no\".") == 0) {
+            printf("FAIL  story: negative control - a line containing a double"
+                   " quote passed the hole check it should fail\n");
+            fails++;
+        } else {
+            printf("story   : negative control - a quoted line is caught\n");
+        }
+    }
+
+    /* ---- (2) area and biome name each other back ------------------------- */
+    {
+        int bad = 0;
+        for (area = 1; area <= 3; area++)
+            if (area_for_biome(biome_for_area((Uint8)area)) != (Uint8)area) bad++;
+        if (bad) {
+            printf("FAIL  story: %d area(s) do not survive the biome round"
+                   " trip - the story would be told over the wrong world\n", bad);
+            fails++;
+        } else {
+            printf("story   : area 1-3 round-trip through biome_for_area\n");
+        }
+        /* Negative control: the round trip must NOT hold for a mapping that
+         * sends two areas to one biome, which is the mistake worth catching. */
+        if (area_for_biome(BIOME_FOREST) == area_for_biome(BIOME_LUMIARA)) {
+            printf("FAIL  story: negative control - two biomes name the same"
+                   " area, so the round trip proves nothing\n");
+            fails++;
+        }
+    }
+
+    /* ---- (3) the cast sits on souls and only on souls -------------------- */
+    {
+        int seen[NPC_TOTAL], bad = 0;
+        SDL_memset(seen, 0, sizeof(seen));
+        for (area = 1; area <= 3; area++)
+            for (i = 0; i < ENTITY_COUNT; i++) {
+                int idx = cast_index((Uint8)area, i);
+                if (i < FRAGMENT_COUNT) {
+                    if (idx != -1) bad++;             /* a memory has nobody */
+                } else {
+                    if (idx < 0 || idx >= NPC_TOTAL) { bad++; continue; }
+                    seen[idx]++;
+                }
+            }
+        for (k = 0; k < NPC_TOTAL; k++)
+            if (seen[k] != 1) bad++;                  /* exactly one entity each */
+        if (bad) {
+            printf("FAIL  story: cast_index is not a bijection from souls to"
+                   " the cast (%d fault(s))\n", bad);
+            fails++;
+        } else {
+            printf("story   : %d souls map one-to-one onto %d people, and no"
+                   " memory has anybody on it\n", NPC_TOTAL, NPC_TOTAL);
+        }
+        /* Negative control: an out-of-range entity must be refused, not
+         * silently folded back into the cast. */
+        if (cast_index(1, ENTITY_COUNT) != -1 || cast_index(4, FRAGMENT_COUNT) != -1) {
+            printf("FAIL  story: negative control - cast_index accepted an"
+                   " entity or area outside the world\n");
+            fails++;
+        }
+    }
+
+    /* ---- (4) every person has an event, and every event has a line ------- */
+    {
+        int used[SEV_COUNT], bad = 0;
+        SDL_memset(used, 0, sizeof(used));
+        for (k = 0; k < NPC_TOTAL; k++) {
+            if (CAST[k].event <= SEV_NONE || CAST[k].event >= SEV_COUNT) { bad++; continue; }
+            used[CAST[k].event]++;
+        }
+        for (t = SEV_RIVER; t < SEV_COUNT; t++) {
+            if (used[t] != 1) bad++;                  /* no sharing, none spare */
+            if (!SEV_SAY[t][0]) bad++;
+        }
+        if (bad) {
+            printf("FAIL  story: the nine souls and the nine events do not pair"
+                   " up one-to-one (%d fault(s))\n", bad);
+            fails++;
+        } else {
+            printf("story   : 9 souls, 9 distinct events, all with a line\n");
+        }
+    }
+
+    /* ---- (5) a conversation runs 1-2-3-4 and then the person is gone ----- */
+    for (s_i = 0; s_i < seeds; s_i++) {
+        Uint64 seed = base + (Uint64)s_i;
+        int soul_ent = FRAGMENT_COUNT;
+
+        SDL_zero(story);
+        game_init(g, sc, seed);
+        k = cast_index(1, soul_ent);
+
+        /* Line one is free; line two needs a memory found, and so on. Nothing
+         * is collected here, so she should be stuck at one however often she
+         * presses. */
+        for (t = 0; t < 6; t++) story_talk(g, au, k);
+        if (story.talk[k] != 1) {
+            printf("FAIL  story: seed %.0f - six presses with no memories found"
+                   " left the conversation at %d, expected 1\n",
+                   (double)seed, story.talk[k]);
+            fails++;
+        }
+        /* Feed it memories one at a time; each should unlock exactly one line. */
+        for (t = 1; t < TALK_LINES; t++) {
+            g->ents[t - 1].restored = 1;
+            g->frags_restored = t;
+            story_talk(g, au, k);
+            story_talk(g, au, k);            /* twice: the gate must still hold */
+            if (story.talk[k] != (Uint8)(t + 1)) {
+                printf("FAIL  story: seed %.0f - with %d memories the"
+                       " conversation reached %d, expected %d\n",
+                       (double)seed, t, story.talk[k], t + 1);
+                fails++;
+                break;
+            }
+        }
+        if (!cast_gone(k)) {
+            printf("FAIL  story: seed %.0f - four lines said and the person is"
+                   " still there\n", (double)seed);
+            fails++;
+        }
+        /* Gone means not drawn, and the soul underneath is now reachable. */
+        if (g->ents[soul_ent].tile >= 0 &&
+            entity_npc_art(&g->w, g->ents, soul_ent, 0.0f) != ART_NONE) {
+            printf("FAIL  story: seed %.0f - a person who has said everything"
+                   " is still being drawn\n", (double)seed);
+            fails++;
+        }
+        /* And a conversation can never run backwards, which is what a stray
+         * SDL_zero or a reset in the wrong place would look like. */
+        story_talk(g, au, k);
+        if (story.talk[k] != TALK_LINES) {
+            printf("FAIL  story: seed %.0f - talking to somebody who is gone"
+                   " moved the count to %d\n", (double)seed, story.talk[k]);
+            fails++;
+        }
+    }
+    if (!fails)
+        printf("story   : %d seeds - conversations advance one line per memory"
+               " and stop at %d\n", seeds, TALK_LINES);
+
+    /* Negative control for (5): a gate that ignored frags_restored would let
+     * all four lines out on four presses with nothing found. Prove the harness
+     * can see that by asking the gate directly. */
+    {
+        SDL_zero(story);
+        game_init(g, sc, base);
+        g->frags_restored = 0;
+        for (t = 0; t < TALK_LINES; t++) story_talk(g, au, 0);
+        if (story.talk[0] >= TALK_LINES) {
+            printf("FAIL  story: negative control - four presses with no"
+                   " memories emptied a whole conversation\n");
+            fails++;
+        } else {
+            printf("story   : negative control - four presses with nothing"
+                   " found still only buy one line\n");
+        }
+    }
+
+    /* ---- (5b) the dialogue gate can never strand a soul ------------------
+     *
+     * The one way this design could soft-lock: souls are behind conversations,
+     * conversations are behind memories, and if a person needed more memories
+     * than the area contains, their soul would be uncollectable and the portal
+     * out would never open. world_solvable proves every entity is REACHABLE;
+     * nothing before this proved every entity was OBTAINABLE.
+     *
+     * Simulated rather than argued: collect this area's memories one at a time,
+     * talk to everybody after each, and assert all three souls have come free
+     * before the memories run out. */
+    for (s_i = 0; s_i < seeds; s_i++) {
+        Uint64 seed = base + (Uint64)s_i;
+        for (area = 1; area <= 3; area++) {
+            int freed = 0, mem;
+            SDL_zero(story);
+            game_init(g, sc, seed);
+            if (area != 1) {
+                g->restored = 0;
+                game_init_area(g, sc, seed, (Uint8)area);
+            }
+            for (mem = 0; mem <= FRAGMENT_COUNT; mem++) {
+                if (mem > 0) {
+                    g->ents[mem - 1].restored = 1;
+                    g->frags_restored = mem;
+                }
+                for (i = 0; i < NPC_PER_AREA; i++) {
+                    k = cast_index((Uint8)area, FRAGMENT_COUNT + i);
+                    /* Four presses, which is all a player standing there can
+                     * do; the gate is what decides how many land. */
+                    for (t = 0; t < TALK_LINES; t++) story_talk(g, au, k);
+                }
+                freed = 0;
+                for (i = 0; i < NPC_PER_AREA; i++)
+                    if (cast_gone(cast_index((Uint8)area, FRAGMENT_COUNT + i)))
+                        freed++;
+                if (freed == NPC_PER_AREA) break;
+            }
+            if (freed != NPC_PER_AREA) {
+                printf("FAIL  story: seed %.0f area %d - only %d of %d souls"
+                       " came free with every memory found: the dialogue gate"
+                       " soft-locks this world\n",
+                       (double)seed, area, freed, NPC_PER_AREA);
+                fails++;
+            }
+        }
+    }
+    /* Negative control: the check must actually be able to see a strand. A
+     * person needing more memories than the area has is exactly the mistake a
+     * later edit to TALK_LINES would make. */
+    if (TALK_LINES - 1 > FRAGMENT_COUNT) {
+        printf("FAIL  story: a conversation needs %d memories and an area only"
+               " has %d - this cannot be completed\n",
+               TALK_LINES - 1, FRAGMENT_COUNT);
+        fails++;
+    } else {
+        printf("story   : %d seeds x 3 areas - every soul comes free within the"
+               " memories its area holds (%d needed, %d available)\n",
+               seeds, TALK_LINES - 1, FRAGMENT_COUNT);
+    }
+
+    /* ---- (6) the castle has three states and never goes backwards -------- */
+    {
+        int last = -1, bad = 0, steps = 0;
+        SDL_zero(story);
+        game_init(g, sc, base);
+        for (i = 0; i <= FRAGMENT_COUNT; i++) {
+            int cs;
+            if (i > 0) g->ents[i - 1].restored = 1;
+            cs = castle_state(g);
+            if (cs < last) bad++;
+            if (cs > last) steps++;
+            if (cs < 0 || cs > 2) bad++;
+            last = cs;
+        }
+        if (bad || steps != 3) {
+            printf("FAIL  story: the castle took %d step(s) over seven memories"
+                   " with %d fault(s), expected 3 and 0\n", steps, bad);
+            fails++;
+        } else {
+            printf("story   : the castle passes through exactly 3 states,"
+                   " monotonically\n");
+        }
+        /* Negative control: it must actually be driven by AREA 1's memories.
+         * Clearing them has to take it back to sleeping. */
+        for (i = 0; i < ENTITY_COUNT; i++) g->ents[i].restored = 0;
+        if (castle_state(g) != 0) {
+            printf("FAIL  story: negative control - the castle stayed awake"
+                   " with no memories found\n");
+            fails++;
+        }
+    }
+
+    /* ---- (7) the key is the realm between, and nothing else -------------- */
+    {
+        SDL_zero(story);
+        game_init(g, sc, base);
+        if (castle_key(g)) {
+            printf("FAIL  story: a fresh game already opens the castle\n");
+            fails++;
+        }
+        /* Every Area 1 bit set must NOT be enough - the key is Area 2's. */
+        g->restored = SAVE_AREA1_BITS;
+        if (castle_key(g)) {
+            printf("FAIL  story: finishing the Mainland opened the castle\n");
+            fails++;
+        }
+        g->restored = SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT);
+        if (!castle_key(g)) {
+            printf("FAIL  story: finishing the realm between did NOT open the"
+                   " castle\n");
+            fails++;
+        } else {
+            printf("story   : the castle opens on Area 2 and on nothing else\n");
+        }
+    }
+
+    /* ---- (8) the star tells the truth, except where it does not ---------- */
+    {
+        int broke_map = 0, broke_soul = 0, vanished = 0;
+        SDL_zero(story);
+        game_init(g, sc, base);
+        for (i = 0; i < FRAGMENT_COUNT; i++) {
+            int tgt;
+            g->ents[i].restored = 1;
+            g->frags_restored = i + 1;
+            tgt = star_target(g);
+            if (i + 1 == 3 && g->w.map_tile >= 0 && tgt == g->w.map_tile) broke_map = 1;
+            if (i + 1 == 5) {
+                int j;
+                for (j = FRAGMENT_COUNT; j < ENTITY_COUNT; j++)
+                    if (tgt == g->ents[j].tile) broke_soul = 1;
+            }
+            if (i + 1 == 6 && tgt < 0) vanished = 1;
+        }
+        if (!broke_map || !broke_soul || !vanished) {
+            printf("FAIL  story: the star's breaks did not all fire (map %d,"
+                   " person %d, absent %d)\n", broke_map, broke_soul, vanished);
+            fails++;
+        } else {
+            printf("story   : the star breaks pattern at 3, 5 and 6 memories\n");
+        }
+        /* Negative control: with two memories found it must be pointing at a
+         * memory, or the breaks above are not breaks at all. */
+        SDL_zero(story);
+        game_init(g, sc, base);
+        g->ents[0].restored = 1;
+        g->ents[1].restored = 1;
+        {
+            int tgt = star_target(g), on_frag = 0;
+            for (i = 0; i < FRAGMENT_COUNT; i++)
+                if (tgt >= 0 && tgt == g->ents[i].tile && !g->ents[i].restored)
+                    on_frag = 1;
+            if (!on_frag) {
+                printf("FAIL  story: negative control - the star was not"
+                       " pointing at a memory when it had no reason not to\n");
+                fails++;
+            }
+        }
+    }
+
+    /* ---- (9) the ending runs once, forwards, and ends black -------------- */
+    {
+        int black_seen = 0, beast_seen = 0, ticks;
+        SDL_zero(story);
+        game_init(g, sc, base);
+        g->area = 3;
+        g->restored = SAVE_ALL_BITS;
+        for (i = 0; i < ENTITY_COUNT; i++) g->ents[i].restored = 1;
+        g->frags_restored = FRAGMENT_COUNT;
+        g->souls_restored = SOUL_COUNT;
+        g->p.x = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
+        g->p.y = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
+
+        if (!try_final_chamber(g, au) || !(story.flags & SF_KING)) {
+            printf("FAIL  story: the final chamber did not open to a finished"
+                   " game\n");
+            fails++;
+        }
+        for (ticks = 0; ticks < (END_LAST_BEAT + 2) * END_BEAT_TICKS; ticks++) {
+            story_tick(g, au);
+            if (story.flags & SF_BEAST) beast_seen = 1;
+            if (story_ended()) black_seen = 1;
+        }
+        if (!beast_seen || !black_seen) {
+            printf("FAIL  story: the sequence ran to the end without waking"
+                   " (%d) or without cutting to black (%d)\n",
+                   beast_seen, black_seen);
+            fails++;
+        } else {
+            printf("story   : the end runs %d beats, wakes it, and cuts to"
+                   " black\n", END_LAST_BEAT);
+        }
+        /* It must stop, not wrap: another thousand ticks must leave it black
+         * rather than starting the king over. */
+        for (ticks = 0; ticks < 1000; ticks++) story_tick(g, au);
+        if (!story_ended()) {
+            printf("FAIL  story: the ending restarted itself\n");
+            fails++;
+        }
+        /* And pressing E on the chamber again must not replay it. */
+        story.end_t = 0;
+        if (try_final_chamber(g, au) && story.end_t != 0) {
+            printf("FAIL  story: the king sequence can be triggered twice\n");
+            fails++;
+        } else {
+            printf("story   : the king sequence cannot be triggered twice\n");
+        }
+        /* Negative control: an UNFINISHED castle must be refused. */
+        SDL_zero(story);
+        game_init(g, sc, base);
+        g->area = 3;
+        g->p.x = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
+        g->p.y = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
+        (void)try_final_chamber(g, au);
+        if (story.flags & SF_KING) {
+            printf("FAIL  story: negative control - the chamber opened to a"
+                   " game with nothing collected\n");
+            fails++;
+        } else {
+            printf("story   : negative control - an unfinished castle is"
+                   " refused\n");
+        }
+    }
+
+    /* ---- (10) a soul event starts, holds, and stops ---------------------- */
+    {
+        int bad = 0;
+        for (k = 0; k < NPC_TOTAL; k++) {
+            int ticks;
+            SDL_zero(story);
+            game_init(g, sc, base);
+            story_event_begin(g, au, CAST[k].event);
+            if (story.ev != CAST[k].event || story.ev_left != SEV_TICKS) bad++;
+            for (ticks = 0; ticks < SEV_TICKS; ticks++) story_tick(g, au);
+            if (story.ev != SEV_NONE || story.ev_left != 0) bad++;
+            /* The lift must be back to nothing, or motes would float forever
+             * and take the interact prompt with them. */
+            if (story_ev_lift() != 0) bad++;
+        }
+        if (bad) {
+            printf("FAIL  story: %d fault(s) starting or ending the nine soul"
+                   " events\n", bad);
+            fails++;
+        } else {
+            printf("story   : all 9 soul events start, hold %d ticks and"
+                   " stop clean\n", SEV_TICKS);
+        }
+        /* Negative control: an event id outside the table must be refused
+         * rather than run with a garbage line. */
+        SDL_zero(story);
+        story_event_begin(g, au, SEV_COUNT);
+        story_event_begin(g, au, SEV_NONE);
+        if (story.ev != SEV_NONE || story.ev_left != 0) {
+            printf("FAIL  story: negative control - an out-of-range soul event"
+                   " was allowed to start\n");
+            fails++;
+        }
+    }
+
+    /* ---- (11) the story survives a save and a load ----------------------- */
+    {
+        const char *path = "wayfarer-storytest.sav";
+        Story before;
+        SDL_zero(story);
+        game_init(g, sc, base);
+        for (k = 0; k < NPC_TOTAL / 3; k++) story.talk[k] = (Uint8)(k + 1);
+        before = story;
+
+        if (game_save(g, path) != 0) {
+            printf("FAIL  story: could not write the test save\n");
+            fails++;
+        } else {
+            Uint64 out = 0;
+            SDL_zero(story);                 /* forget everything */
+            if (game_load(g, sc, path, &out) != 0) {
+                printf("FAIL  story: the save the story wrote would not load"
+                       " back\n");
+                fails++;
+            } else {
+                for (k = 0; k < NPC_TOTAL; k++)
+                    if (story.talk[k] != before.talk[k]) {
+                        printf("FAIL  story: conversation %d came back as %d,"
+                               " was %d\n", k, story.talk[k], before.talk[k]);
+                        fails++;
+                        break;
+                    }
+                if (story.flags != before.flags) {
+                    printf("FAIL  story: the story flags came back as %u, were"
+                           " %u\n", story.flags, before.flags);
+                    fails++;
+                }
+                if (!fails)
+                    printf("story   : conversations and flags survive a save"
+                           " and a load\n");
+            }
+            /* Negative control: a file whose conversation byte is impossible
+             * must be refused, and must leave the live story alone. */
+            {
+                Uint8 buf[SAVE_SIZE];
+                SDL_RWops *rw = SDL_RWFromFile(path, "rb");
+                int ok = 0;
+                if (rw && SDL_RWread(rw, buf, 1, SAVE_SIZE) == SAVE_SIZE) ok = 1;
+                if (rw) SDL_RWclose(rw);
+                if (ok) {
+                    buf[36] = TALK_LINES + 1;
+                    rw = SDL_RWFromFile(path, "wb");
+                    if (rw) {
+                        SDL_RWwrite(rw, buf, 1, SAVE_SIZE);
+                        SDL_RWclose(rw);
+                    }
+                    before = story;
+                    if (game_load(g, sc, path, &out) == 0) {
+                        printf("FAIL  story: negative control - a save claiming"
+                               " five conversations was accepted\n");
+                        fails++;
+                    } else if (SDL_memcmp(&before, &story, sizeof(Story)) != 0) {
+                        printf("FAIL  story: a refused load changed the live"
+                               " story\n");
+                        fails++;
+                    } else {
+                        printf("story   : negative control - an impossible"
+                               " conversation count is refused, story"
+                               " untouched\n");
+                    }
+                }
+            }
+            remove(path);
+        }
+    }
+
+    SDL_free(g); SDL_free(sc); SDL_free(au);
+    printf("story   : %s\n", fails ? "FAIL" : "PASS");
+    return fails ? 1 : 0;
+}
+
 /* ---- --npc-test ---------------------------------------------------------
  *
  * The cast that now holds the fragments. Four things are worth proving, and
@@ -10178,22 +11921,27 @@ static int npc_selftest(int seeds, Uint64 base)
         }
     }
 
-    /* ---- (3) One orb, the rest NPCs, stable across regeneration --------- */
+    /* ---- (3) People on souls only, stable across regeneration ---------- */
     for (s_i = 0; s_i < seeds; s_i++) {
         Uint64 seed = base + (Uint64)s_i;
         for (area = 1; area <= 3; area++) {
-            int orb, placed = 0, npcs = 0, orbs = 0, best = -1, bestd = 0;
-            int sx, sy;
+            int placed = 0, npcs = 0, motes = 0, mis = 0;
 
             g->restored = 0; g->maps = 0;
+            SDL_zero(story);
             game_init_area(g, sc, seed, (Uint8)area);
-            orb = entity_orb_index(&g->w, g->ents);
 
             for (i = 0; i < ENTITY_COUNT; i++) {
+                int has;
                 if (g->ents[i].tile < 0) continue;
                 placed++;
-                if (entity_npc_art(&g->w, g->ents, i, 0.0f) == ART_NONE) orbs++;
-                else npcs++;
+                has = (entity_npc_art(&g->w, g->ents, i, 0.0f) != ART_NONE);
+                if (has) npcs++; else motes++;
+                /* The rule itself: somebody stands on a soul and on nothing
+                 * else. Asked of every entity rather than of a count, so a
+                 * world that got the totals right by cancelling two mistakes
+                 * still fails. */
+                if (has != (int)g->ents[i].is_soul) mis++;
             }
             if (placed == 0) {
                 printf("FAIL  npc: seed %.0f area %d placed no entities\n",
@@ -10201,42 +11949,47 @@ static int npc_selftest(int seeds, Uint64 base)
                 fails++;
                 continue;
             }
-            if (orbs != 1) {
-                printf("FAIL  npc: seed %.0f area %d left %d orbs, expected"
-                       " exactly 1\n", (double)seed, area, orbs);
+            if (mis) {
+                printf("FAIL  npc: seed %.0f area %d has %d entit(ies) whose"
+                       " cast presence disagrees with is_soul\n",
+                       (double)seed, area, mis);
                 fails++;
             }
-            if (npcs != placed - 1) {
-                printf("FAIL  npc: seed %.0f area %d has %d npcs for %d placed"
-                       " entities\n", (double)seed, area, npcs, placed);
+            if (npcs != SOUL_COUNT || motes != placed - SOUL_COUNT) {
+                printf("FAIL  npc: seed %.0f area %d drew %d people and %d"
+                       " motes, expected %d and %d\n", (double)seed, area,
+                       npcs, motes, SOUL_COUNT, placed - SOUL_COUNT);
                 fails++;
             }
-            /* The orb is the nearest to spawn - recomputed here by an
-             * independent scan rather than by calling the same function back. */
-            sx = g->w.spawn_tile % WORLD_W;
-            sy = g->w.spawn_tile / WORLD_W;
-            for (i = 0; i < ENTITY_COUNT; i++) {
-                int dx, dy, d;
-                if (g->ents[i].tile < 0) continue;
-                dx = (g->ents[i].tile % WORLD_W) - sx;
-                dy = (g->ents[i].tile / WORLD_W) - sy;
-                d = dx * dx + dy * dy;
-                if (best < 0 || d < bestd) { best = i; bestd = d; }
+
+            /* A person who has said their fourth line stops being drawn, and
+             * the soul underneath them was always there. Driven through
+             * story.talk rather than by poking the entity, because that is the
+             * only thing the renderer reads. */
+            {
+                int before = 0, after = 0;
+                for (i = 0; i < ENTITY_COUNT; i++)
+                    if (g->ents[i].tile >= 0 &&
+                        entity_npc_art(&g->w, g->ents, i, 0.0f) != ART_NONE)
+                        before++;
+                for (i = 0; i < NPC_TOTAL; i++) story.talk[i] = TALK_LINES;
+                for (i = 0; i < ENTITY_COUNT; i++)
+                    if (g->ents[i].tile >= 0 &&
+                        entity_npc_art(&g->w, g->ents, i, 0.0f) != ART_NONE)
+                        after++;
+                if (before == 0 || after != 0) {
+                    printf("FAIL  npc: seed %.0f area %d had %d people before"
+                           " the last line and %d after, expected some and"
+                           " none\n", (double)seed, area, before, after);
+                    fails++;
+                }
+                SDL_zero(story);
             }
-            if (orb != best) {
-                printf("FAIL  npc: seed %.0f area %d kept entity %d as the orb,"
-                       " but %d is nearer spawn\n", (double)seed, area, orb, best);
-                fails++;
-            }
-            /* Regenerating the same seed is what a LOAD does. If the cast or
-             * the orb moved here, loading a save would recast the world. */
+
+            /* Regenerating the same seed is what a LOAD does. If the cast
+             * moved here, loading a save would recast the world. */
             b->restored = 0; b->maps = 0;
             game_init_area(b, sc, seed, (Uint8)area);
-            if (entity_orb_index(&b->w, b->ents) != orb) {
-                printf("FAIL  npc: seed %.0f area %d picked a different orb on"
-                       " regeneration\n", (double)seed, area);
-                fails++;
-            }
             for (i = 0; i < ENTITY_COUNT; i++) {
                 if (g->ents[i].tile < 0) continue;
                 if (b->ents[i].tile != g->ents[i].tile) {
@@ -12632,6 +14385,9 @@ int main(int argc, char **argv)
     if (arg_flag(argc, argv, "--map-test"))
         return map_selftest(arg_int(argc, argv, "--seeds", 8),
                             (Uint64)arg_int(argc, argv, "--seed", 1));
+    if (arg_flag(argc, argv, "--story-test"))
+        return story_selftest(arg_int(argc, argv, "--seeds", 6),
+                              (Uint64)arg_int(argc, argv, "--seed", 1));
     if (arg_flag(argc, argv, "--npc-test"))
         return npc_selftest(arg_int(argc, argv, "--seeds", 8),
                             (Uint64)arg_int(argc, argv, "--seed", 1));
@@ -12714,6 +14470,62 @@ int main(int argc, char **argv)
 #if WAYFARER_SELFTEST
     if (arg_flag(argc, argv, "--dev"))
         g->p.abilities = ABIL_ALL;
+    /* ---- Reaching a story state without playing to it -------------------
+     *
+     * Compiled out of the shipping build entirely, like every other flag in
+     * this block: the story is the one part of the game whose states take
+     * twenty minutes of real play to reach, and none of them could be LOOKED
+     * AT otherwise. They drive the same functions the interact key drives -
+     * story_talk, story_event_begin, story_end_tick - rather than painting the
+     * panel directly, so what a screenshot shows is what a player would see
+     * and not a mock-up of it.
+     *
+     *   --talk N     every person in this area has had N conversations
+     *   --memory N   show this area's Nth memory
+     *   --soulev N   run soul event N (1-9)
+     *   --endbeat N  jump the ending to beat N
+     */
+    {
+        int n = arg_int(argc, argv, "--talk", -1);
+        if (n >= 0) {
+            int c;
+            if (n > TALK_LINES) n = TALK_LINES;
+            for (c = 0; c < NPC_PER_AREA; c++) {
+                int k = cast_index(g->area, FRAGMENT_COUNT + c);
+                if (k >= 0) story.talk[k] = (Uint8)n;
+            }
+            /* Say the line she just heard, so the panel is in frame. The
+             * memories she would have needed to earn it are granted too, or
+             * the state would be one no play could produce. */
+            if (n > 0) {
+                int k = cast_index(g->area, FRAGMENT_COUNT);
+                for (c = 0; c < n - 1 && c < FRAGMENT_COUNT; c++) {
+                    g->ents[c].restored = 1;
+                    g->frags_restored = c + 1;
+                }
+                if (k >= 0)
+                    say_open(CAST[k].name, CAST[k].line[n - 1][0],
+                             CAST[k].line[n - 1][1]);
+            }
+        }
+        n = arg_int(argc, argv, "--memory", -1);
+        if (n >= 0 && n < FRAGMENT_COUNT)
+            say_open("", MEMORY[g->area - 1][n][0], MEMORY[g->area - 1][n][1]);
+        n = arg_int(argc, argv, "--soulev", -1);
+        if (n > SEV_NONE && n < SEV_COUNT)
+            story_event_begin(g, &audio, n);
+        n = arg_int(argc, argv, "--endbeat", -1);
+        if (n >= 0) {
+            story.flags |= SF_KING;
+            story.end_t = n * END_BEAT_TICKS + 1;
+            /* The tick only speaks when it CROSSES a beat, so jumping the
+             * counter straight onto one leaves the panel empty - which is
+             * exactly what the first screenshot of the throne room showed.
+             * Ask for the line directly, through the same function the tick
+             * uses. */
+            story_end_say(g, &audio, n);
+        }
+    }
     /* --lit exists so the minimap and the restored palette can be LOOKED AT.
      * Both are almost entirely a function of accumulated fog, so a fresh
      * --frames run shows neither, and every visual bug of consequence in this
@@ -12763,19 +14575,33 @@ int main(int argc, char **argv)
             int want_edge  = (SDL_strcmp(where, "edge") == 0);
             int want_map   = (SDL_strcmp(where, "map") == 0);
             int want_orb   = (SDL_strcmp(where, "orb") == 0);
+            /* Somebody, as opposed to something. `ent` takes the first placed
+             * entity, which is always a memory now that the cast is souls-only,
+             * so without a case of its own no person in the game could be
+             * photographed at all. */
+            int want_npc   = (SDL_strcmp(where, "npc") == 0);
             int best = -1, bestd = 1 << 30, tx, ty;
             int sx = (int)g->p.x / TILE, sy = (int)g->p.y / TILE;
             if (want_map) {
                 best = g->w.map_tile;
             } else if (want_orb) {
-                /* The ONE collectible still lying loose. `ent` takes the first
-                 * placed entity, which is almost never that one - so without a
-                 * case of its own the mote, and the fact that exactly one
-                 * survives, could not be photographed at all. Asks
-                 * entity_orb_index rather than re-deriving "nearest spawn"
-                 * here, so the shot cannot disagree with the renderer. */
-                int orb = entity_orb_index(&g->w, g->ents);
-                if (orb >= 0) best = g->ents[orb].tile;
+                /* A memory mote: an entity with NOBODY standing on it. `ent`
+                 * takes the first placed entity, which since the cast became
+                 * souls-only is a memory anyway - but this asks the renderer's
+                 * own question (entity_npc_art == ART_NONE) rather than
+                 * assuming the index layout, so the shot cannot disagree with
+                 * what is drawn even if the split moves. */
+                for (i = 0; i < ENTITY_COUNT; i++)
+                    if (g->ents[i].tile >= 0 &&
+                        entity_npc_art(&g->w, g->ents, i, 0.0f) == ART_NONE) {
+                        best = g->ents[i].tile; break;
+                    }
+            } else if (want_npc) {
+                for (i = 0; i < ENTITY_COUNT; i++)
+                    if (g->ents[i].tile >= 0 &&
+                        entity_npc_art(&g->w, g->ents, i, 0.0f) != ART_NONE) {
+                        best = g->ents[i].tile; break;
+                    }
             } else if (want_water || want_edge) {
                 /* The open tile NEAREST HER that has the wanted wall to its
                  * east, so --leanx 1 walks into it. Nearest so the shot is of
@@ -13202,9 +15028,7 @@ int main(int argc, char **argv)
                          * or the wrong area's register. */
                         audio_request_reset(&audio, ls, g->frags_restored,
                                             g->souls_restored,
-                                            g->area == 1 ? BIOME_FOREST
-                                            : g->area == 2 ? BIOME_UNDERWORLD
-                                            : BIOME_LUMIARA);
+                                            biome_for_area(g->area));
                         hud_toast("loaded");
                         cur_slot     = load_slot;
                         menu.page    = MENU_NONE;
@@ -13250,13 +15074,21 @@ int main(int argc, char **argv)
                     /* Mote, then map fragment, then portal - the same order
                      * prompt_draw resolves the first two in, so the keycap
                      * always names what the key is about to do. */
+                    /* Mote or person, then map fragment, then portal, then
+                     * the final chamber - the same order prompt_draw resolves
+                     * the first two in, so the keycap always names what the key
+                     * is about to do. The chamber is last because it is the
+                     * only one that cannot be anywhere else. */
                     if (try_interact(g, &audio) < 0 && !try_take_map(g, &audio)) {
 #if WAYFARER_SELFTEST
                         if (try_use_portal(g, sc, &audio) && lit_mode)
                             reveal_all(&g->w);
 #else
-                        (void)try_use_portal(g, sc, &audio);
+                        if (try_use_portal(g, sc, &audio))
+                            ;
 #endif
+                        else
+                            (void)try_final_chamber(g, &audio);
                     }
                     break;
                 /* M for the map, and only once this area's fragment has been
@@ -13344,9 +15176,9 @@ int main(int argc, char **argv)
                         /* The music restarts with the world, resumed at the
                          * loaded counts and biome rather than back at silence
                          * or the wrong area's register. */
-                        audio_request_reset(&audio, ls, g->frags_restored, g->souls_restored,
-                                            g->area == 1 ? BIOME_FOREST
-                                            : g->area == 2 ? BIOME_UNDERWORLD : BIOME_LUMIARA);
+                        audio_request_reset(&audio, ls, g->frags_restored,
+                                            g->souls_restored,
+                                            biome_for_area(g->area));
                         hud_toast("loaded");
                         (void)save_scan(slots);
                     } else {
@@ -13453,6 +15285,7 @@ int main(int argc, char **argv)
             }
             reveal_around(&g->w, g->p.x, g->p.y, TICK_DT);
             hud_tick(g);
+            story_tick(g, &audio);
             /* Region colour eases toward its target rather than snapping, so a
              * restore reads as the world coming back rather than as a palette
              * swap on one frame. */
@@ -13501,6 +15334,11 @@ int main(int argc, char **argv)
             rp.y = render_lerp(prev_py, g->p.y, alpha);
 
             camera_follow(rp.x, rp.y, draw->w, draw->h, &cam_x, &cam_y);
+            /* Applied AFTER the clamp, so the room can shake past the edge of
+             * the world - at this point in the story the world's edge is not
+             * the reassurance it was. */
+            cam_x += story_shake(clock);
+            cam_y += story_shake(clock * 1.3f);
 #if WAYFARER_SELFTEST
             /* Same clamp as following her, so a tile near an edge still frames
              * the way the game would ever show it. */
@@ -13567,8 +15405,15 @@ int main(int argc, char **argv)
                 } else {
                     prompt_draw(draw, &g->w, g->ents, g->p.x, g->p.y,
                                 cam_x, cam_y, clock);
+                    star_draw(draw, g, rp.x, rp.y, cam_x, cam_y, clock);
                     hud_draw(draw, g);
                 }
+                /* Over the map screen too: a second moon that the map hid
+                 * would be a thing that happened while she was not looking,
+                 * and the fade must reach every pixel there is. */
+                say_draw(draw);
+                story_overlay(draw);
+                story_end_card(draw);
             }
         }
         present(win, fb, draw == back ? back : NULL);

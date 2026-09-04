@@ -34,7 +34,8 @@ $tests = @(
     @{ n = 'hud';      a = @('--hud-test', '--seed', '1') }      # toast/banner ticks, minimap rule
     @{ n = 'save';     a = @('--save-test', '--seed', '1') }     # round trip + 12 rejection controls
     @{ n = 'map';      a = @('--map-test', '--seeds', '8', '--seed', '1') } # fragment placement, pickup, trails, screen
-    @{ n = 'npc';      a = @('--npc-test', '--seeds', '12', '--seed', '1') } # orb-nearest-spawn, cast, Citizen_F forest rule
+    @{ n = 'npc';      a = @('--npc-test', '--seeds', '12', '--seed', '1') }
+    @{ n = 'story';    a = @('--story-test', '--seeds', '6', '--seed', '1') }  # cast, dialogue gate, castle states, souls, ending # orb-nearest-spawn, cast, Citizen_F forest rule
     # Both audio rows need a real output device. On a machine with none they
     # fail loudly rather than skipping, which is the honest outcome: silence is
     # exactly what this suite exists to catch.

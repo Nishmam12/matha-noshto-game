@@ -8,8 +8,10 @@
 - Look at the map screen: `--map` (grant + open it), `--standon map` (stand on the fragment)
 - Look at the menu: `--menu` (open it), `--paused` (the pause form),
   `--menupage settings|controls|load|replace|confirm`
-- Look at the cast: `--standon ent` (an NPC holding a fragment), `--standon orb` (the one
-  collectible still lying loose), `--area2` / `--area3` for the other biomes' NPCs
+- Look at the cast: `--standon npc` (a person, standing on a soul), `--standon orb` (a memory
+  mote), `--area2` / `--area3` for the other biomes
+- Look at the story: `--talk N` (everybody here has had N conversations), `--memory N`,
+  `--soulev N` (1-9), `--endbeat N` (jump the ending). All self-test-only.
 - Re-bake art: `powershell -File tools\bake.ps1` — only when `assets\` changes
 
 ## Core Invariants & Rules
@@ -37,8 +39,40 @@
   that stops her. A trail must never be drawn through a gate she has no ability for; something
   behind one gets **no trail**, and the legend says so.
 
+## Areas and the story
+- **Area 2 is Lumiara, Area 3 is the Underworld** — the reverse of the order the biomes were built
+  in. `biome_for_area` and `area_for_biome` are the only two places that know this; the expression
+  used to be inlined at five call sites, which is how the music could end up playing over the wrong
+  biome while the world generated correctly. Area 1 is the Mainland, Area 2 the realm between,
+  Area 3 the castle. Seed salts stay attached to the AREA number, not the biome.
+- **Nothing the story can derive is stored.** `castle_state` (three states, off Area 1's memory
+  count), `castle_key` (Area 2 finished) and `area_complete` are FUNCTIONS. A stored castle key
+  lasted exactly as long as it took `--save-test` to reject a legitimate Area 3 save whose mask and
+  whose flag disagreed. Only `SF_KING` and `SF_BEAST` are stored, because nothing else implies them.
+- `game_live_mask` is the ONE answer to "what is restored right now": `g->restored` carries the
+  inactive areas, `ents[]` carries the active one, and anything asking about the whole game has to
+  reconcile the two. It was written out by hand in two places before the story needed a third.
+
 ## The cast
-- **Every collectible but one is held by an NPC.** The exception is the orb nearest spawn, which
+- **The three souls of an area are held by people; the seven memories are motes.** This replaced
+  "everything but the orb nearest spawn", and `entity_orb_index` went with it: the orb existed so
+  the first find taught the interact key without introducing a person, and seven motes an area do
+  that in all three areas instead of once per world.
+- **Four lines each, one per press of E, gated on memories found.** A person will not say their
+  nth line until she has found n memories in the area they stand in. That one rule is the whole
+  "controlled sequence" — no quest graph, and it cannot deadlock (`--story-test` simulates every
+  seed to prove it). It also makes Mira's second line *true* when she says it. Somebody not ready
+  repeats their last line; silence is indistinguishable from a broken key.
+- **Disappearance is not a removal.** After the fourth line `entity_npc_art` stops drawing them and
+  the soul that was always underneath is a mote. No second list, no save byte beyond `story.talk[]`.
+- **`story` is file-scope**, on the same terms `hud` and `menu` are, and is NOT in `Game`: `Game.w`,
+  `Game.ents` and `Game.p` are all replaced at a portal, and who she has met must survive that. It
+  is a named type so `game_load` can hold a copy across its scratch regeneration — a refused load
+  must leave a conversation still on screen.
+- **Memory text is keyed on how many she has found, not on which entity she walked into.** Placement
+  is procedural; the story is not, and must not arrive shuffled. That is the whole answer to
+  "collected in an unexpected order", and it needs no ordering constraint in `place_entities`.
+- Historic, and still true of the art: **an NPC is a different picture of the same entity.** The exception is the orb nearest spawn, which
   stays the bare mote the game shipped with: the first thing she finds has to teach the interact
   key without also introducing a person to talk to. `entity_orb_index` is that rule, and it
   measures over **all** entities, not the unrestored ones - tracking what is *left* would promote
@@ -46,8 +80,8 @@
   in front of her.
 - An NPC is a **different picture of the same entity**, not a new kind of thing. `apply_restore`,
   `entity_in_reach`, `INTERACT_RADIUS` and the restored bitmask are all untouched, which is why
-  this costs **no save byte and no `SAVE_VERSION` bump**. Nothing about the cast is persisted
-  because none of it is state.
+  the CAST itself costs no save byte. Only `story.talk[]` is persisted, because a conversation is
+  something the player did rather than something the seed decided.
 - `npc_kind_for` hashes the entity's **tile**, and never draws from the world `Rng`. A draw here
   would advance the generator between placement and whatever asks it next, changing the terrain of
   every seed in the game - every recorded screenshot and every gating proof invalidated, for a
@@ -155,14 +189,19 @@
 - Use `!(x >= 0)` rather than `(x < 0)` on floats from disk — it also rejects NaN.
 - Byte 20 (abilities) is redundant with the restored mask, deliberately: it is a checksum on it.
 - Byte 21 is the map-fragment mask (three bits) as of `SAVE_VERSION` 2; bytes 22–23 are still
-  reserved and must be zero. Like the restored mask, it cannot carry bits for an area past the one
+  reserved and must be zero. **Bytes 36–44 are the nine conversation counts and byte 45 the story
+  flags, at `SAVE_VERSION` 4** (`SAVE_SIZE` 48); 46–47 are the new reserved-must-be-zero pair. Nine
+  plain bytes rather than the 27 bits they pack into — the file has never been tight, and a bitfield
+  would be the one part of it unreadable in a hex dump. The bump rejects every v3 save on disk,
+  deliberately: a v3 file has no record of who she has spoken to, and there is no honest value to
+  invent for it. Like the restored mask, it cannot carry bits for an area past the one
   the file says she is in.
 - Bytes 24–27 are the restored mask. **Bytes 28–35 are the save's timestamp** (`time()`), added at
   `SAVE_VERSION` 3 so `continue` can mean the most recent save — nothing else in the file can order
   two saves against each other. It is only ever compared, never displayed. A **zero** timestamp is
   rejected: it is what a failed `time()` writes, and it would sort as older than every other save
   forever, so `continue` could never reach it however recently it was made.
-- v2 saves are **rejected, not migrated**, the same as v1 — one construction path from a file to a
+- v3 saves are **rejected, not migrated**, the same as v1 and v2 — one construction path from a file to a
   game, and a migration would be a second.
 
 ## Art pipeline
@@ -182,6 +221,11 @@
   with it changes the Underworld rubble tiles and fails `--tile-test`. `bake.py` needs Pillow.
 
 ## Conventions
+- `--story-test` covers the cast, the dialogue gate, the castle states, the nine soul events, the
+  ending and the save round-trip, with seven negative controls. Its first section sweeps **every
+  string the story can draw** against `font_bits` — the end card shipped four per-cent signs as
+  holes because that array was a local the sweep could not reach, and a screenshot found it after
+  the test had passed.
 - When adding or modifying self-tests, **always include a negative control** — a deliberately
   broken case the check must reject. A checker that has never rejected anything proves nothing.
 - Look at the screen. Every visual bug of consequence in this project's predecessor was found by
