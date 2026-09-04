@@ -86,6 +86,23 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# A successful link whose output is GONE is not a build system problem: it is
+# Windows Defender quarantining wayfarer.exe as Trojan:Win32/Wacatac.B!ml, an
+# ML false positive that lands a minute or two after the link. Without this
+# check the next thing to touch the file reports the confusing half of the
+# story - `Get-Item : Cannot find path` from run-tests.ps1's size step, after
+# twenty green suites - and the antivirus is never mentioned. Same story behind
+# an intermittent `ld.exe: cannot open output file ...: Permission denied`,
+# which is the scanner holding the file open mid-link.
+if (-not (Test-Path $OUT)) {
+    Write-Host ""
+    Write-Host ("LINKED OK BUT THE OUTPUT IS GONE: {0}" -f $OUT) -ForegroundColor Red
+    Write-Host "gcc reported success, so something removed it after the link." -ForegroundColor Red
+    Write-Host "This is almost certainly Windows Defender - see tools\av-exclusion.ps1," -ForegroundColor Red
+    Write-Host "which excludes this one path (run it once, elevated)." -ForegroundColor Red
+    exit 4
+}
+
 $size = (Get-Item $OUT).Length
 
 Write-Host ""

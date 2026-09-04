@@ -105,6 +105,17 @@ try {
     # build.ps1 gates this, but nothing asserted it, so a green suite could still
     # describe an unshippable binary.
     Write-Host "RUN   size" -ForegroundColor Cyan
+    # A missing binary here is not a size failure and must not be reported as
+    # a crash inside Get-Item: it means Windows Defender quarantined the build
+    # between the link and this line (Trojan:Win32/Wacatac.B!ml, a false
+    # positive). Twenty green suites followed by a raw "cannot find path" reads
+    # like a broken harness, which is exactly the wrong place to start looking.
+    if (-not (Test-Path $SHIPX)) {
+        Write-Host ("size    : {0} is MISSING - removed after being built." -f $SHIPX) -ForegroundColor Red
+        Write-Host "size    : almost certainly Windows Defender. Run tools\av-exclusion.ps1 once, elevated." -ForegroundColor Red
+        $results += [pscustomobject]@{ Name = 'size'; Seconds = 0.0; Status = 'FAIL(4)' }
+        $failed += 4
+    } else {
     $size = (Get-Item $SHIPX).Length
     if ($size -le $TARGET) {
         Write-Host ("size    : {0:N0} bytes, {1:N0} under the {2:N0} target" -f $size, ($TARGET - $size), $TARGET)
@@ -113,6 +124,7 @@ try {
         Write-Host ("size    : {0:N0} bytes - OVER the {1:N0} target" -f $size, $TARGET) -ForegroundColor Red
         $results += [pscustomobject]@{ Name = 'size'; Seconds = 0.0; Status = 'FAIL(1)' }
         $failed += 1
+    }
     }
 }
 finally { Pop-Location }

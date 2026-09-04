@@ -59,6 +59,7 @@ cannot configure SDL2 2.32), Ninja and the SDL2 source are in
 | `.\build.ps1 -SelfTest` | **Separate** `build\wayfarer-selftest.exe` with the harness + console |
 | `.\tools\run-tests.ps1` | Build what is stale, run every test, then the size assertion |
 | `.\tools\bake.ps1` | Regenerate `src\art_data.h` from `assets\` — only when art changes |
+| `.\tools\av-exclusion.ps1` | One-off, elevated: stop Defender quarantining the build (see below) |
 
 `build.ps1` prints the exact byte size, the delta since the last build, and remaining headroom, and
 **exits non-zero over budget** (2 = over the hard limit, 3 = over the ship target), so the size
@@ -66,6 +67,26 @@ limit is enforced by the build rather than by remembering to check.
 
 `run-tests.ps1`'s **exit code is the number of failing tests**; `99` means the build failed so
 nothing ran. That makes the green claim above checkable against the working tree.
+
+#### If the build keeps disappearing
+
+Windows Defender detects a freshly linked `build\wayfarer.exe` as
+`Trojan:Win32/Wacatac.B!ml` and quarantines it a minute or two later. The `!ml` suffix is a
+machine-learning verdict rather than a signature match, and it is a false positive — measured,
+not assumed: a statically linked SDL2 hello-world (669,184 bytes) is clean, so is the same
+binary plus the entire 138 KB art blob (807,424 bytes), and only the game itself (877,056
+bytes) trips it. Adding a `VERSIONINFO` resource, keeping the symbol table, and dropping
+`--dynamicbase`/`--nxcompat`/`--high-entropy-va` were all tried and all still detected, so
+there is no build flag to reach for — and un-stripping puts the binary at 1,459,442 bytes,
+over the ship target anyway.
+
+It does not present as an antivirus warning. It presents as `ld.exe: cannot open output file
+...: Permission denied` when the scanner holds the file mid-link, or as twenty green suites
+followed by `Get-Item : Cannot find path ...\build\wayfarer.exe` — which reads like a broken
+harness. `build.ps1` and `run-tests.ps1` now both check for the missing output and name the
+antivirus instead. Run `.\tools\av-exclusion.ps1` once from an elevated shell to exclude the
+two build outputs by full path; `-Report` prints the hashes and engine versions Microsoft's
+false-positive form asks for, which is the fix that also helps players.
 
 ### Playing it
 
@@ -243,6 +264,7 @@ build.ps1         game build + size measurement + budget gate
 build-sdl2.ps1    builds the cut-down static SDL2
 tools/bake.ps1    PNG -> compiled-in sprite header
 tools/run-tests.ps1
+tools/av-exclusion.ps1  Defender false-positive workaround + FP report
 assets/           source art (bake inputs only — nothing here ships)
 isometric-old/    the predecessor, for reference only
 ```
