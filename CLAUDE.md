@@ -9,9 +9,12 @@
 - Look at the menu: `--menu` (open it), `--paused` (the pause form),
   `--menupage settings|controls|load|replace|confirm`
 - Look at the cast: `--standon npc` (a person, standing on a soul), `--standon orb` (a memory
-  mote), `--area2` / `--area3` for the other biomes
+  mote), `--standon king` (the Dungeon's king), `--area2` / `--area3` / `--area4` for the other
+  biomes
 - Look at the story: `--talk N` (everybody here has had N conversations), `--memory N`,
   `--soulev N` (1-9), `--endbeat N` (jump the ending). All self-test-only.
+- Look at the Dungeon: `--area4 --standon king` (the throne room), `--area4 --endbeat 11`
+  (the king as the beast), `--area4 --map` (the map screen, which is clear)
 - Re-bake art: `powershell -File tools\bake.ps1` — only when `assets\` changes
 
 ## Core Invariants & Rules
@@ -32,9 +35,12 @@
 - Multi-byte persistence stays hand-packed little-endian. No struct writes to disk.
 - Restoration state is one `Uint32` bitmask, so total collectibles across **all areas** is ≤ 32.
   Area 1 owns bits 0–9. That ceiling is why the **map fragment is not an eleventh entity**: three
-  areas already claim thirty bits. It lives in `Game.maps` (three bits, one per area) and in
+  areas already claim thirty bits. It lives in `Game.maps` (four bits, one per area) and in
   `World.map_tile`, which is `-1` once taken — so "is it still lying there" has exactly one home,
-  and a load replays finding it as the delta of clearing that field.
+  and a load replays finding it as the delta of clearing that field. The **Dungeon holds no
+  collectibles at all** — same ceiling, one step further: a fourth area of ten would not fit the
+  mask, so the king is tracked by `World.king_tile` instead, derived from the area seed exactly
+  the way `portal_tile` is, and never stored.
 - The map screen's trails are routed by `bfs_gated`, which asks `tile_blocked` — the same function
   that stops her. A trail must never be drawn through a gate she has no ability for; something
   behind one gets **no trail**, and the legend says so.
@@ -52,10 +58,12 @@
   Forest's, the still violet ring (`ART_LUM_PORTAL`) is Lumiara's and the Underworld's final
   chamber. They ran the other way round on a "dress the gate as where it leads" theory, which just
   read as the two portals having been swapped.
-- The portal blip is on the minimap and the map screen in **all three** areas. Area 3's
-  `portal_tile` stopped being a spare field when it became the final chamber, and the one area with
-  nothing else to walk toward was the one whose landmark was missing. Its legend row says
-  **the final chamber**, not "the way onward".
+- The portal blip is on the minimap and the map screen in **Areas 1–3**, where every
+  legend row says **the way onward** — all three gates lead somewhere now. The Dungeon's
+  `portal_tile` is the stairs she came down, and a violet blip over dead stairs
+  would promise a second trip the game does not have — so it carries no blip on either map.
+  The Dungeon map screen shows **geography and the king's gold blip only**: no counts, no trails
+  (`hud.bm_closed` stays zero), and the legend is two rows (`the king`, `you are here`).
 - The completion banner is keyed on **biome**, via `biome_for_area` — never on the area number.
   Keyed on the area it was a third place that had to know the order, and it was the place that had
   it backwards: finishing Lumiara congratulated her on the underworld.
@@ -66,6 +74,31 @@
   used to be inlined at five call sites, which is how the music could end up playing over the wrong
   biome while the world generated correctly. Area 1 is the Mainland, Area 2 the realm between,
   Area 3 the castle. Seed salts stay attached to the AREA number, not the biome.
+- **Area 4 is the Dungeon below the castle**, reached through Area 3's portal once Area 3 is
+  finished. It is authored rooms, not noise (`dungeon_gen`): fixed topology with seed-varying
+  dressing, no entities, no abilities, fully walkable with `ABIL_NONE`. The ending moved with it —
+  `try_final_chamber` on Area 3's portal became `try_king_audience` at the king, and the story-test
+  proves the portal travels where the chamber used to end.
+- **The Dungeon generates fully revealed** (`reveal` 255 in `dungeon_gen`), and it is the only
+  world that does. Fog has two channels and the Dungeon has neither: sight alone caps at
+  `SIGHT_MAX`, which is half, and the other half is restoration, which is a function of
+  collectibles - and the Dungeon holds none. Every tile down there sat at level 15 of 31 for
+  good, on the world, the minimap and the map screen. Set at generation because that is the one
+  place a Dungeon world is built (a load regenerates through it, so it replays for free) and
+  because `reveal_around` only ever RAISES a tile. Render-only, so no completability proof moves.
+- **There is no door in the Dungeon.** A pair of gold doors used to be pushed at a fixed tile in
+  the king's doorway, and since nothing in the Dungeon is solid because it was *drawn*, they read
+  as a locked door she then walked straight through. `DUN_DOOR` went out of the bake with the
+  draw - art nothing draws is shipped bytes. `--map-test` measures the doorway as "no draw-list
+  entry is anchored on that tile", with the grate (drawn at a fixed tile the same way) as the
+  control that the measurement can see anything at all.
+- **The king turns into the beast at `END_BEAST_BEAT`**, and `dun_king_art` is the ONE answer to
+  what is standing on `king_tile` - `dun_dressing` draws from it and `prompt_draw` sizes the
+  keycap from it, exactly as `entity_npc_art` serves the cast. It is keyed on `SF_BEAST`, which
+  the ending already sets under the line *something underneath the castle turns over*, so the
+  transformation lands on the sentence that describes it and costs no new state: `SF_BEAST` is
+  stored, so a game saved in that room reloads with the beast still in it. Render-only, like the
+  king - neither is ever written into `solid[][]`, so a seventy-pixel beast cannot seal the room.
 - **Nothing the story can derive is stored.** `castle_state` (three states, off Area 1's memory
   count), `castle_key` (Area 2 finished) and `area_complete` are FUNCTIONS. A stored castle key
   lasted exactly as long as it took `--save-test` to reject a legitimate Area 3 save whose mask and
@@ -73,6 +106,17 @@
 - `game_live_mask` is the ONE answer to "what is restored right now": `g->restored` carries the
   inactive areas, `ents[]` carries the active one, and anything asking about the whole game has to
   reconcile the two. It was written out by hand in two places before the story needed a third.
+
+- **God mode (`ctrl+g`) suspends exactly one clause**, the `!area_complete(g)` in
+  `try_use_portal`, and touches nothing else. It is NOT a change to `area_complete` and NOT a
+  hand that fills `restored`: the banner, the music, the region lighting, the castle states
+  and the whole dialogue gate read those, and a cheat that lied to them would congratulate
+  her on an area she never walked. Because a skipped run's area is ahead of its mask - the
+  live invariant `save_header_ok` is derived from - such a run **cannot be saved**: `god.cheated`
+  is set at the ungated step and refuses F5 and the save row, because writing the file would
+  say `saved` now and `no save to load` later. `game_reseed` and a committed `game_load` clear
+  it; nothing persists the toggle. `--save-test` proves both halves, with the toggle off as
+  the negative control.
 
 ## The cast
 - **The three souls of an area are held by people; the seven memories are motes.** This replaced
@@ -108,6 +152,10 @@
   every seed in the game - every recorded screenshot and every gating proof invalidated, for a
   choice that is purely cosmetic. The tile is already a pure function of the seed and a load
   replays it, so the cast survives save/load for free.
+- **The king is not cast.** He is one baked sprite (`DUN_KING`, south facing only — the eight
+  facings ship one picture, not a rotation system), drawn by `dun_dressing` at `World.king_tile`
+  and answered by `try_king_audience` on the same `INTERACT_RADIUS` everything uses. NPCs are
+  never written into `solid[][]`, and neither is he.
 - **The Citizen_F cast (Peasant, Tavern) may only stand in the Forest.** The flag lives in
   `ART_NPC_FOREST_ONLY`, which the *bake* emits from the same list that names the sheets, so the
   rule and the art it is about cannot drift. `npc_kind_for` enforces it **by construction** - a
@@ -216,7 +264,10 @@
   would be the one part of it unreadable in a hex dump. The bump rejects every v3 save on disk,
   deliberately: a v3 file has no record of who she has spoken to, and there is no honest value to
   invent for it. Like the restored mask, it cannot carry bits for an area past the one
-  the file says she is in.
+  the file says she is in. The Dungeon added a fourth maps bit and a fourth area byte **without**
+  a version bump: the layout is unchanged (30-bit mask, nine talks, one flags byte), only
+  `save_header_ok` widened — Area 4 requires Areas 1+2 complete and Area 3 finished, and
+  `SF_KING`/`SF_BEAST` are allowed in Areas 3 *or* 4 — so every v4 save still loads.
 - Bytes 24–27 are the restored mask. **Bytes 28–35 are the save's timestamp** (`time()`), added at
   `SAVE_VERSION` 3 so `continue` can mean the most recent save — nothing else in the file can order
   two saves against each other. It is only ever compared, never displayed. A **zero** timestamp is
@@ -240,6 +291,22 @@
 - **`tools/bake.py` is what generates the committed header**, not `bake.ps1`. They read different
   Underworld packs (`Underworld2/Tiled_files` vs `Underworld/PNG`) and `bake.ps1` is stale - baking
   with it changes the Underworld rubble tiles and fails `--tile-test`. `bake.py` needs Pillow.
+- **`tools/bake_dungeon_fix.py` is the second incremental baker**, and it EDITS where
+  `bake_dungeon.py` appends (which is why that one refuses to run on a header that already holds
+  `DUN_` sprites). It drops `DUN_DOOR`, resamples the torch frames to 65%, and splices the eight
+  `DUN_MONSTER_*` frames in after `DUN_KING`. It imports `bake_dungeon` for the parser and all
+  four section emitters, so the two cannot drift. Two rules make it safe to re-run the header
+  through: it adds **no palette colour** (the palette stands at 253 of 254, so there is nothing
+  to spend - the torch is resampled in INDEX space, making it a strict subset of the pixels that
+  shipped, and the monster's 17 colours are snapped onto entries that exist), and it rebuilds
+  `ART_DATA` from the retained records and then DECODES every sprite out of the new blob to
+  compare against its decode from the old one. A wrong offset is caught there, not by a
+  screenshot. It refuses to run twice.
+- **Dungeon art bakes incrementally via `tools/bake_dungeon.py`**, because the Lumiara sources
+  `bake.py` names are not all in the repo and a full re-bake would drop shipped Lumiara art. It
+  parses the committed header (refusing on format drift), bakes `assets/Dungeon/` against its
+  palette with the same snap/quantize discipline, and splices the 27 sprites in before the
+  character block. It refuses to run twice; to re-bake, restore `src/art_data.h` from git first.
 
 ## Conventions
 - `--story-test` covers the cast, the dialogue gate, the castle states, the nine soul events, the

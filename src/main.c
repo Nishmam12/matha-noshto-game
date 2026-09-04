@@ -505,11 +505,12 @@ static int arg_int(int argc, char **argv, const char *name, int fallback)
 
 enum { GT_GRASS = 0, GT_OLIVE, GT_DIRT, GT_WATER, GT_ROCK, GT_COUNT };
 
-/* Three areas, one shared vocabulary. GT_* and TERRAIN_* stay biome-agnostic -
+/* Four areas, one shared vocabulary. GT_* and TERRAIN_* stay biome-agnostic -
  * only rendering (render_world's tile tables) and props (prop_art) are
  * selected by biome, so world generation, gating and tile_blocked need no
- * biome branch at all. See LUMIARA_BIOME_PLAN.md for why. */
-enum { BIOME_FOREST = 0, BIOME_UNDERWORLD = 1, BIOME_LUMIARA = 2, BIOME_COUNT };
+ * biome branch at all - except the Dungeon, which is authored rather than
+ * generated (see dungeon_gen). See LUMIARA_BIOME_PLAN.md for why. */
+enum { BIOME_FOREST = 0, BIOME_UNDERWORLD = 1, BIOME_LUMIARA = 2, BIOME_DUNGEON = 3, BIOME_COUNT };
 
 /* Which biome an area is made of, and the ONE place that answers it.
  *
@@ -524,13 +525,15 @@ enum { BIOME_FOREST = 0, BIOME_UNDERWORLD = 1, BIOME_LUMIARA = 2, BIOME_COUNT };
  * order the biomes were built in. The story is what decides this: Area 2 is the
  * mystical realm where memory and soul come apart, and floating islands over a
  * violet void is that place; Area 3 is the castle, and the castle is reached by
- * going DOWN. The seed salts stay attached to the AREA number rather than to
+ * going DOWN. Area 4 is the Dungeon below the castle, where the king waits.
+ * The seed salts stay attached to the AREA number rather than to
  * the biome, so "area 2" is one world for one save whichever tileset dresses
  * it. */
 static Uint8 biome_for_area(Uint8 area)
 {
     return (Uint8)(area == 1 ? BIOME_FOREST
                  : area == 2 ? BIOME_LUMIARA
+                 : area == 4 ? BIOME_DUNGEON
                  : BIOME_UNDERWORLD);
 }
 
@@ -538,11 +541,12 @@ static Uint8 biome_for_area(Uint8 area)
  * know its area - can still be asked which act of the story it is. Two
  * functions rather than one table because they are each three lines and a table
  * of three entries read in both directions is harder to check by eye than the
- * pair; --story-test asserts they round-trip for all three areas, which is what
+ * pair; --story-test asserts they round-trip for all four areas, which is what
  * actually keeps them honest. */
 static Uint8 area_for_biome(Uint8 biome)
 {
-    return (Uint8)(biome == BIOME_FOREST ? 1 : biome == BIOME_LUMIARA ? 2 : 3);
+    return (Uint8)(biome == BIOME_FOREST ? 1 : biome == BIOME_LUMIARA ? 2
+                 : biome == BIOME_DUNGEON ? 4 : 3);
 }
 
 /* ---- Regions and abilities ----------------------------------------------
@@ -626,8 +630,14 @@ typedef struct {
     int spawn_region;
     int spawn_tile;
     Uint8 biome;       /* BIOME_* - render/prop selector only, set by world_gen */
-    int   portal_tile; /* Where this area's exit onward stands (unused in
-                          * Lumiara - Area 3 is terminal) */
+    int   portal_tile; /* This area's arrival/exit tile: the way onward in
+                           * Areas 1-3, the stairs she came down in the
+                           * Dungeon (no way back - see try_use_portal). */
+    /* Where the king waits, or -1 outside the Dungeon. A deterministic
+     * function of the area seed (see dungeon_gen), so a load replays it the
+     * way it replays portal_tile - no save byte, no second home. Render-only:
+     * never read by tile_blocked, so the king can never seal a room. */
+    int   king_tile;
     /* Where this biome's map fragment lies, or -1 once it has been taken.
      * ONE field carries "is it still there", so the renderer, the interact
      * prompt and the interact key cannot disagree about it - and because
@@ -1034,6 +1044,17 @@ static const LayerCfg LAYER_CFG_TABLE[BIOME_COUNT][NUM_LAYERS] = {
         { W_SINE, SYNTH_PAD_LUM,     16, 0.13f, 0.20f, 0.0f, 0.30f },
         { W_SINE, SYNTH_BELLS_LUM,   16, 0.16f, 0.0f,  1.5f, 0.60f },
         { W_SINE, SYNTH_VOICE_LUM,   16, 0.20f, 1.00f, 0.0f, 0.45f }
+    },
+    /* The Dungeon reuses the Underworld's score: the castle depths get the
+     * subterranean register, and a fourth score is not budgeted. Only
+     * pitch content and pattern length ever change across these rows, so
+     * sharing them keeps MIX_GAIN's headroom argument true untouched. */
+    {
+        { W_SAW,  SYNTH_BASE_UW,    1,  0.30f, 0.50f, 0.0f, 0.12f },
+        { W_SAW,  SYNTH_STRINGS_UW, 16, 0.16f, 0.33f, 0.0f, 0.20f },
+        { W_SINE, SYNTH_PAD_UW,     16, 0.13f, 0.20f, 0.0f, 0.30f },
+        { W_SINE, SYNTH_BELLS_UW,   16, 0.16f, 0.0f,  1.5f, 0.60f },
+        { W_SINE, SYNTH_VOICE_UW,   16, 0.20f, 1.00f, 0.0f, 0.45f }
     }
 };
 
@@ -1047,10 +1068,10 @@ static const LayerCfg LAYER_CFG_TABLE[BIOME_COUNT][NUM_LAYERS] = {
  * (audio_request_reset's four call sites are the only writers) - so it is in
  * range by construction, the same way LAYER_CFG_TABLE above already assumes. */
 static const int   SYNTH_LOOP_AT[BIOME_COUNT]   = {
-    FOREST_STEPS, SYNTH_STEPS, SYNTH_STEPS
+    FOREST_STEPS, SYNTH_STEPS, SYNTH_STEPS, SYNTH_STEPS
 };
 static const float SYNTH_STEP_S_AT[BIOME_COUNT] = {
-    FOREST_STEP_S, SYNTH_STEP_S, SYNTH_STEP_S
+    FOREST_STEP_S, SYNTH_STEP_S, SYNTH_STEP_S, SYNTH_STEP_S
 };
 
 /* Which fragment count unlocks each layer. Spread across FRAGMENT_COUNT rather
@@ -1728,6 +1749,59 @@ static const short tile_lum_rock_ring[9] = {
 };
 static const short tile_lum_rock_fill[2] = { ART_LUM_VOID_A, ART_LUM_VOID_B };
 
+/* ---- Dungeon tile tables --------------------------------------------------
+ *
+ * Same shapes as the three biomes above, same reason: render_world stays
+ * untouched, only WHICH table tileset_for hands back changes. The Dungeon is
+ * authored rooms, not noise, so its terr vocabulary is small on purpose: floor
+ * (GT_GRASS), rubble patches (GT_DIRT) and wall (GT_ROCK). There is no water,
+ * so water_fill/cap/edge point at plain floor - valid ids drawing nothing
+ * wrong, because no GT_WATER tile ever asks for them. The rock ring reuses
+ * three flat wall faces across all nine slices rather than a directional
+ * mapping: the authored walls are two tiles thick, so the boundary reads as
+ * masonry either way - the same simplification Underworld documents, and the
+ * tile actually being solid where it draws solid is what matters.
+ *
+ * Every id below is drawn by a caller in this file (ground pass, ring pass),
+ * which is what keeps the bake's "only what a caller draws" rule true. */
+static const short tile_dun_ground_base[4] = {
+    ART_DUN_FLOOR_A, ART_DUN_FLOOR_B, ART_DUN_FLOOR_C, ART_DUN_FLOOR_D
+};
+static const short tile_dun_dirt_fill[6] = {
+    ART_DUN_CRACK_A, ART_DUN_CRACK_B, ART_DUN_FLOOR_A,
+    ART_DUN_FLOOR_B, ART_DUN_CRACK_A, ART_DUN_FLOOR_C
+};
+static const short tile_dun_water_fill[10] = {
+    ART_DUN_FLOOR_A, ART_DUN_FLOOR_B, ART_DUN_FLOOR_C, ART_DUN_FLOOR_D,
+    ART_DUN_FLOOR_A, ART_DUN_FLOOR_B, ART_DUN_FLOOR_C, ART_DUN_FLOOR_D,
+    ART_DUN_FLOOR_A, ART_DUN_FLOOR_B
+};
+static const short tile_dun_grass_edge[9] = {
+    ART_DUN_FLOOR_A, ART_DUN_FLOOR_A, ART_DUN_FLOOR_A,
+    ART_DUN_FLOOR_A, ART_DUN_FLOOR_A, ART_DUN_FLOOR_A,
+    ART_DUN_FLOOR_A, ART_DUN_FLOOR_A, ART_DUN_FLOOR_A
+};
+static const short tile_dun_olive_edge[9] = {
+    ART_DUN_FLOOR_B, ART_DUN_FLOOR_B, ART_DUN_FLOOR_B,
+    ART_DUN_FLOOR_B, ART_DUN_FLOOR_B, ART_DUN_FLOOR_B,
+    ART_DUN_FLOOR_B, ART_DUN_FLOOR_B, ART_DUN_FLOOR_B
+};
+static const short tile_dun_water_cap[3] = {
+    ART_DUN_FLOOR_A, ART_DUN_FLOOR_B, ART_DUN_FLOOR_A
+};
+static const short tile_dun_water_edge[9] = {
+    ART_DUN_FLOOR_A, ART_DUN_FLOOR_A, ART_DUN_FLOOR_A,
+    ART_DUN_FLOOR_A, ART_DUN_FLOOR_A, ART_DUN_FLOOR_A,
+    ART_DUN_FLOOR_A, ART_DUN_FLOOR_A, ART_DUN_FLOOR_A
+};
+static const short tile_dun_rock_ring[9] = {
+    ART_DUN_WALL_A, ART_DUN_WALL_B, ART_DUN_WALL_C,
+    ART_DUN_WALL_B, ART_NONE,       ART_DUN_WALL_C,
+    ART_DUN_WALL_A, ART_DUN_WALL_B, ART_DUN_WALL_C
+};
+static const short tile_dun_rock_fill[2] = { ART_DUN_WALL_A, ART_DUN_WALL_C };
+static const short tile_dun_rock_cliff[2] = { ART_DUN_WALL_A, ART_DUN_WALL_A };
+
 /* Selects which set of tables render_world (and the tile-opacity self-tests)
  * read from, indexed by World.biome. One indirection point instead of a
  * biome branch at every one of the ~11 call sites below. */
@@ -1763,11 +1837,16 @@ static const TileSet TILESET_LUMIARA = {
     tile_lum_ground_base, tile_lum_dirt_fill, tile_lum_water_fill, tile_lum_grass_edge, tile_lum_olive_edge,
     tile_lum_water_cap, tile_lum_water_edge, tile_lum_rock_ring, tile_lum_rock_fill, tile_lum_rock_fill
 };
+static const TileSet TILESET_DUNGEON = {
+    tile_dun_ground_base, tile_dun_dirt_fill, tile_dun_water_fill, tile_dun_grass_edge, tile_dun_olive_edge,
+    tile_dun_water_cap, tile_dun_water_edge, tile_dun_rock_ring, tile_dun_rock_fill, tile_dun_rock_cliff
+};
 
 static const TileSet *tileset_for(Uint8 biome)
 {
     if (biome == BIOME_FOREST) return &TILESET_FOREST;
     if (biome == BIOME_UNDERWORLD) return &TILESET_UNDERWORLD;
+    if (biome == BIOME_DUNGEON) return &TILESET_DUNGEON;
     return &TILESET_LUMIARA;
 }
 
@@ -2881,6 +2960,23 @@ static int entity_in_reach(const World *w, const Entity *ents, float px, float p
     return best;
 }
 
+/* The king, on the SAME radius entities use rather than a second number: two
+ * interact distances would mean a prompt that appears at one range and a key
+ * that works at another. Returns 0 outside the Dungeon, where there is no
+ * king to be near. */
+static int king_in_reach(const World *w, float px, float py)
+{
+    float ex, ey, dx, dy;
+
+    if (w->biome != BIOME_DUNGEON || w->king_tile < 0)
+        return 0;
+    ex = (float)(w->king_tile % WORLD_W) * TILE + TILE * 0.5f;
+    ey = (float)(w->king_tile / WORLD_W) * TILE + TILE * 0.5f;
+    dx = ex - px;
+    dy = ey - py;
+    return dx * dx + dy * dy <= INTERACT_RADIUS * INTERACT_RADIUS;
+}
+
 /* The map fragment, on the SAME radius entities use rather than a second
  * number: two interact distances would mean a prompt that appears at one range
  * and a key that works at another. Returns 0 once it has been taken, because
@@ -3537,14 +3633,14 @@ static void world_spawn(World *w, Scratch *sc)
     }
 }
 
-/* Where the Area 1 exit stands: the first open tile of the spawn region found
+/* Where an area's exit stands: the first open tile of the spawn region found
  * by a ring search outward from spawn_tile, never the spawn tile itself (she
  * would otherwise spawn standing on it every game). Deterministic and RNG-free
  * - render-only, so it needs none of world_gen's collision guarantees, only a
- * valid fallback. Called for every biome; unused (never drawn, never checked)
- * in BIOME_UNDERWORLD - Area 3 is terminal, so its own portal_tile just sits
- * there unused - but always left valid rather than only set "when needed" -
- * see the no-garbage-fields rule this file follows for World. */
+ * valid fallback. Called for every generated biome; the Dungeon sets its own
+ * fixed stairs instead (see dungeon_gen) - but the field is always left valid
+ * rather than only set "when needed", see the no-garbage-fields rule this
+ * file follows for World. */
 static void world_place_portal(World *w)
 {
     int sx, sy, r;
@@ -3745,6 +3841,264 @@ static int world_place_and_verify(World *w, Scratch *sc, Rng *rng, const int *de
     return -100;
 }
 
+/* ---- The Dungeon (Area 4) -------------------------------------------------
+ *
+ * Authored rooms, not noise. The three other areas share one procedural
+ * pipeline (stub, spawn, regions, gates, placement, proofs); the Dungeon is a
+ * fixed floor plan read off the mockups in assets/Dungeon/map mockups/ - an
+ * entry stair hall, a pillared torch hall, a banner hall, barrel stores, a
+ * barred cell block and the king's chamber behind gold doors - with seed-varying
+ * DRESSING (which nooks hold barrels, which walls carry torches, where rubble
+ * lies, where the king stands). Topology is identical every seed, so there is
+ * no placement proof to re-run; what varies is cosmetic, and every cosmetic
+ * choice is a pure function of (area_seed, tile) so generation and rendering
+ * agree BY CONSTRUCTION rather than through stored state.
+ *
+ * Collision still goes through solid[][] and TERRAIN_NORMAL everywhere, so
+ * tile_blocked and bfs_gated need no Dungeon branch at all - the one rule at
+ * the top of this file holds. Nothing here grants abilities (all regions are
+ * NORMAL), so the Dungeon is fully walkable with ABIL_NONE, which matters:
+ * abilities reset on every area transition and the Dungeon re-grants none.
+ *
+ * No collectibles: the restoration Uint32 is thirty bits deep already, and a
+ * fourth area of ten would not fit the save. ents[] is all tile=-1, which the
+ * interact key, the star, both maps and every trail loop already read as
+ * "nothing here". The king is tracked by World.king_tile, derived from the
+ * seed like portal_tile, never stored. */
+#define AREA4_SEED_SALT 0x6A09E667F3BCC909ULL
+
+/* Room rects, inclusive tiles: x0,y0,x1,y1. The plan above in coordinates. */
+static const short DUN_ROOMS[][4] = {
+    { 57, 80, 68, 89 },   /* entry stair hall (spawn) */
+    { 61, 70, 64, 79 },   /* C1: entry to torch hall */
+    { 49, 56, 78, 69 },   /* torch hall (pillars) */
+    { 61, 48, 64, 55 },   /* C2: torch hall to banner hall */
+    { 52, 36, 75, 47 },   /* banner hall (pillars) */
+    { 48, 61, 50, 64 },   /* C-west: torch hall to stores */
+    { 36, 57, 48, 70 },   /* barrel stores */
+    { 78, 61, 81, 64 },   /* C-east: torch hall to cells */
+    { 82, 57, 95, 70 },   /* barred cell block */
+    { 61, 33, 64, 35 },   /* C-north: banner hall to the king */
+    { 55, 20, 72, 32 },   /* the king's chamber */
+};
+#define DUN_ROOM_COUNT (int)(sizeof DUN_ROOMS / sizeof DUN_ROOMS[0])
+
+/* Fixed tiles. The stairs ARE the arrival portal; the door is decor standing
+ * in an open doorway (walked through, not opened). */
+#define DUN_SPAWN_TX  63
+#define DUN_SPAWN_TY  85
+#define DUN_PORTAL_TX 63
+#define DUN_PORTAL_TY 81
+
+/* Free-standing pillars: carved-open tiles that gen marks solid and the
+ * dressing pass draws. Fixed, so the two agree without any shared state. */
+static const short DUN_PILLARS[][2] = {
+    { 53, 59 }, { 74, 59 }, { 53, 66 }, { 74, 66 },
+    { 56, 39 }, { 71, 39 },
+};
+#define DUN_PILLAR_COUNT (int)(sizeof DUN_PILLARS / sizeof DUN_PILLARS[0])
+
+/* Barrel stores keep stores: fixed casks and pots on open store floor, the
+ * same solid-here/drawn-there contract as pillars. Interior tiles only, clear
+ * of the corridor mouth, so they can narrow nothing. The seed-varying nook
+ * barrels (dun_barrel_pick) still fill corners everywhere else. */
+static const short DUN_CASKS[][2] = {
+    { 38, 59 }, { 44, 59 }, { 38, 68 }, { 44, 68 },
+};
+#define DUN_CASK_COUNT (int)(sizeof DUN_CASKS / sizeof DUN_CASKS[0])
+
+/* Wall overlays on solid rock: barred cell windows and the portcullis pair
+ * flanking the cell corridor. Fixed tile + art pairs. */
+static const short DUN_GRATES[][2] = { { 96, 60 }, { 96, 64 }, { 96, 68 } };
+#define DUN_GRATE_COUNT (int)(sizeof DUN_GRATES / sizeof DUN_GRATES[0])
+static const short DUN_PORTCS[][2] = { { 79, 60 }, { 79, 65 } };
+#define DUN_PORTC_COUNT (int)(sizeof DUN_PORTCS / sizeof DUN_PORTCS[0])
+
+/* Where the king may stand: open chamber floor, well clear of the door. */
+#define DUN_KING_X0 57
+#define DUN_KING_Y0 22
+#define DUN_KING_X1 70
+#define DUN_KING_Y1 29
+
+static int dun_carved(int tx, int ty)
+{
+    int r;
+
+    for (r = 0; r < DUN_ROOM_COUNT; r++)
+        if (tx >= DUN_ROOMS[r][0] && tx <= DUN_ROOMS[r][2] &&
+            ty >= DUN_ROOMS[r][1] && ty <= DUN_ROOMS[r][3])
+            return 1;
+    return 0;
+}
+
+static int dun_is_pillar(int tx, int ty)
+{
+    int i;
+
+    for (i = 0; i < DUN_PILLAR_COUNT; i++)
+        if (DUN_PILLARS[i][0] == tx && DUN_PILLARS[i][1] == ty)
+            return 1;
+    return 0;
+}
+
+static int dun_is_cask(int tx, int ty)
+{
+    int i;
+
+    for (i = 0; i < DUN_CASK_COUNT; i++)
+        if (DUN_CASKS[i][0] == tx && DUN_CASKS[i][1] == ty)
+            return 1;
+    return 0;
+}
+
+/* Solid on the carved layout: true rock, a pillar, or a store cask. Barrels
+ * are decided on top of this (see dun_barrel_pick), so this is the state the
+ * barrel rule reads - one layer, no iteration order, the same for gen and
+ * render. */
+static int dun_carved_solid(int tx, int ty)
+{
+    if (tx < 0 || ty < 0 || tx >= WORLD_W || ty >= WORLD_H)
+        return 1;
+    return !dun_carved(tx, ty) || dun_is_pillar(tx, ty) || dun_is_cask(tx, ty);
+}
+
+/* A barrel (or pot) stands in a corner nook: carved-open, two or more solid
+ * orthogonal neighbours, one seed-varying pick in four. Corridors are three
+ * or more tiles wide, so no corridor tile ever qualifies - a barrel can never
+ * narrow a walkway, let alone seal one. Fixed clearings around the stairs she
+ * arrives on, so she never materialises inside a barrel. */
+static int dun_barrel_pick(Uint64 aseed, int tx, int ty)
+{
+    int n = 0, dx, dz;
+
+    if (!dun_carved(tx, ty) || dun_is_pillar(tx, ty) || dun_is_cask(tx, ty))
+        return 0;
+    if (dun_carved_solid(tx - 1, ty)) n++;
+    if (dun_carved_solid(tx + 1, ty)) n++;
+    if (dun_carved_solid(tx, ty - 1)) n++;
+    if (dun_carved_solid(tx, ty + 1)) n++;
+    if (n < 2)
+        return 0;
+    dx = tx - DUN_PORTAL_TX; if (dx < 0) dx = -dx;
+    dz = ty - DUN_PORTAL_TY; if (dz < 0) dz = -dz;
+    if ((dx > dz ? dx : dz) <= 2)
+        return 0;
+    return (tile_hash(aseed, tx, ty) & 3u) == 0;
+}
+
+/* Rubble underfoot: carved-open, seed-varying, render-only (it only selects
+ * GT_DIRT, which draws the cracked tiles). */
+static int dun_rubble(Uint64 aseed, int tx, int ty)
+{
+    if (!dun_carved(tx, ty) || dun_is_pillar(tx, ty) || dun_is_cask(tx, ty))
+        return 0;
+    if (dun_barrel_pick(aseed, tx, ty))
+        return 0;
+    return (tile_hash(aseed ^ 0x51EDULL, tx, ty) % 17u) == 0;
+}
+
+/* What hangs on a wall: 0 nothing, 1 torch, 2 blue banner, 3 red banner,
+ * 4 fireplace. Solid rock with walkable floor to its south - banners and
+ * torches hang OVER the room, never inside it. One elif chain, so a tile
+ * carries at most one thing whichever seed runs. Rates are sparse on purpose:
+ * the mockups hang a torch every six or eight tiles, and a wall dressed on
+ * every third tile reads as a shop display rather than a dungeon. */
+static int dun_wall_dress(Uint64 aseed, int tx, int ty)
+{
+    Uint32 h;
+
+    if (!dun_carved_solid(tx, ty) || dun_carved(tx, ty))
+        return 0;
+    if (!dun_carved(tx, ty + 1) || dun_carved_solid(tx, ty + 1) ||
+        dun_barrel_pick(aseed, tx, ty + 1))
+        return 0;
+    h = tile_hash(aseed, tx, ty);
+    if ((h % 6u) == 0)
+        return 1;
+    if ((h % 11u) == 1)
+        return 2 + (int)((h >> 5) & 1u);
+    if ((h % 19u) == 5)
+        return 4;
+    return 0;
+}
+
+/* The king's tile: argmax of the tile hash over the chamber shortlist, so it
+ * is uniform over the shortlist and stable for a seed. Every shortlist tile
+ * is open by construction (the chamber interior has no solid neighbours, so
+ * no barrel ever lands in it), but the fallback stands: a garbage king_tile
+ * would be a worse failure than a predictable one. */
+static int dun_king_pick(Uint64 aseed)
+{
+    Uint32 best_h = 0;
+    int best = -1, tx, ty;
+
+    for (ty = DUN_KING_Y0; ty <= DUN_KING_Y1; ty++)
+        for (tx = DUN_KING_X0; tx <= DUN_KING_X1; tx++) {
+            Uint32 h;
+            if (!dun_carved(tx, ty) || dun_is_pillar(tx, ty) ||
+                dun_barrel_pick(aseed, tx, ty))
+                continue;
+            h = tile_hash(aseed, tx, ty);
+            if (best < 0 || h > best_h) { best_h = h; best = ty * WORLD_W + tx; }
+        }
+    /* Unreachable while the shortlist holds open tiles, and a guard rather
+     * than an assumption because the alternative is a negative king_tile. */
+    if (best < 0)
+        best = DUN_KING_Y0 * WORLD_W + DUN_KING_X0;
+    return best;
+}
+
+static void dungeon_gen(World *w, Scratch *sc, Entity *ents, Uint64 area_seed)
+{
+    int x, y, i;
+
+    w->map_tile = -1;
+    w->king_tile = -1;
+    for (y = 0; y < WORLD_H; y++)
+        for (x = 0; x < WORLD_W; x++) {
+            int solid = dun_carved_solid(x, y) || dun_barrel_pick(area_seed, x, y);
+            w->solid[y][x] = solid ? 1 : 0;
+            if (solid)
+                w->terr[y][x] = GT_ROCK;
+            else if (dun_rubble(area_seed, x, y))
+                w->terr[y][x] = GT_DIRT;
+            else
+                w->terr[y][x] = GT_GRASS;
+            w->canopy[y][x] = 0;
+            /* FULLY REVEALED, and the only world that is. Fog has two
+             * channels and the Dungeon has neither: sight caps at SIGHT_MAX
+             * (half), and the other half is restoration, which is a function
+             * of collectibles - and the Dungeon holds none, so every tile it
+             * owns was pinned at half brightness for good. That is not fog of
+             * war, it is a room with the lights permanently down. Set at
+             * generation rather than by a pass afterwards, because that is the
+             * one place a Dungeon world is built (a load regenerates through
+             * here too, so it replays for free) and because reveal_around only
+             * ever RAISES a tile, so nothing can put it back.
+             *
+             * Render-only, like everything about reveal: tile_blocked cannot
+             * see this, so no completability proof changes. */
+            w->reveal[y][x] = 255;
+        }
+    /* No memories, no souls: the restoration mask is full at thirty bits, and
+     * the king is tracked by king_tile instead. tile=-1 is what every loop
+     * already reads as "nothing here". */
+    for (i = 0; i < ENTITY_COUNT; i++) {
+        ents[i].tile = -1;
+        ents[i].region = 0;
+        ents[i].grants = 0;
+        ents[i].is_soul = 0;
+        ents[i].restored = 0;
+    }
+    w->spawn_tile = DUN_SPAWN_TY * WORLD_W + DUN_SPAWN_TX;
+    regions_build(w, sc);
+    /* The stairs she arrives on, fixed - not the ring search: the search could
+     * land her in a corridor, and the stairs are the landmark the room is
+     * drawn around. Open floor in the spawn region by construction. */
+    w->portal_tile = DUN_PORTAL_TY * WORLD_W + DUN_PORTAL_TX;
+    w->king_tile = dun_king_pick(area_seed);
+}
+
 /* The whole generation pipeline, in the one order that works.
  * Returns placement attempts used (>0), or -depth when gating had to be
  * relaxed to make the world finishable - stored so a test can report it. */
@@ -3762,8 +4116,17 @@ static int world_gen(World *w, Scratch *sc, Entity *ents, Uint64 seed, Uint8 bio
     /* Set here rather than only in world_place_map, so the field is never
      * garbage on any path: the same bare-SDL_malloc World the comment above
      * describes would otherwise let a rolled-back or half-built world be read
-     * for a map tile that was never placed. */
+     * for a map tile that was never placed. king_tile rides the same rule:
+     * only dungeon_gen ever sets it. */
     w->map_tile = -1;
+    w->king_tile = -1;
+    if (biome == BIOME_DUNGEON) {
+        /* Authored, not generated: fixed rooms, seed-varying dressing, no
+         * entities, no map fragment. regions_build still runs, so region,
+         * litreg and spawn_region are real partitions like everywhere else. */
+        dungeon_gen(w, sc, ents, seed);
+        return 1;
+    }
     world_stub(w, seed);
     world_spawn(w, sc);
     regions_build(w, sc);
@@ -3887,6 +4250,13 @@ static const short art_tufts_lum[]     = { ART_LUM_SIGNPOST, ART_LUM_LANTERN, AR
 static const short art_reeds_lum[]     = { ART_LUM_JELLYFISH, ART_LUM_MANTA, ART_LUM_FOX, ART_LUM_STAG };
 
 #define PA(t) { t, (int)(sizeof t / sizeof *t) }
+/* The Dungeon's one prop_at slot: skulls and rubble scattered on the floor.
+ * Everything else the Dungeon shows - torches, banners, barrels, pillars, the
+ * king - is placed by the authored layout (dun_dressing) rather than by the
+ * density field, so this row is NULL everywhere else. A NULL slot is never
+ * drawn (props_build checks pa->n), which is what keeps prop_at's Dungeon
+ * branch honest: it may only return PROP_STONE. */
+static const short art_stones_dun[]    = { ART_DUN_SKULL };
 static const PropArt prop_art[BIOME_COUNT][PROP_COUNT] = {
     {
         { NULL, 0 },      /* PROP_NONE */
@@ -3902,6 +4272,12 @@ static const PropArt prop_art[BIOME_COUNT][PROP_COUNT] = {
         { NULL, 0 },
         PA(art_trees_lum), PA(art_pines_lum), PA(art_bushes_lum), PA(art_logs_lum), PA(art_rocks_lum),
         PA(art_stones_lum), PA(art_mushrooms_lum), PA(art_tufts_lum), PA(art_reeds_lum)
+    },
+    {
+        { NULL, 0 },      /* PROP_NONE */
+        { NULL, 0 }, { NULL, 0 }, { NULL, 0 }, { NULL, 0 }, { NULL, 0 },
+        PA(art_stones_dun),
+        { NULL, 0 }, { NULL, 0 }, { NULL, 0 }
     }
 };
 
@@ -4048,6 +4424,18 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, float density, U
     unsigned roll = (h >> 8) & 63u;   /* bits 8-13: presence, decided before shape */
 
     if (out_hash) *out_hash = h;
+
+    /* The Dungeon dresses itself (see dun_dressing): walls carry torches and
+     * banners, nooks carry barrels, pillars stand where the plan puts them.
+     * prop_at only scatters skulls on open floor - and only there, so nothing
+     * it places ever needs a solidity it cannot see. prop_art's Dungeon row is
+     * NULL outside PROP_STONE for the same reason; this branch must never
+     * return another kind. */
+    if (w->biome == BIOME_DUNGEON) {
+        if (w->solid[ty][tx])
+            return PROP_NONE;
+        return (roll < 3u) ? PROP_STONE : PROP_NONE;
+    }
 
     /* Water grows reeds at its margin and nothing in open water. */
     if (t == GT_WATER)
@@ -4527,6 +4915,111 @@ static int prop_covers_player(int after,
     return 1;
 }
 
+/* How many frames the beast has, and how fast it breathes. A power of two so
+ * the frame is a mask rather than a modulo, exactly like the torch beside it. */
+#define DUN_MONSTER_FRAMES 8
+#define DUN_MONSTER_FPS    6.0f
+
+/* What is standing on the king's tile: him, or what he turns into.
+ *
+ * The ONE answer, on the same terms entity_npc_art is the one answer to "what
+ * is standing on entity i". dun_dressing draws from it and prompt_draw sizes
+ * the keycap from it, so the picture and the prompt cannot disagree about how
+ * tall the thing in that room is - and the tests ask the same function rather
+ * than restating the rule.
+ *
+ * Keyed on SF_BEAST, which the ending sets at END_BEAST_BEAT, the beat whose
+ * line is "something underneath the castle turns over". Two things fall out of
+ * that for free: the transformation lands on the sentence that describes it,
+ * and because SF_BEAST is one of the only two story facts the save file
+ * stores, a game saved after the audience reloads with the beast still in the
+ * room. That is the honest state - it woke, and nothing puts it back.
+ *
+ * Render-only, like the king. Neither is ever written into solid[][], so a
+ * seventy-pixel beast cannot seal the room she is standing in. */
+static int dun_king_art(float clock)
+{
+    int f;
+
+    if (!(story.flags & SF_BEAST))
+        return ART_DUN_KING;
+    f = (int)(clock * DUN_MONSTER_FPS);
+    if (f < 0) f = 0;
+    return ART_DUN_MONSTER_0 + (f & (DUN_MONSTER_FRAMES - 1));
+}
+
+/* ---- Dungeon dressing -----------------------------------------------------
+ *
+ * Everything the authored plan hangs on its walls: pillars and barrels on the
+ * tiles dungeon_gen marked solid for them, torches/banners/fireplaces on
+ * qualifying wall tiles, grates and portcullis on their fixed tiles, the
+ * stairs she came down, and the king himself. There is deliberately NO door:
+ * a pair of gold doors used to stand in the king's doorway, and since nothing
+ * in the Dungeon is solid because it was drawn, it read as a locked door she
+ * could walk straight through. The tile it stood on is dressed by the same
+ * rules as the wall either side of it now, and DUN_DOOR was dropped from the
+ * bake with it - art nothing draws is shipped bytes. Every pick re-derives
+ * the generator's rule from
+ * (area_seed, tile) - no stored state, so gen and render agree by
+ * construction. Render-only throughout: solidity was decided at gen time, and
+ * nothing here touches it.
+ *
+ * The king is drawn at full brightness like the cast (not at the tile's fog
+ * level): a person she cannot see is a person she cannot find, and the whole
+ * area exists to be walked to him. He does not bob - a king is not a floating
+ * pickup, for the same reason NPCs do not. */
+static void dun_dressing(const World *w, Uint64 area_seed,
+                         int cam_x, int cam_y, int tx0, int ty0, int tx1, int ty1,
+                         float clock, DrawList *dl)
+{
+    int tx, ty, i;
+    int torch_frame = (int)(clock * 4.0f) & 3;
+
+    if (torch_frame < 0) torch_frame = 0;
+    for (ty = ty0; ty < ty1; ty++)
+        for (tx = tx0; tx < tx1; tx++) {
+            int art = ART_NONE, dress;
+            if (dun_is_pillar(tx, ty)) {
+                art = ((tx + ty) & 1) ? ART_DUN_PILLAR_A : ART_DUN_PILLAR_B;
+            } else if (dun_is_cask(tx, ty)) {
+                Uint32 h = tile_hash(area_seed, tx, ty);
+                art = (h % 3u) == 0 ? ART_DUN_BARREL
+                    : (h % 3u) == 1 ? ART_DUN_POT : ART_DUN_POTSML;
+            } else if (dun_barrel_pick(area_seed, tx, ty)) {
+                Uint32 h = tile_hash(area_seed, tx, ty);
+                art = (h % 3u) == 0 ? ART_DUN_BARREL
+                    : (h % 3u) == 1 ? ART_DUN_POT : ART_DUN_POTSML;
+            } else if ((dress = dun_wall_dress(area_seed, tx, ty)) != 0) {
+                art = dress == 1 ? ART_DUN_TORCH_0 + torch_frame
+                    : dress == 2 ? ART_DUN_BANNER_B
+                    : dress == 3 ? ART_DUN_BANNER_R : ART_DUN_FIREPLACE;
+            }
+            if (art != ART_NONE)
+                draw_list_push(dl, art, tx * TILE + TILE / 2 - cam_x,
+                               ty * TILE + TILE - cam_y, 0,
+                               tile_level(w, tx, ty));
+        }
+    for (i = 0; i < DUN_GRATE_COUNT; i++) {
+        tx = DUN_GRATES[i][0]; ty = DUN_GRATES[i][1];
+        if (tx >= tx0 && tx < tx1 && ty >= ty0 && ty < ty1)
+            draw_list_push(dl, ART_DUN_GRATE, tx * TILE + TILE / 2 - cam_x,
+                           ty * TILE + TILE - cam_y, 0, tile_level(w, tx, ty));
+    }
+    for (i = 0; i < DUN_PORTC_COUNT; i++) {
+        tx = DUN_PORTCS[i][0]; ty = DUN_PORTCS[i][1];
+        if (tx >= tx0 && tx < tx1 && ty >= ty0 && ty < ty1)
+            draw_list_push(dl, ART_DUN_PORTC, tx * TILE + TILE / 2 - cam_x,
+                           ty * TILE + TILE - cam_y, 0, tile_level(w, tx, ty));
+    }
+    if (w->king_tile >= 0) {
+        tx = w->king_tile % WORLD_W; ty = w->king_tile / WORLD_W;
+        if (tx >= tx0 && tx < tx1 && ty >= ty0 && ty < ty1 &&
+            tile_level(w, tx, ty) >= 3)
+            draw_list_push(dl, dun_king_art(clock), tx * TILE + TILE / 2 - cam_x,
+                           ty * TILE + TILE - cam_y, 0, FOG_LEVELS - 1);
+    }
+}
+
 /* Build and sort the list. Separate from drawing it so the tests can measure
  * list contents and ordering without paying for ~200 RLE blits per sample -
  * which is the difference between a sweep that runs in a second and one that
@@ -4638,14 +5131,17 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
      *                 there is no cycle to run, and advancing a frame counter
      *                 over a single sprite would be a no-op dressed up as
      *                 animation.
-     *   Underworld -> the same violet ring, standing over the final chamber.
-     *                 Still rather than animated for the same reason it is
-     *                 still in Lumiara, and because the mouths lead somewhere
-     *                 and this one does not.
+     *   Underworld -> the same violet ring, standing over the way down to the
+     *                 Dungeon. Still rather than animated for the same reason
+     *                 it is still in Lumiara, and because the mouths lead
+     *                 somewhere and this one does too now.
+     *   Dungeon    -> no ring at all. The portal_tile there is the stairs she
+     *                 arrived on, drawn by dun_dressing above - a gate standing
+     *                 over them would promise a way back that does not exist.
      *
      * Biome-gated rather than area-gated - World does not know about Game.area
      * and does not need to: portal_tile is computed for every biome (see
-     * world_place_portal) and every biome now draws it.
+     * world_place_portal) and every biome but the Dungeon draws it.
      *
      * Each gate wears its OWN realm's colour: the green swirl is the forest's
      * gate and the violet ring is Lumiara's. It ran the other way round for a
@@ -4653,14 +5149,12 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
      * to - which put the green swirl in Lumiara and left the forest showing a
      * slab of violet, and read on screen as the two portals having been
      * swapped rather than as a warning about anything. */
-    if (w->portal_tile >= 0) {
+    if (w->portal_tile >= 0 && w->biome != BIOME_DUNGEON) {
         int ptx = w->portal_tile % WORLD_W, pty = w->portal_tile / WORLD_W;
         if (ptx >= tx0 && ptx < tx1 && pty >= ty0 && pty < ty1) {
-            /* Every biome now, where it used to be everywhere but the terminal
-             * area. Area 3's tile is no longer spare: it is the final chamber,
-             * and a chamber that was not drawn was an ending no player could
-             * find. The animated swirl is the FOREST's gate and nothing else's;
-             * everywhere past it the ring stands still. */
+            /* Every biome but the Dungeon, which draws its stairs through
+             * dun_dressing instead. The animated swirl is the FOREST's gate
+             * and nothing else's; everywhere past it the ring stands still. */
             int art = ART_LUM_PORTAL;
             if (w->biome == BIOME_FOREST)
                 art = ART_UW_PORTAL_A + ((int)(clock * 6.0f) % 6);
@@ -4717,6 +5211,15 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
                                       - entity_bob(ENTITY_COUNT, clock),
                                   FOG_LEVELS - 1);
     }
+
+    /* The Dungeon dresses itself rather than growing props: pillars, barrels,
+     * wall overlays, doors, stairs and the king, all re-derived from the area
+     * seed. The seed on this path is the ROOT seed (see render_world's
+     * callers), so the area salt is re-applied - the same salt game_init_area
+     * generated with, which is what keeps the two in agreement. */
+    if (w->biome == BIOME_DUNGEON)
+        dun_dressing(w, seed ^ AREA4_SEED_SALT, cam_x, cam_y, tx0, ty0, tx1, ty1,
+                     clock, dl);
 
     /* The player goes in the same list, so she sorts against props by feet
      * rather than by tile row. */
@@ -4892,12 +5395,14 @@ static void prompt_draw(SDL_Surface *fb, const World *w, const Entity *ents,
          * keycap pointing at one thing while the key acts on another is worse
          * than no keycap at all. --map-test asserts the two agree. */
         if (!map_in_reach(w, px, py)) {
-            /* Last, the way the key resolves it last: the gate she can step
-             * through, or the chamber she cannot. Offered whatever the state of
-             * her progress, because pressing E on an unfinished chamber says so
-             * out loud - a keycap that only appeared once she had already
-             * finished would be a door she never knew was there. */
-            if (w->portal_tile >= 0) {
+            /* Last, the way the key resolves them last: the gate she can step
+             * through, or the king she cannot walk past. Offered whatever the
+             * state of her progress, because pressing E on an unfinished
+             * audience says so out loud - a keycap that only appeared once
+             * she had already finished would be a door she never knew was
+             * there. The Dungeon's stairs promise no way back, so they carry
+             * no keycap - the king beside them does. */
+            if (w->portal_tile >= 0 && w->biome != BIOME_DUNGEON) {
                 int qx = w->portal_tile % WORLD_W, qy = w->portal_tile / WORLD_W;
                 float dx = (float)qx * TILE + TILE * 0.5f - px;
                 float dy = (float)qy * TILE + TILE * 0.5f - py;
@@ -4905,6 +5410,18 @@ static void prompt_draw(SDL_Surface *fb, const World *w, const Entity *ents,
                     tile_level(w, qx, qy) >= 3)
                     draw_prompt(fb, qx * TILE + TILE / 2 - cam_x,
                                 qy * TILE + TILE - cam_y - TILE - 3, clock);
+            }
+            if (w->king_tile >= 0 && king_in_reach(w, px, py)) {
+                int kx = w->king_tile % WORLD_W, ky = w->king_tile / WORLD_W;
+                /* Over whoever is actually there, asked of dun_king_art rather
+                 * than assumed to be the king: the beast is half again his
+                 * height, and a keycap pinned to the king's would sit inside
+                 * it. Same rule as the cast's, one line above. */
+                if (tile_level(w, kx, ky) >= 3)
+                    draw_prompt(fb, kx * TILE + TILE / 2 - cam_x,
+                                ky * TILE + TILE - cam_y -
+                                    (int)ART_SPRITES[dun_king_art(clock)].anchor_y - 3,
+                                clock);
             }
             return;
         }
@@ -5124,18 +5641,21 @@ typedef struct {
     Uint64 seed;
     int    frags_restored;
     int    souls_restored;
-    Uint8  area;      /* 1, 2 or 3 - which area ents[]/frags/souls describe now */
+    Uint8  area;      /* 1-4 - which area ents[]/frags/souls describe now */
     Uint32 restored;  /* persistent across an area switch: bits 0-9 area 1,
-                        * bits 10-19 area 2, bits 20-29 area 3. ents[] only
-                        * ever holds the ACTIVE area's 10 entities, so this is
-                        * what carries the other areas' progress while they
-                        * are not loaded. */
+                         * bits 10-19 area 2, bits 20-29 area 3. The Dungeon
+                         * banks no bits. ents[] only
+                         * ever holds the ACTIVE area's 10 entities, so this is
+                         * what carries the other areas' progress while they
+                         * are not loaded. */
     /* Which areas' map fragments she has found: bit 0 area 1, bit 1 area 2,
-     * bit 2 area 3. Persistent across an area switch for the same reason
+     * bit 2 area 3, bit 3 the Dungeon (granted on arrival - the way down is
+     * short and known, and there is no fragment lying in it). Persistent
+     * across an area switch for the same reason
      * `restored` is - only one area's World is ever loaded, so a per-World
      * flag would forget the Forest map the moment she stepped through the
-     * portal and remember it again if she somehow came back. Three bits rather
-     * than three more bits of `restored`: `restored` is thirty bits deep
+     * portal and remember it again if she somehow came back. Four bits rather
+     * than four more bits of `restored`: `restored` is thirty bits deep
      * already, and a map is not a memory - it grants nothing, restores
      * nothing, and area_complete must not count it. */
     Uint8  maps;
@@ -5156,11 +5676,15 @@ typedef struct {
 #define SAVE_AREA3_SHIFT (2 * ENTITY_COUNT)
 #define SAVE_ALL_BITS    ((Uint32)((1u << (3 * ENTITY_COUNT)) - 1u))
 
-/* Where the ACTIVE area's slice of the restoration mask lives. */
+/* Where the ACTIVE area's slice of the restoration mask lives. Area 4 banks
+ * no bits, so its "slice" is the empty window past bit 30 - the one shift no
+ * live bit can ever alias onto, rather than Area 3's slice by accident of the
+ * else branch. */
 static Uint32 game_area_shift(Uint8 area)
 {
     return area == 1 ? 0u : area == 2 ? (Uint32)SAVE_AREA2_SHIFT
-                                      : (Uint32)SAVE_AREA3_SHIFT;
+         : area == 4 ? (Uint32)(3 * ENTITY_COUNT)
+                     : (Uint32)SAVE_AREA3_SHIFT;
 }
 
 /* The complete thirty-bit mask as of RIGHT NOW.
@@ -5172,13 +5696,19 @@ static Uint32 game_area_shift(Uint8 area)
  * transition, and now everything the story derives - has to reconcile those
  * two halves, and this is the one place that does it. It was written out by
  * hand in two places before the story needed a third, which is two more than a
- * fact this easy to get subtly wrong should ever have. */
+ * fact this easy to get subtly wrong should ever have.
+ *
+ * The Dungeon holds no entities, so there is nothing to reconcile there: the
+ * banked mask is the whole answer. Without this branch the shift below would
+ * alias Area 4 onto Area 3's slice and wipe it. */
 static Uint32 game_live_mask(const Game *g)
 {
     Uint32 shift = game_area_shift(g->area);
     Uint32 active = 0;
     int i;
 
+    if (g->area == 4)
+        return g->restored & SAVE_ALL_BITS;
     for (i = 0; i < ENTITY_COUNT; i++)
         if (g->ents[i].restored)
             active |= 1u << i;
@@ -5312,6 +5842,9 @@ static void story_sync(const Game *g)
  * make Area 3 a re-skin of Area 2's exact layout instead of its own world. */
 #define AREA2_SEED_SALT 0x9E3779B97F4A7C15ULL
 #define AREA3_SEED_SALT 0xFF51AFD7ED558CCDULL
+/* AREA4_SEED_SALT lives with dungeon_gen above: render_world must recompute
+ * the Dungeon's area seed from the root seed (dressing is hashed on it), and
+ * that code sits far above this block. */
 
 /* Generate the world for ONE area and stand the player in it. The ONLY path
  * from a seed to a playable state for either area - a fresh start, a load and
@@ -5330,6 +5863,7 @@ static void game_init_area(Game *g, Scratch *sc, Uint64 seed, Uint8 area)
 {
     Uint64 area_seed = (area == 1) ? seed
                       : (area == 2) ? (seed ^ AREA2_SEED_SALT)
+                      : (area == 4) ? (seed ^ AREA4_SEED_SALT)
                       : (seed ^ AREA3_SEED_SALT);
     Uint8  biome      = biome_for_area(area);
 
@@ -5364,7 +5898,7 @@ static void game_init(Game *g, Scratch *sc, Uint64 seed)
     game_init_area(g, sc, seed, 1);
 }
 
-/* Whether the CURRENT area's map has been found. g->area is always 1-3, so the
+/* Whether the CURRENT area's map has been found. g->area is always 1-4, so the
  * shift is always in range. */
 static int game_has_map(const Game *g)
 {
@@ -5384,6 +5918,33 @@ static int area_complete(const Game *g)
 {
     return g->frags_restored >= FRAGMENT_COUNT && g->souls_restored >= SOUL_COUNT;
 }
+
+/* ---- god mode -----------------------------------------------------------
+ *
+ * One session toggle (ctrl+g) with exactly one power: the portal opens on an
+ * unfinished area. Deliberately NOT a change to area_complete, and not a hand
+ * that fills the restored mask - the banner, the music, the region lighting,
+ * the castle states and the whole dialogue gate all read those, and a cheat
+ * that lied to them would congratulate her on an area she never walked and
+ * hand out lines that are no longer true when they are said. Only
+ * try_use_portal consults this, so the one thing it can do is skip the walk.
+ *
+ * `cheated` is what the run has actually spent. It is set the moment a portal
+ * is taken ungated and cleared by everything that builds a game from nothing
+ * (game_reseed, a successful game_load), because those games did not skip
+ * anything. While it is set the run cannot be written to a slot: a save whose
+ * area is ahead of its restored mask is precisely what save_header_ok rejects
+ * - that check is derived from the live invariant this toggle suspends - so
+ * the file would be written, reported "saved", and read back as corrupt at
+ * the next continue. Refusing at the keypress says so while the player is
+ * still standing there.
+ *
+ * File-scope on the same terms hud, menu and story are: it is session state,
+ * not world state, and Game is replaced wholesale at every portal. */
+static struct {
+    int on;        /* the toggle, off on every launch - nothing persists it */
+    int cheated;   /* a portal has been taken ungated in THIS run */
+} god;
 
 /* ---- Save and load ------------------------------------------------------
  *
@@ -5442,8 +6003,8 @@ static void save_slot_path(char *dst, size_t cap, int slot)
     SDL_snprintf(dst, cap, "wayfarer%d.sav", slot + 1);
 }
 
-/* Byte 21: three legal bits, one per area. */
-#define SAVE_MAPS_BITS 0x07u
+/* Byte 21: four legal bits, one per area. */
+#define SAVE_MAPS_BITS 0x0Fu
 
 
 static void save_put32(Uint8 *p, Uint32 v)
@@ -5547,7 +6108,7 @@ static int save_header_ok(const Uint8 *buf)
 
     if (buf[0] != SAVE_MAGIC_0 || buf[1] != SAVE_MAGIC_1) return -1;
     if (buf[2] != SAVE_VERSION)                           return -1;
-    if (buf[3] != 1 && buf[3] != 2 && buf[3] != 3)        return -1;
+    if (buf[3] != 1 && buf[3] != 2 && buf[3] != 3 && buf[3] != 4) return -1;
     if (buf[22] != 0 || buf[23] != 0)                     return -1;
     if (buf[46] != 0 || buf[47] != 0)                     return -1;
     area = buf[3];
@@ -5574,6 +6135,23 @@ static int save_header_ok(const Uint8 *buf)
                        (restored & (SAVE_AREA1_BITS << SAVE_AREA3_SHIFT)))) return -1;
     if (area == 3 && (restored & (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))
                    != (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))  return -1;
+    /* The Dungeon banks no bits of its own, but she cannot BE down there
+     * unless the castle let her through: Areas 1 and 2 complete and Area 3
+     * finished. Area 3's slice is read out of the mask the same way the
+     * story reads it - seven memories and all three souls. */
+    if (area == 4) {
+        Uint32 a3 = restored >> SAVE_AREA3_SHIFT;
+        int frags = 0, souls = 0, b;
+        for (b = 0; b < FRAGMENT_COUNT; b++)
+            if (a3 & (1u << b)) frags++;
+        for (b = 0; b < SOUL_COUNT; b++)
+            if (a3 & (1u << (FRAGMENT_COUNT + b))) souls++;
+        if ((restored & (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))
+                != (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))
+            return -1;
+        if (frags < FRAGMENT_COUNT || souls < SOUL_COUNT)
+            return -1;
+    }
 
     abilities = buf[20];
     if (abilities & (Uint8)~(Uint8)ABIL_ALL) return -1;
@@ -5606,9 +6184,9 @@ static int save_header_ok(const Uint8 *buf)
         }
         (void)talked;
         if (buf[45] & (Uint8)~(Uint8)SF_BITS) return -1;
-        /* Nothing that happens in the throne room can have happened anywhere
-         * but the castle. */
-        if ((buf[45] & (SF_KING | SF_BEAST)) && area != 3) return -1;
+        /* Nothing that happens with the king can have happened anywhere but
+         * the castle's Dungeon. */
+        if ((buf[45] & (SF_KING | SF_BEAST)) && area != 3 && area != 4) return -1;
         if ((buf[45] & SF_BEAST) && !(buf[45] & SF_KING))  return -1;
     }
 
@@ -5629,7 +6207,7 @@ static int save_header_ok(const Uint8 *buf)
  * count beats two numbers that might disagree with the save they describe. */
 typedef struct {
     int    used;
-    Uint8  area;    /* 1..3    */
+    Uint8  area;    /* 1..4    */
     int    done;    /* 0..ENTITY_COUNT restored in that area */
     Uint64 stamp;
 } SaveSlot;
@@ -5773,7 +6351,10 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     keep = story;
     game_init_area(tmp, sc, seed, area);
 
-    shift = (area == 1) ? 0 : (area == 2) ? SAVE_AREA2_SHIFT : SAVE_AREA3_SHIFT;
+    /* The Dungeon replays nothing: its slice of the mask is the empty window
+     * past bit 30, which save_header_ok already proved holds no bits. */
+    shift = (area == 1) ? 0 : (area == 2) ? SAVE_AREA2_SHIFT
+          : (area == 4) ? (Uint32)(3 * ENTITY_COUNT) : SAVE_AREA3_SHIFT;
     active = (restored >> shift) & SAVE_AREA1_BITS;
     for (i = 0; i < ENTITY_COUNT; i++)
         if (active & (1u << i))
@@ -5790,7 +6371,7 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     }
     tmp->p.x = px;
     tmp->p.y = py;
-    tmp->restored = restored;              /* the full 20-bit mask, both areas */
+    tmp->restored = restored;              /* the full 30-bit mask, all areas */
     /* Replayed as a delta on the regenerated world, exactly like a restored
      * entity: world_gen has just laid this area's map fragment back down, and
      * having found it means it is not lying there any more. */
@@ -5820,6 +6401,10 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     story.flags = buf[45];
     story.end_t = 0;
     story_sync(g);
+    /* A loaded game skipped nothing: save_header_ok has just proved its area
+     * and its mask agree, which is the exact claim god.cheated denies. The
+     * toggle itself is left alone - it is the player's, not the file's. */
+    god.cheated = 0;
 
     *seed_out = seed;
     return 0;
@@ -6127,15 +6712,20 @@ static void mm_draw(SDL_Surface *fb, const Game *g)
      * she has seen it, its position is not new information; only whether
      * she can use it yet is, and that is what the HUD banner is for.
      *
-     * All THREE areas, not just the two with an exit onward. Area 3's
-     * portal_tile stopped being a spare field when it became the final
-     * chamber, and props_build has drawn it in the world ever since - a
-     * landmark that is on screen but missing from the map she opened to find
-     * it by is the map being wrong, and the Underworld is the one area where
-     * she has nothing else to walk toward. */
-    if (g->w.portal_tile >= 0 &&
+     * Every area but the Dungeon. The Dungeon's portal_tile is the stairs
+     * she came down, and a violet "way onward" blip over a dead stairs
+     * would promise a second trip the game does not have. */
+    if (g->area != 4 && g->w.portal_tile >= 0 &&
         g->w.reveal[g->w.portal_tile / WORLD_W][g->w.portal_tile % WORLD_W] >= 24) {
         mm_marker(fb, g->w.portal_tile, SDL_MapRGB(fb->format, 0xb0, 0x6a, 0xff), 3);
+    }
+    /* The king, in the Dungeon only: geography and one blip is the whole of
+     * what that map screen shows. Same reveal gate as everything else, same
+     * gold as a memory fragment - there are no fragments down here to clash
+     * with, and he is what she came down to find. */
+    if (g->area == 4 && g->w.king_tile >= 0 &&
+        g->w.reveal[g->w.king_tile / WORLD_W][g->w.king_tile % WORLD_W] >= 24) {
+        mm_marker(fb, g->w.king_tile, SDL_MapRGB(fb->format, 0xff, 0xd7, 0x6a), 3);
     }
     mm_marker(fb, (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE),
               SDL_MapRGB(fb->format, 0xff, 0xff, 0xff), 3);
@@ -6155,6 +6745,7 @@ static const char *win_line(Uint8 biome)
 {
     return biome == BIOME_FOREST     ? "the forest remembers"
          : biome == BIOME_UNDERWORLD ? "the underworld remembers"
+         : biome == BIOME_DUNGEON    ? "the dungeon remembers"
                                      : "the lumiara remembers";
 }
 
@@ -6199,9 +6790,10 @@ static void hud_draw(SDL_Surface *fb, const Game *g)
 
     if (hud.win_left > 0) {
         const char *l1 = win_line(biome_for_area(g->area));
-        /* Areas 1 and 2 each open onto a portal; Area 3 is terminal, so its
-         * completion banner is the only one that says "all is restored". */
-        const char *l2 = (g->area == 1 || g->area == 2) ? "the portal opens" : "all is restored";
+        /* Areas 1, 2 and 3 each open onto a portal; the Dungeon is terminal
+         * (and has nothing to complete), so its banner is the only one that
+         * says "all is restored" - unreachable in play, but total. */
+        const char *l2 = g->area == 4 ? "all is restored" : "the portal opens";
         Uint32 c = SDL_MapRGB(fb->format, 0xff, 0xf0, 0xc0);
         draw_text_shadow(fb, (fb->w - text_w(l1)) / 2, fb->h / 2 - 20, l1, c);
         draw_text_shadow(fb, (fb->w - text_w(l2)) / 2, fb->h / 2 - 20 + FONT_LINE, l2, c);
@@ -6345,7 +6937,8 @@ static void menu_bar(char *dst, size_t cap, const char *label, int v)
 
 static const char *menu_area_name(Uint8 area)
 {
-    return area == 1 ? "forest" : area == 2 ? "lumiara" : "underworld";
+    return area == 1 ? "forest" : area == 2 ? "lumiara"
+         : area == 4 ? "dungeon" : "underworld";
 }
 
 /* One slot's row. What a header can honestly say and nothing more: which world
@@ -6579,6 +7172,7 @@ static const char *const MENU_CONTROL_LINES[] = {
     "f5               save this slot",
     "f9               reload this slot",
     "f11              fullscreen",
+    "ctrl g           god mode",
     "escape           this menu"
 };
 #define MENU_CONTROL_COUNT \
@@ -6879,7 +7473,8 @@ static void bm_key(SDL_Surface *fb, int x, int y, Uint32 chip, const char *s,
 static void bigmap_draw(SDL_Surface *fb, const Game *g, Scratch *sc)
 {
     static const char *title[BIOME_COUNT] = {
-        "map of the forest", "map of the underworld", "map of lumiara"
+        "map of the forest", "map of the underworld", "map of lumiara",
+        "map of the dungeon"
     };
     Uint32 ink   = SDL_MapRGB(fb->format, 0x10, 0x12, 0x18);
     Uint32 warm  = SDL_MapRGB(fb->format, 0xf0, 0xd8, 0xb0);
@@ -6920,33 +7515,45 @@ static void bigmap_draw(SDL_Surface *fb, const Game *g, Scratch *sc)
         bm_marker(fb, ox, oy, g->ents[i].tile,
                   g->ents[i].is_soul ? soulc : gold, 3);
     }
-    /* Every area, on the same terms as the minimap's blip - see mm_draw. */
-    if (g->w.portal_tile >= 0)
+    /* Every area but the Dungeon, on the same terms as the minimap's blip -
+     * see mm_draw. The stairs get no marker: geography and the king is the
+     * whole of what this screen shows down here. */
+    if (g->area != 4 && g->w.portal_tile >= 0)
         bm_marker(fb, ox, oy, g->w.portal_tile, viol, 3);
+    if (g->area == 4 && g->w.king_tile >= 0)
+        bm_marker(fb, ox, oy, g->w.king_tile, gold, 3);
     bm_marker(fb, ox, oy,
               (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE), white, 3);
 
     ly = oy;
     draw_text(fb, lx, ly, title[g->w.biome < BIOME_COUNT ? g->w.biome : 0], warm);
     ly += FONT_LINE * 2;
-    SDL_snprintf(buf, sizeof(buf), "fragments %d/%d", g->frags_restored, FRAGMENT_COUNT);
-    draw_text(fb, lx, ly, buf, warm);
-    ly += FONT_LINE;
-    SDL_snprintf(buf, sizeof(buf), "souls %d/%d", g->souls_restored, SOUL_COUNT);
-    draw_text(fb, lx, ly, buf, warm);
-    ly += FONT_LINE * 2;
-    bm_key(fb, lx, ly, gold,  "memory fragment", pale); ly += FONT_LINE;
-    bm_key(fb, lx, ly, soulc, "found soul", pale);      ly += FONT_LINE;
-    /* Named for what it IS in this area rather than dropped in the one area
-     * where "onward" would be a lie: Area 3 is terminal, and its violet mark
-     * is the chamber the ending runs in. A blip with no legend row reads as an
-     * artefact of the map, which is what leaving the row out did. */
-    bm_key(fb, lx, ly, viol,
-           (g->area == 1 || g->area == 2) ? "the way onward" : "the final chamber",
-           pale);
-    ly += FONT_LINE;
+    if (g->area == 4) {
+        /* Geography and one blip: the Dungeon holds nothing to count and no
+         * trail to draw, so the counts, the fragment rows and the trails
+         * paragraph all stay off. What is left is the whole of the screen's
+         * contract down here. */
+        bm_key(fb, lx, ly, gold, "the king", pale); ly += FONT_LINE;
+    } else {
+        SDL_snprintf(buf, sizeof(buf), "fragments %d/%d", g->frags_restored, FRAGMENT_COUNT);
+        draw_text(fb, lx, ly, buf, warm);
+        ly += FONT_LINE;
+        SDL_snprintf(buf, sizeof(buf), "souls %d/%d", g->souls_restored, SOUL_COUNT);
+        draw_text(fb, lx, ly, buf, warm);
+        ly += FONT_LINE * 2;
+        bm_key(fb, lx, ly, gold,  "memory fragment", pale); ly += FONT_LINE;
+        bm_key(fb, lx, ly, soulc, "found soul", pale);      ly += FONT_LINE;
+        /* Named for what it IS in this area rather than dropped in the one
+         * area where "onward" would be a lie: Area 3's violet mark used to be
+         * the chamber the ending ran in, and now it is the way down. A blip
+         * with no legend row reads as an artefact of the map, which is what
+         * leaving the row out did. */
+        bm_key(fb, lx, ly, viol, "the way onward", pale);
+        ly += FONT_LINE;
+    }
     bm_key(fb, lx, ly, white, "you are here", pale);
     ly += FONT_LINE * 2;
+    if (g->area != 4) {
     draw_text(fb, lx, ly, "trails lead to what is", pale);       ly += FONT_LINE;
     draw_text(fb, lx, ly, "still missing.", pale);               ly += FONT_LINE;
     /* Stated rather than left as a silence: a collectible with no trail and no
@@ -6960,6 +7567,7 @@ static void bigmap_draw(SDL_Surface *fb, const Game *g, Scratch *sc)
         draw_text(fb, lx, ly, "can cross for now.", pale);
         ly += FONT_LINE;
     }
+    } /* trails paragraph: areas with something missing only */
     ly += FONT_LINE;
     draw_text(fb, lx, ly, "m   close the map", warm);
 }
@@ -7190,11 +7798,11 @@ static int try_interact(Game *g, Audio *a)
  * state machine here would need a rule for every pair of states that can never
  * happen.
  *
- * It runs in the final chamber, which is Area 3's portal_tile. That field has
- * been computed for every biome since portals existed and documented as unused
- * in the terminal area - it is the one tile in the castle that generation
- * already guarantees is open, reachable from spawn, and not on top of anything
- * else. It needed no new placement pass and no new proof.
+ * It runs at the king's feet, in the Dungeon below the castle. The king_tile
+ * is to the ending what portal_tile was: the one tile generation already
+ * guarantees is open and reachable, needing no new placement pass and no new
+ * proof. It used to run on Area 3's portal_tile; moving the ending down the
+ * stairs is what made Area 3 a way onward instead of a dead end.
  */
 #define END_BEATS 11
 #define END_BEAT_TICKS 150            /* 2.5 s a beat */
@@ -7223,28 +7831,22 @@ static int story_end_beat(void) { return (story.end_t - 1) / END_BEAT_TICKS; }
 #define END_BLACK_BEAT  (END_BEATS + 2)        /* the screen is gone */
 #define END_LAST_BEAT   (END_BEATS + 3)        /* the counter stops here */
 
-/* Whether E is standing in front of the final chamber with everything the
- * chamber asks for. Separate from try_use_portal because it is not a portal:
- * nothing is on the other side. */
-static int final_chamber_in_reach(const Game *g)
+/* Whether E is standing before the king with everything the king asks for.
+ * Separate from try_use_portal because he is not a portal: there is nothing
+ * on the other side of him. Reach is king_in_reach - the one answer to
+ * "is she near the king" the prompt draws from too. */
+static int king_audience_in_reach(const Game *g)
 {
-    float ex, ey, dx, dy;
-
-    if (g->area != 3 || g->w.portal_tile < 0) return 0;
-    ex = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
-    ey = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
-    dx = ex - g->p.x;
-    dy = ey - g->p.y;
-    return dx * dx + dy * dy <= INTERACT_RADIUS * INTERACT_RADIUS;
+    return g->area == 4 && king_in_reach(&g->w, g->p.x, g->p.y);
 }
 
 /* Start it, once. The guard is SF_KING rather than a local latch because a
  * save written mid-sequence and reloaded must not play it again - and because
  * "has the king seen her" is a fact about the story, not about this run of the
  * program. */
-static int try_final_chamber(Game *g, Audio *a)
+static int try_king_audience(Game *g, Audio *a)
 {
-    if (!final_chamber_in_reach(g))
+    if (!king_audience_in_reach(g))
         return 0;
     if (!story_area_done(g, 3)) {
         hud_toast("the chamber is not finished with you yet");
@@ -7252,7 +7854,7 @@ static int try_final_chamber(Game *g, Audio *a)
         return 1;
     }
     if (story.flags & SF_KING)
-        return 1;                       /* already seen; the door does nothing */
+        return 1;                       /* already seen; he does nothing */
     story.flags |= SF_KING;
     story.end_t = 1;
     SDL_AtomicAdd(&a->voice_fire, 1);
@@ -7682,6 +8284,9 @@ static void game_reseed(Game *g, Scratch *sc, Audio *a, Uint64 seed)
      * been found, so there is nothing to be looking at. */
     hud.map_open  = 0;
     hud.bm_dirty  = 1;
+    /* A new world is Area 1 with nothing behind it, so there is nothing left
+     * to have skipped - see god above. */
+    god.cheated = 0;
     audio_request_reset(a, seed, 0, 0, BIOME_FOREST);
 }
 
@@ -7714,15 +8319,21 @@ static void game_transition_to_area(Game *g, Scratch *sc, Uint8 next_area)
 
 /* The portal, checked alongside try_interact on the same key: only once the
  * current area is area_complete (the portal "lights up" - see hud_draw's
- * banner) and only within the same INTERACT_RADIUS entities use. Area 3 has
- * no portal of its own to use (it is terminal - see try_interact's caller),
- * so only areas 1 and 2 reach this. Returns 1 if the step was taken, 0
- * otherwise, mirroring try_interact's shape. */
+ * banner) and only within the same INTERACT_RADIUS entities use. The Dungeon
+ * has no portal of its own to use (it is terminal - the stairs only led
+ * down), so only areas 1, 2 and 3 reach this. Returns 1 if the step was
+ * taken, 0 otherwise, mirroring try_interact's shape. */
 static int try_use_portal(Game *g, Scratch *sc, Audio *a)
 {
     float ex, ey, dx, dy;
+    int   skipped;
 
-    if ((g->area != 1 && g->area != 2) || g->w.portal_tile < 0 || !area_complete(g))
+    if ((g->area != 1 && g->area != 2 && g->area != 3) || g->w.portal_tile < 0)
+        return 0;
+    /* The whole of god mode, in one clause: the gate still has to be reached,
+     * it is still the same INTERACT_RADIUS, the same key and the same step -
+     * only the requirement that the area be finished is suspended. */
+    if (!area_complete(g) && !god.on)
         return 0;
     ex = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
     ey = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
@@ -7730,6 +8341,9 @@ static int try_use_portal(Game *g, Scratch *sc, Audio *a)
     dy = ey - g->p.y;
     if (dx * dx + dy * dy > INTERACT_RADIUS * INTERACT_RADIUS)
         return 0;
+    /* Asked BEFORE the step, because after it area_complete is a question
+     * about the area she has just arrived in. */
+    skipped = !area_complete(g);
     if (g->area == 1) {
         game_transition_to_area(g, sc, 2);
         /* Root seed, not the Area 2 world-generation salt: F9's own reload of
@@ -7738,7 +8352,7 @@ static int try_use_portal(Game *g, Scratch *sc, Audio *a)
          * active. */
         audio_request_reset(a, g->seed, 0, 0, biome_for_area(2));
         hud_toast("the way between opens");
-    } else {
+    } else if (g->area == 2) {
         game_transition_to_area(g, sc, 3);
         audio_request_reset(a, g->seed, 0, 0, biome_for_area(3));
         /* Not a locked door being unlocked. Nothing was carried here and
@@ -7746,6 +8360,20 @@ static int try_use_portal(Game *g, Scratch *sc, Audio *a)
          * in the game to treat her as somebody it already knows. */
         say_open("", "the gate is already open.",
                  "it was not, a moment ago.");
+    } else {
+        game_transition_to_area(g, sc, 4);
+        audio_request_reset(a, g->seed, 0, 0, biome_for_area(4));
+        /* The Dungeon's map is granted, not found: the way down is short and
+         * known, and there is no fragment lying in it. Replayed as a bit, so
+         * a save written down here reloads with the screen it was saved on. */
+        g->maps |= (Uint8)(1u << 3);
+        hud_toast("the way down opens");
+    }
+    /* Last, so it wins the toast line over whichever branch just spoke: a step
+     * that was not earned must not read like one that was. */
+    if (skipped) {
+        god.cheated = 1;
+        hud_toast("god mode: the way opens");
     }
     return 1;
 }
@@ -8158,6 +8786,68 @@ static int sprite_selftest(void)
         printf("          %ld px from %ld RLE bytes (%.2fx), %d palette colours\n",
                px_total, rle_total, (double)px_total / (double)rle_total, ART_PAL_N);
         printf("          char anchor gap takes %d distinct values (cell-relative: >1)\n", gaps);
+    }
+
+    /* (e) THE DUNGEON'S WALL DRESSING IS WALL-SIZED, AND ITS SHEETS DO NOT
+     * BREATHE.
+     *
+     * The torches baked straight off a 64x128 GIF and trimmed to 28x68 - four
+     * and a quarter tiles tall, half again the king's height, and a head
+     * taller than the player standing under one. They hang beside banners and
+     * a fireplace that are two tiles tall, so the ceiling here is stated in
+     * tiles rather than copied off a neighbour: three, which leaves room for a
+     * flame without letting a sconce become architecture.
+     *
+     * Both multi-frame Dungeon sheets are then held to the same rule the NPC
+     * sheets are: every frame the same box and the same anchor. A sheet whose
+     * trim breathed frame to frame would make the thing skate sideways as it
+     * animates, and a still screenshot cannot show that. */
+    {
+        int max_h = TILE * 3, torch_was = 68, bad = 0;
+        int tw0 = ART_SPRITES[ART_DUN_TORCH_0].w;
+        int th0 = ART_SPRITES[ART_DUN_TORCH_0].h;
+        int mw0 = ART_SPRITES[ART_DUN_MONSTER_0].w;
+        int mh0 = ART_SPRITES[ART_DUN_MONSTER_0].h;
+
+        for (i = 0; i < 4; i++) {
+            const ArtSprite *sp = &ART_SPRITES[ART_DUN_TORCH_0 + i];
+            if (sp->w != tw0 || sp->h != th0 ||
+                sp->anchor_x != tw0 / 2 || sp->anchor_y != th0) bad++;
+        }
+        for (i = 0; i < DUN_MONSTER_FRAMES; i++) {
+            const ArtSprite *sp = &ART_SPRITES[ART_DUN_MONSTER_0 + i];
+            if (sp->w != mw0 || sp->h != mh0 ||
+                sp->anchor_x != mw0 / 2 || sp->anchor_y != mh0) bad++;
+        }
+        if (bad) {
+            printf("  %d Dungeon sheet frame(s) disagree with frame 0 about"
+                   " their box or anchor - they will skate\n", bad);
+            fails++;
+        }
+        if (th0 > max_h) {
+            printf("  the torch is %d px tall, over the %d px (%d tiles) a"
+                   " wall sconce may be\n", th0, max_h, max_h / TILE);
+            fails++;
+        }
+        /* Negative control: the size it used to be must FAIL the same test,
+         * or "the torch is small enough" is a sentence this check would print
+         * about the sprite that prompted it. */
+        if (torch_was <= max_h) {
+            printf("  torch size negative control FAILED: the %d px sprite this"
+                   " replaced would also have passed at %d px\n",
+                   torch_was, max_h);
+            fails++;
+        }
+        /* And the beast must still sort before the character block, or
+         * (d) above checks it as a character frame and it fails as one. */
+        if (ART_DUN_MONSTER_0 + DUN_MONSTER_FRAMES - 1 >= ART_CH_IDLE_DOWN_0) {
+            printf("  the beast frames reach into the character block\n");
+            fails++;
+        }
+        if (!bad && th0 <= max_h)
+            printf("sprite  : torch %dx%d (was 28x%d, ceiling %d), beast %dx%d"
+                   " x%d frames - every frame one box, one anchor\n",
+                   tw0, th0, torch_was, max_h, mw0, mh0, DUN_MONSTER_FRAMES);
     }
 
     /* PROP DENSITY NORMALISATION.
@@ -9834,7 +10524,8 @@ static int tile_selftest(void)
     for (biome = 0; biome < BIOME_COUNT; biome++) {
     const TileSet *ts = tileset_for((Uint8)biome);
     const char *bname = biome == BIOME_FOREST ? "forest"
-                       : biome == BIOME_UNDERWORLD ? "underworld" : "lumiara";
+                       : biome == BIOME_UNDERWORLD ? "underworld"
+                       : biome == BIOME_DUNGEON ? "dungeon" : "lumiara";
 
     world_stub(w, 1);
     w->biome = (Uint8)biome;
@@ -10463,6 +11154,75 @@ static int fog_selftest(void)
                 printf("fog     : %d worlds fully restored: every tile reaches level %d,"
                        " no owned tile relabelled, collision untouched\n",
                        worlds, FOG_LEVELS - 1);
+        }
+        SDL_free(w);
+        SDL_free(sc);
+    }
+
+    /* ---- The Dungeon carries no fog at all --------------------------------
+     *
+     * Both channels, measured separately, because the Dungeon is the one world
+     * where neither of them can ever do anything: it holds no collectibles, so
+     * restoration stays at zero forever, and sight alone caps at SIGHT_MAX,
+     * which is half. Every tile down there sat at level 15 of 31 for good -
+     * not fog of war, just a room with the lights permanently down.
+     *
+     * Asserted on a world built through world_gen, the one dispatch the game
+     * and a load both come through, rather than on a hand-set reveal array -
+     * the claim is that GENERATION leaves it clear, and a fixture would only
+     * prove the assertion works on the fixture.
+     *
+     * The negative control is a Forest built the same way: it must be almost
+     * entirely dim, or "every tile is at full brightness" is a sentence this
+     * measurement would print about any world at all. */
+    {
+        World   *w  = (World *)SDL_malloc(sizeof(World));
+        Scratch *sc = (Scratch *)SDL_malloc(sizeof(Scratch));
+        Entity   ents[ENTITY_COUNT];
+        int x, y, k, dim = 0, unrevealed = 0, pre_restored = 0, forest_dim = 0;
+
+        if (!w || !sc) {
+            printf("  fog: out of memory for the Dungeon check\n");
+            fails++;
+        } else {
+            world_gen(w, sc, ents, 1, BIOME_DUNGEON);
+            for (k = 0; k < w->region_count; k++)
+                if (w->regions[k].restoration != 0.0f) pre_restored++;
+            for (y = 0; y < WORLD_H; y++)
+                for (x = 0; x < WORLD_W; x++) {
+                    if (w->reveal[y][x] != 255) unrevealed++;
+                    if (tile_level(w, x, y) != FOG_LEVELS - 1) dim++;
+                }
+            world_gen(w, sc, ents, 1, BIOME_FOREST);
+            for (y = 0; y < WORLD_H; y++)
+                for (x = 0; x < WORLD_W; x++)
+                    if (tile_level(w, x, y) != FOG_LEVELS - 1) forest_dim++;
+
+            if (pre_restored) {
+                printf("  %d Dungeon region(s) start with restoration above"
+                       " zero, so this check is not measuring sight alone\n",
+                       pre_restored);
+                fails++;
+            }
+            if (unrevealed || dim) {
+                printf("  the Dungeon left %d tile(s) short of full reveal and"
+                       " %d below level %d\n", unrevealed, dim, FOG_LEVELS - 1);
+                fails++;
+            }
+            if (forest_dim == 0) {
+                printf("  fog negative control FAILED: a freshly generated"
+                       " Forest was already at full brightness everywhere, so"
+                       " this measurement cannot tell lit from fogged\n");
+                fails++;
+            } else {
+                printf("fog     : negative control - a fresh Forest leaves %d of"
+                       " %d tiles below level %d\n",
+                       forest_dim, WORLD_W * WORLD_H, FOG_LEVELS - 1);
+            }
+            if (!unrevealed && !dim && !pre_restored)
+                printf("fog     : the Dungeon generates clear - all %d tiles at"
+                       " reveal 255 and level %d, with restoration at zero\n",
+                       WORLD_W * WORLD_H, FOG_LEVELS - 1);
         }
         SDL_free(w);
         SDL_free(sc);
@@ -11228,7 +11988,305 @@ static int map_selftest(int seeds, Uint64 base)
         SDL_zero(hud);
     }
 
-    /* ---- Nothing buries the chart --------------------------------------- */
+    /* ---- The Dungeon: valid rooms, a reachable king, one blip -------------
+     *
+     * Swept over the same seeds: spawn, stairs and king on open tiles of the
+     * spawn region, no entities and no chart (there is nothing to restore and
+     * nothing to find), the same king_tile from a second generation, and the
+     * whole open floor reachable with NO abilities. The dressing agreement is
+     * read out of the draw list props_build actually builds: every pillar and
+     * every barrel-pick tile in view must carry its sprite, or gen and render
+     * have drifted. On the maps: the king's gold blip on both, no violet
+     * anywhere near the stairs, and no trails - hud.bm_closed must stay zero.
+     * Negative controls: an unrevealed king draws no blip, and king_tile = -1
+     * clears both boxes. */
+    {
+        int before = fails, ctl = 0, door_ctl = 0, s2, ox2, oy2;
+        Uint32 gold = SDL_MapRGB(fb->format, 0xff, 0xd7, 0x6a);
+        Uint32 viol = SDL_MapRGB(fb->format, 0xb0, 0x6a, 0xff);
+
+        bm_origin(fb, &ox2, &oy2);
+        for (s2 = 0; s2 < seeds; s2++) {
+            Uint64 seed = base + (Uint64)s2;
+            int kt, pt2, st, open = 0, reached = 0, tx, ty;
+
+            g->restored = 0; g->maps = 0;
+            game_init_area(g, sc, seed, 4);
+            kt = g->w.king_tile; pt2 = g->w.portal_tile; st = g->w.spawn_tile;
+            if (st < 0 || pt2 < 0 || kt < 0) {
+                printf("FAIL  map: dungeon seed %.0f missing spawn (%d), stairs"
+                       " (%d) or king (%d)\n", (double)seed, st, pt2, kt);
+                fails++;
+                continue;
+            }
+            if (g->w.solid[st / WORLD_W][st % WORLD_W] ||
+                g->w.solid[pt2 / WORLD_W][pt2 % WORLD_W] ||
+                g->w.solid[kt / WORLD_W][kt % WORLD_W]) {
+                printf("FAIL  map: dungeon seed %.0f put spawn, stairs or king"
+                       " on a solid tile\n", (double)seed);
+                fails++;
+            }
+            for (i = 0; i < ENTITY_COUNT; i++)
+                if (g->ents[i].tile >= 0) {
+                    printf("FAIL  map: dungeon seed %.0f placed entity %d\n",
+                           (double)seed, i);
+                    fails++;
+                    break;
+                }
+            if (g->w.map_tile >= 0) {
+                printf("FAIL  map: dungeon seed %.0f placed a map fragment\n",
+                       (double)seed);
+                fails++;
+            }
+            /* Deterministic: the same seed must derive the same stairs/king. */
+            b->restored = 0; b->maps = 0;
+            game_init_area(b, sc, seed, 4);
+            if (b->w.king_tile != kt || b->w.portal_tile != pt2) {
+                printf("FAIL  map: dungeon seed %.0f is not deterministic"
+                       " (king %d/%d, stairs %d/%d)\n", (double)seed,
+                       kt, b->w.king_tile, pt2, b->w.portal_tile);
+                fails++;
+            }
+            /* Reachable with NO abilities, and fully connected: every open
+             * tile within walking distance of spawn. */
+            bfs_gated(&g->w, ABIL_NONE, st, sc->dist, sc->queue);
+            if (sc->dist[kt] < 0 || sc->dist[pt2] < 0) {
+                printf("FAIL  map: dungeon seed %.0f sealed the king (%d) or"
+                       " the stairs (%d) away\n", (double)seed,
+                       sc->dist[kt], sc->dist[pt2]);
+                fails++;
+            }
+            for (ty = 0; ty < WORLD_H; ty++)
+                for (tx = 0; tx < WORLD_W; tx++) {
+                    if (g->w.solid[ty][tx]) continue;
+                    open++;
+                    if (sc->dist[ty * WORLD_W + tx] >= 0) reached++;
+                }
+            if (open != reached) {
+                printf("FAIL  map: dungeon seed %.0f only %d of %d open tiles"
+                       " reachable\n", (double)seed, reached, open);
+                fails++;
+            }
+            /* Dressing agreement, read from the real draw list. Two framings:
+             * the torch hall (pillars are fixed, so they are always in it)
+             * and the king (drawn once, wherever he stands). */
+            {
+                int cam_x = 0, cam_y = 0, j, king_seen = 0, miss = 0, checked = 0;
+                int kx2 = kt % WORLD_W, ky2 = kt / WORLD_W;
+                Uint64 aseed = seed ^ AREA4_SEED_SALT;
+                /* Lit: the king only joins the list where he can be seen,
+                 * like every other marker. */
+                reveal_all(&g->w);
+                camera_follow((float)(63 * TILE), (float)(62 * TILE),
+                              LOGICAL_W, LOGICAL_H, &cam_x, &cam_y);
+                props_build(LOGICAL_W, LOGICAL_H, &g->w, seed, cam_x, cam_y,
+                            g->ents, &g->p, 0.0f, dl);
+                for (ty = cam_y / TILE; ty <= (cam_y + LOGICAL_H) / TILE; ty++) {
+                    int want;
+                    if (ty < 0 || ty >= WORLD_H) continue;
+                    for (tx = cam_x / TILE; tx <= (cam_x + LOGICAL_W) / TILE; tx++) {
+                        if (tx < 0 || tx >= WORLD_W) continue;
+                        want = ART_NONE;
+                        if (dun_is_pillar(tx, ty))
+                            want = ((tx + ty) & 1) ? ART_DUN_PILLAR_A : ART_DUN_PILLAR_B;
+                        else if (dun_is_cask(tx, ty))
+                            want = (tile_hash(aseed, tx, ty) % 3u) == 0 ? ART_DUN_BARREL
+                                 : (tile_hash(aseed, tx, ty) % 3u) == 1 ? ART_DUN_POT
+                                 : ART_DUN_POTSML;
+                        else if (dun_barrel_pick(aseed, tx, ty))
+                            want = (tile_hash(aseed, tx, ty) % 3u) == 0 ? ART_DUN_BARREL
+                                 : (tile_hash(aseed, tx, ty) % 3u) == 1 ? ART_DUN_POT
+                                 : ART_DUN_POTSML;
+                        if (want == ART_NONE) continue;
+                        checked++;
+                        for (j = 0; j < dl->n; j++)
+                            if (dl->item[j].art == want &&
+                                dl->item[j].x == tx * TILE + TILE / 2 - cam_x &&
+                                dl->item[j].y == ty * TILE + TILE - cam_y)
+                                break;
+                        if (j >= dl->n) miss++;
+                    }
+                }
+                for (j = 0; j < dl->n; j++)
+                    if (dl->item[j].art == ART_DUN_KING) king_seen++;
+                camera_follow((float)(kx2 * TILE), (float)(ky2 * TILE),
+                              LOGICAL_W, LOGICAL_H, &cam_x, &cam_y);
+                props_build(LOGICAL_W, LOGICAL_H, &g->w, seed, cam_x, cam_y,
+                            g->ents, &g->p, 0.0f, dl);
+                for (j = 0; j < dl->n; j++)
+                    if (dl->item[j].art == ART_DUN_KING) king_seen++;
+                if (king_seen != 1) {
+                    printf("FAIL  map: dungeon seed %.0f drew the king %d"
+                           " times\n", (double)seed, king_seen);
+                    fails++;
+                }
+                /* Nothing stands in the king's doorway. The doors used to be
+                 * pushed at a fixed tile whatever the generator said about it,
+                 * and since no Dungeon prop is solid, they read as a locked
+                 * door she then walked straight through. Measured as "no draw
+                 * -list entry is anchored on that tile" rather than "no entry
+                 * uses the door sprite", because the sprite is gone from the
+                 * bake and there is no id left to name.
+                 *
+                 * The control is the grate, which IS drawn at a fixed tile the
+                 * same way: park the camera on it and the same measurement has
+                 * to FIND something, or an empty doorway proves only that the
+                 * measurement is blind. */
+                {
+                    int dx2 = 62, dy2 = 33, found = 0, gfound = 0;
+                    camera_follow((float)(dx2 * TILE), (float)(dy2 * TILE),
+                                  LOGICAL_W, LOGICAL_H, &cam_x, &cam_y);
+                    props_build(LOGICAL_W, LOGICAL_H, &g->w, seed, cam_x, cam_y,
+                                g->ents, &g->p, 0.0f, dl);
+                    for (j = 0; j < dl->n; j++)
+                        if (dl->item[j].x == dx2 * TILE + TILE / 2 - cam_x &&
+                            dl->item[j].y == dy2 * TILE + TILE - cam_y)
+                            found++;
+                    dx2 = DUN_GRATES[0][0]; dy2 = DUN_GRATES[0][1];
+                    camera_follow((float)(dx2 * TILE), (float)(dy2 * TILE),
+                                  LOGICAL_W, LOGICAL_H, &cam_x, &cam_y);
+                    props_build(LOGICAL_W, LOGICAL_H, &g->w, seed, cam_x, cam_y,
+                                g->ents, &g->p, 0.0f, dl);
+                    for (j = 0; j < dl->n; j++)
+                        if (dl->item[j].x == dx2 * TILE + TILE / 2 - cam_x &&
+                            dl->item[j].y == dy2 * TILE + TILE - cam_y)
+                            gfound++;
+                    if (found) {
+                        printf("FAIL  map: dungeon seed %.0f still draws %d"
+                               " thing(s) in the king's doorway\n",
+                               (double)seed, found);
+                        fails++;
+                    }
+                    if (gfound == 0) {
+                        printf("FAIL  map: doorway negative control - the same"
+                               " check found nothing on the grate tile either\n");
+                        fails++;
+                    } else {
+                        door_ctl++;
+                    }
+                }
+                if (miss) {
+                    printf("FAIL  map: dungeon seed %.0f left %d of %d"
+                           " pillar/barrel tiles undrawn\n",
+                           (double)seed, miss, checked);
+                    fails++;
+                }
+                if (checked == 0) {
+                    printf("FAIL  map: dungeon seed %.0f put no pillar or"
+                           " barrel in view of spawn\n", (double)seed);
+                    fails++;
+                }
+            }
+            /* The maps: gold on the king, no violet on the stairs, no trails. */
+            {
+                int fx = -1, x2, y2, kx, ky, gold_px, mm_px, vx, vy;
+                for (y2 = 0; y2 < WORLD_H && fx < 0; y2++)
+                    for (x2 = 0; x2 < WORLD_W && fx < 0; x2++) {
+                        int ddx = x2 - kt % WORLD_W, ddy = y2 - kt / WORLD_W;
+                        if (ddx < 0) ddx = -ddx;
+                        if (ddy < 0) ddy = -ddy;
+                        if ((ddx > ddy ? ddx : ddy) < 20) continue;
+                        if (!g->w.solid[y2][x2]) fx = y2 * WORLD_W + x2;
+                    }
+                if (fx < 0) {
+                    printf("FAIL  map: dungeon seed %.0f has nowhere 20 tiles"
+                           " from the king to stand\n", (double)seed);
+                    fails++;
+                    continue;
+                }
+                reveal_all(&g->w);
+                g->p.x = (float)(fx % WORLD_W) * TILE + TILE * 0.5f;
+                g->p.y = (float)(fx / WORLD_W) * TILE + TILE * 0.5f;
+                if (hud.bm) { SDL_FreeSurface(hud.bm); hud.bm = NULL; }
+                if (hud.mm) { SDL_FreeSurface(hud.mm); hud.mm = NULL; }
+                SDL_zero(hud);
+                g->maps = (Uint8)(1u << 3);
+                g->p.abilities = ABIL_ALL;
+                SDL_FillRect(fb, NULL, 0);
+                hud.bm_dirty = 1;
+                bigmap_draw(fb, g, sc);
+                kx = ox2 + (kt % WORLD_W) * BM_SCALE - 4;
+                ky = oy2 + (kt / WORLD_W) * BM_SCALE - 4;
+                gold_px = count_col(fb, gold, kx, ky, 9, 9);
+                vx = ox2 + (pt2 % WORLD_W) * BM_SCALE - 4;
+                vy = oy2 + (pt2 / WORLD_W) * BM_SCALE - 4;
+                if (gold_px == 0) {
+                    printf("FAIL  map: dungeon seed %.0f shows no king blip on"
+                           " the map screen\n", (double)seed);
+                    fails++;
+                }
+                if (count_col(fb, viol, vx, vy, 9, 9) != 0) {
+                    printf("FAIL  map: dungeon seed %.0f shows a portal blip on"
+                           " the stairs\n", (double)seed);
+                    fails++;
+                }
+                if (hud.bm_closed != 0) {
+                    printf("FAIL  map: dungeon seed %.0f drew %d trails with"
+                           " nothing to lead to\n", (double)seed, hud.bm_closed);
+                    fails++;
+                }
+                SDL_FillRect(fb, NULL, 0);
+                hud.mm_dirty = 1;
+                mm_draw(fb, g);
+                mm_px = count_col(fb, gold,
+                                  MM_X + (kt % WORLD_W) / MM_STEP - 3,
+                                  MM_Y + (kt / WORLD_W) / MM_STEP - 3, 7, 7);
+                if (mm_px == 0) {
+                    printf("FAIL  map: dungeon seed %.0f shows no king blip on"
+                           " the minimap\n", (double)seed);
+                    fails++;
+                }
+                if (count_col(fb, viol,
+                              MM_X + (pt2 % WORLD_W) / MM_STEP - 3,
+                              MM_Y + (pt2 / WORLD_W) / MM_STEP - 3, 7, 7) != 0) {
+                    printf("FAIL  map: dungeon seed %.0f shows a portal blip on"
+                           " the minimap stairs\n", (double)seed);
+                    fails++;
+                }
+                /* NEGATIVE CONTROLS: the map screen is the fragment's reward,
+                 * so its blip is NOT fog-gated (like the portal blip in every
+                 * other area) - only the minimap keeps its reveal gate. An
+                 * unrevealed king still draws no MINIMAP blip... */
+                SDL_memset(g->w.reveal, 0, sizeof g->w.reveal);
+                SDL_FillRect(fb, NULL, 0);
+                hud.mm_dirty = 1;
+                mm_draw(fb, g);
+                if (count_col(fb, gold,
+                              MM_X + (kt % WORLD_W) / MM_STEP - 3,
+                              MM_Y + (kt / WORLD_W) / MM_STEP - 3, 7, 7) == 0) ctl++;
+                /* ...and no king draws none on either map. */
+                g->w.king_tile = -1;
+                reveal_all(&g->w);
+                SDL_FillRect(fb, NULL, 0);
+                hud.bm_dirty = 1;
+                bigmap_draw(fb, g, sc);
+                if (count_col(fb, gold, kx, ky, 9, 9) == 0) ctl++;
+                SDL_FillRect(fb, NULL, 0);
+                hud.mm_dirty = 1;
+                mm_draw(fb, g);
+                if (count_col(fb, gold,
+                              MM_X + (kt % WORLD_W) / MM_STEP - 3,
+                              MM_Y + (kt / WORLD_W) / MM_STEP - 3, 7, 7) == 0) ctl++;
+            }
+        }
+        if (ctl != 3 * seeds) {
+            printf("FAIL  map: dungeon blip negative controls - %d of %d"
+                   " empty-box checks failed to come out empty\n",
+                   3 * seeds - ctl, 3 * seeds);
+            fails++;
+        }
+        if (fails == before) {
+            printf("map     : dungeon valid on %d seeds - rooms, reachable king,"
+                   " dressing agrees, gold blip on both maps, no trails;"
+                   " controls clear all %d boxes\n", seeds, ctl);
+            printf("map     : the king's doorway is empty on %d seeds; control"
+                   " finds the grate on the same measurement %d time(s)\n",
+                   seeds, door_ctl);
+        }
+        if (hud.bm) { SDL_FreeSurface(hud.bm); hud.bm = NULL; }
+        if (hud.mm) { SDL_FreeSurface(hud.mm); hud.mm = NULL; }
+        SDL_zero(hud);
+    }
     {
         int cam_x, cam_y, at = -1, ctl_hits = 0, tx, ty;
 
@@ -11677,14 +12735,14 @@ static int story_selftest(int seeds, Uint64 base)
     /* ---- (2) area and biome name each other back ------------------------- */
     {
         int bad = 0;
-        for (area = 1; area <= 3; area++)
+        for (area = 1; area <= 4; area++)
             if (area_for_biome(biome_for_area((Uint8)area)) != (Uint8)area) bad++;
         if (bad) {
             printf("FAIL  story: %d area(s) do not survive the biome round"
                    " trip - the story would be told over the wrong world\n", bad);
             fails++;
         } else {
-            printf("story   : area 1-3 round-trip through biome_for_area\n");
+            printf("story   : area 1-4 round-trip through biome_for_area\n");
         }
         /* Negative control: the round trip must NOT hold for a mapping that
          * sends two areas to one biome, which is the mistake worth catching. */
@@ -11986,21 +13044,21 @@ static int story_selftest(int seeds, Uint64 base)
         }
     }
 
-    /* ---- (9) the ending runs once, forwards, and ends black -------------- */
+    /* ---- (9) the ending runs once, forwards, and ends black --------------
+     *
+     * Reached through the honest path: a real Area 4 from game_init_area,
+     * standing at the real king_tile - not a hand-set area number. */
     {
         int black_seen = 0, beast_seen = 0, ticks;
         SDL_zero(story);
         game_init(g, sc, base);
-        g->area = 3;
+        game_init_area(g, sc, base, 4);
         g->restored = SAVE_ALL_BITS;
-        for (i = 0; i < ENTITY_COUNT; i++) g->ents[i].restored = 1;
-        g->frags_restored = FRAGMENT_COUNT;
-        g->souls_restored = SOUL_COUNT;
-        g->p.x = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
-        g->p.y = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
+        g->p.x = (float)(g->w.king_tile % WORLD_W) * TILE + TILE * 0.5f;
+        g->p.y = (float)(g->w.king_tile / WORLD_W) * TILE + TILE * 0.5f;
 
-        if (!try_final_chamber(g, au) || !(story.flags & SF_KING)) {
-            printf("FAIL  story: the final chamber did not open to a finished"
+        if (!try_king_audience(g, au) || !(story.flags & SF_KING)) {
+            printf("FAIL  story: the king did not receive a finished"
                    " game\n");
             fails++;
         }
@@ -12025,28 +13083,184 @@ static int story_selftest(int seeds, Uint64 base)
             printf("FAIL  story: the ending restarted itself\n");
             fails++;
         }
-        /* And pressing E on the chamber again must not replay it. */
+        /* And pressing E before the king again must not replay it. */
         story.end_t = 0;
-        if (try_final_chamber(g, au) && story.end_t != 0) {
+        if (try_king_audience(g, au) && story.end_t != 0) {
             printf("FAIL  story: the king sequence can be triggered twice\n");
             fails++;
         } else {
             printf("story   : the king sequence cannot be triggered twice\n");
         }
-        /* Negative control: an UNFINISHED castle must be refused. */
+        /* Negative control: an UNFINISHED castle must be refused at the king. */
         SDL_zero(story);
         game_init(g, sc, base);
-        g->area = 3;
-        g->p.x = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
-        g->p.y = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
-        (void)try_final_chamber(g, au);
+        game_init_area(g, sc, base, 4);
+        g->p.x = (float)(g->w.king_tile % WORLD_W) * TILE + TILE * 0.5f;
+        g->p.y = (float)(g->w.king_tile / WORLD_W) * TILE + TILE * 0.5f;
+        (void)try_king_audience(g, au);
         if (story.flags & SF_KING) {
-            printf("FAIL  story: negative control - the chamber opened to a"
+            printf("FAIL  story: negative control - the king received a"
                    " game with nothing collected\n");
             fails++;
         } else {
             printf("story   : negative control - an unfinished castle is"
                    " refused\n");
+        }
+        /* Negative control for the move itself: E at a finished Area 3's
+         * portal must TRAVEL to the Dungeon, never start the timeline. */
+        SDL_zero(story);
+        game_init(g, sc, base);
+        game_init_area(g, sc, base, 3);
+        g->restored = SAVE_ALL_BITS;
+        for (i = 0; i < ENTITY_COUNT; i++) g->ents[i].restored = 1;
+        g->frags_restored = FRAGMENT_COUNT;
+        g->souls_restored = SOUL_COUNT;
+        g->p.x = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
+        g->p.y = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
+        if (try_king_audience(g, au)) {
+            printf("FAIL  story: negative control - the Area 3 portal"
+                   " started the ending\n");
+            fails++;
+        } else if (!try_use_portal(g, sc, au)) {
+            printf("FAIL  story: negative control - a finished Area 3's"
+                   " portal led nowhere\n");
+            fails++;
+        } else if (g->area != 4 || (story.flags & SF_KING) || story.end_t != 0) {
+            printf("FAIL  story: negative control - the Area 3 portal did"
+                   " not arrive clean in the Dungeon\n");
+            fails++;
+        } else {
+            printf("story   : negative control - the Area 3 portal travels,"
+                   " it does not end\n");
+        }
+    }
+
+    /* ---- (9b) the king turns into the beast, and stays it -----------------
+     *
+     * The transformation is not a fifth thing the ending does: SF_BEAST is
+     * already the flag the sequence sets at END_BEAST_BEAT, under the line
+     * "something underneath the castle turns over", and dun_king_art is the
+     * one answer to what is standing on that tile. So the whole claim is a
+     * pair of questions asked beat by beat down the SAME run the section above
+     * walks - he is himself while he is still talking, and he is not himself
+     * from the moment the room does.
+     *
+     * The negative controls are the early beats: if the beast were drawn from
+     * beat 0, "the beast is drawn after the beat" would be a sentence this
+     * test prints about a game where nothing transformed at all. */
+    {
+        DrawList *dl = (DrawList *)SDL_malloc(sizeof(DrawList));
+        const char *bpath = "wayfarer-beasttest.sav";
+        Uint64 ls = 0;
+        int cam_x = 0, cam_y = 0, kx, ky, ticks;
+        int early_wrong = 0, late_wrong = 0, king_after = 0, beast_before = 0;
+        int frames_seen = 0, seen[DUN_MONSTER_FRAMES], drawn_king = 0, drawn_beast = 0;
+
+        if (!dl) {
+            printf("FAIL  story: out of memory for the beast check\n");
+            fails++;
+        } else {
+            SDL_zero(story);
+            game_init(g, sc, base);
+            game_init_area(g, sc, base, 4);
+            g->restored = SAVE_ALL_BITS;
+            kx = g->w.king_tile % WORLD_W;
+            ky = g->w.king_tile / WORLD_W;
+            g->p.x = (float)kx * TILE + TILE * 0.5f;
+            g->p.y = (float)ky * TILE + TILE * 0.5f;
+
+            /* Before a word is said, at every phase of the animation clock. */
+            for (t = 0; t < 240; t++)
+                if (dun_king_art((float)t * 0.05f) != ART_DUN_KING) beast_before++;
+
+            (void)try_king_audience(g, au);
+            for (ticks = 0; ticks < (END_LAST_BEAT + 1) * END_BEAT_TICKS; ticks++) {
+                int beat, art;
+                story_tick(g, au);
+                beat = story_end_beat();
+                art = dun_king_art((float)ticks * 0.016f);
+                if (beat < END_BEAST_BEAT) {
+                    if (art != ART_DUN_KING) early_wrong++;
+                } else {
+                    if (art == ART_DUN_KING) king_after++;
+                    if (art < ART_DUN_MONSTER_0 ||
+                        art > ART_DUN_MONSTER_0 + DUN_MONSTER_FRAMES - 1)
+                        late_wrong++;
+                }
+            }
+            /* It has to MOVE. One frame eight times is a still picture with a
+             * frame counter in front of it. */
+            for (i = 0; i < DUN_MONSTER_FRAMES; i++) seen[i] = 0;
+            for (t = 0; t < 240; t++) {
+                int f = dun_king_art((float)t * 0.05f) - ART_DUN_MONSTER_0;
+                if (f >= 0 && f < DUN_MONSTER_FRAMES) seen[f] = 1;
+            }
+            for (i = 0; i < DUN_MONSTER_FRAMES; i++) frames_seen += seen[i];
+
+            /* And what the renderer actually builds, not just what the helper
+             * returns: exactly one thing stands on the king's tile, and it is
+             * the beast. */
+            camera_follow((float)(kx * TILE), (float)(ky * TILE),
+                          LOGICAL_W, LOGICAL_H, &cam_x, &cam_y);
+            props_build(LOGICAL_W, LOGICAL_H, &g->w, base, cam_x, cam_y,
+                        g->ents, &g->p, 0.0f, dl);
+            for (i = 0; i < dl->n; i++) {
+                if (dl->item[i].x != kx * TILE + TILE / 2 - cam_x ||
+                    dl->item[i].y != ky * TILE + TILE - cam_y) continue;
+                if (dl->item[i].art == ART_DUN_KING) drawn_king++;
+                if (dl->item[i].art >= ART_DUN_MONSTER_0 &&
+                    dl->item[i].art <= ART_DUN_MONSTER_0 + DUN_MONSTER_FRAMES - 1)
+                    drawn_beast++;
+            }
+
+            if (beast_before || early_wrong) {
+                printf("FAIL  story: the beast was on screen before it woke"
+                       " (%d before the audience, %d during it)\n",
+                       beast_before, early_wrong);
+                fails++;
+            }
+            if (king_after || late_wrong) {
+                printf("FAIL  story: after it woke the tile still drew the king"
+                       " %d time(s) and something that is not the beast %d\n",
+                       king_after, late_wrong);
+                fails++;
+            }
+            if (frames_seen != DUN_MONSTER_FRAMES) {
+                printf("FAIL  story: the beast shows %d of its %d frames - it"
+                       " is not animating\n", frames_seen, DUN_MONSTER_FRAMES);
+                fails++;
+            }
+            if (drawn_beast != 1 || drawn_king != 0) {
+                printf("FAIL  story: the king's tile drew %d beast(s) and %d"
+                       " king(s), expected 1 and 0\n", drawn_beast, drawn_king);
+                fails++;
+            }
+            /* The keycap is placed off the same answer, so it must clear the
+             * taller thing rather than sitting inside it. */
+            if (ART_SPRITES[dun_king_art(0.0f)].anchor_y <=
+                ART_SPRITES[ART_DUN_KING].anchor_y) {
+                printf("FAIL  story: the beast is no taller than the king, so"
+                       " the prompt height proves nothing\n");
+                fails++;
+            }
+            /* SF_BEAST is one of the two story facts the file stores, and this
+             * is why: a game saved in that room must reload into it. */
+            if (game_save(g, bpath) != 0 || game_load(g, sc, bpath, &ls) != 0) {
+                printf("FAIL  story: an Area 4 game with the beast awake did"
+                       " not round-trip\n");
+                fails++;
+            } else if (!(story.flags & SF_BEAST) ||
+                       dun_king_art(0.0f) == ART_DUN_KING) {
+                printf("FAIL  story: loading put the king back in the room\n");
+                fails++;
+            } else {
+                printf("story   : the king is himself for %d beats, is the"
+                       " beast from beat %d, animates all %d frames, and a load"
+                       " does not put him back\n",
+                       END_BEAST_BEAT, END_BEAST_BEAT, DUN_MONSTER_FRAMES);
+            }
+            remove(bpath);
+            SDL_free(dl);
         }
     }
 
@@ -12752,6 +13966,69 @@ static int hud_selftest(Uint64 base)
         }
     }
 
+    /* ---- The king's keycap ------------------------------------------------
+     *
+     * The same contract as the entity prompt, on the Dungeon's terms: drawn
+     * if and only if E would act, at the same radius, from the same
+     * simulation position. Swept radially like (c) above. The negative
+     * control is the stairs tile: E there does nothing (the way down is
+     * one-way), so standing on it must draw nothing and act on nothing -
+     * a keycap over dead stairs would be the exact lie (b) above forbids. */
+    {
+        int kx, ky, k, disagree = 0, stair_px, stair_acts;
+        int cam_x, cam_y, sx, sy;
+        float cx, cy;
+        Audio quiet;
+
+        SDL_zero(quiet);
+        SDL_zero(story);
+        game_init_area(g, sc, base, 4);
+        kx = g->w.king_tile % WORLD_W;
+        ky = g->w.king_tile / WORLD_W;
+        g->w.reveal[ky][kx] = 255;
+        cx = (float)kx * TILE + TILE * 0.5f;
+        cy = (float)ky * TILE + TILE * 0.5f;
+        cam_x = (int)cx - LOGICAL_W / 2;
+        cam_y = (int)cy - LOGICAL_H / 2;
+        for (k = 0; k < 120; k++) {
+            float d = (float)k * 0.5f;                    /* 0 .. 59.5 px */
+            float qx = cx + d, qy = cy;
+            int acts, shown;
+            g->p.x = qx; g->p.y = qy;
+            acts = try_king_audience(g, &quiet) != 0;
+            SDL_FillRect(fb, NULL, 0);
+            prompt_draw(fb, &g->w, g->ents, qx, qy, cam_x, cam_y, 0.0f);
+            shown = count_lit(fb, 0, 0, LOGICAL_W, LOGICAL_H) > 0;
+            if (acts != shown) disagree++;
+        }
+        sx = g->w.portal_tile % WORLD_W;
+        sy = g->w.portal_tile / WORLD_W;
+        g->p.x = (float)sx * TILE + TILE * 0.5f;
+        g->p.y = (float)sy * TILE + TILE * 0.5f;
+        stair_acts = try_king_audience(g, &quiet) != 0
+                  || try_use_portal(g, sc, &quiet) != 0;
+        SDL_FillRect(fb, NULL, 0);
+        prompt_draw(fb, &g->w, g->ents, g->p.x, g->p.y,
+                    (int)g->p.x - LOGICAL_W / 2, (int)g->p.y - LOGICAL_H / 2,
+                    0.0f);
+        stair_px = count_lit(fb, 0, 0, LOGICAL_W, LOGICAL_H);
+        if (disagree) {
+            printf("FAIL  hud: king cue and key disagreed at %d of 120"
+                   " distances\n", disagree);
+            fails++;
+        } else if (stair_px != 0 || stair_acts) {
+            printf("FAIL  hud: king negative control - dead stairs drew %d px"
+                   " and acted %d\n", stair_px, stair_acts);
+            fails++;
+        } else {
+            printf("hud     : king cue and key agree at all 120 sampled"
+                   " distances; dead stairs draw nothing and act on nothing\n");
+        }
+        SDL_zero(story);
+        /* Leave the area-1 game the later sections were written against. */
+        game_init_area(g, sc, base, 1);
+    }
+
     /* Every HUD string must fit the 480 px frame. A toast wider than the screen
      * centres to a negative x and is clipped at both ends. */
     {
@@ -12780,9 +14057,10 @@ static int hud_selftest(Uint64 base)
      * than against a second copy of the three strings, which would agree with a
      * table that had been rewritten wrongly in both places. */
     {
-        static const char *realm[4] = { "", "forest", "lumiara", "underworld" };
+        static const char *realm[5] = { "", "forest", "lumiara", "underworld",
+                                        "dungeon" };
         int a, wrong = 0, ctl = 0;
-        for (a = 1; a <= 3; a++) {
+        for (a = 1; a <= 4; a++) {
             const char *line = win_line(biome_for_area((Uint8)a));
             if (!SDL_strstr(line, realm[a])) {
                 printf("FAIL  hud: area %d finishes with \"%s\", which does not"
@@ -12813,6 +14091,30 @@ static int hud_selftest(Uint64 base)
         } else if (!wrong) {
             printf("hud     : each area's banner names its own realm; control"
                    " rejects the area-keyed table on 2 of 3\n");
+        }
+        /* The Dungeon's own screen strings ride the same font: its map title,
+         * its legend row and its arrival toast. All three are short literals
+         * in function bodies - exactly the shape the end card's four holes
+         * shipped in - so they are swept here rather than trusted. */
+        {
+            static const char *dun[] = {
+                "map of the dungeon", "the king", "the way down opens"
+            };
+            int d, dholes = 0;
+            for (d = 0; d < 3; d++) {
+                dholes += story_line_holes(dun[d]);
+                if (text_w(dun[d]) > LOGICAL_W - 8) {
+                    printf("FAIL  hud: \"%s\" is wider than the frame\n", dun[d]);
+                    fails++;
+                }
+            }
+            if (dholes) {
+                printf("FAIL  hud: the dungeon strings have %d glyph(s) the"
+                       " font cannot fill\n", dholes);
+                fails++;
+            } else {
+                printf("hud     : the dungeon strings are drawable and fit\n");
+            }
         }
     }
 
@@ -13930,7 +15232,7 @@ static int save_selftest(Uint64 base)
             printf("FAIL  save: could not read the file back for the controls\n");
             fails++;
         } else {
-            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[15];
+            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[18];
             int nctl = 0;
 
             save_snap(again, &before);
@@ -13981,6 +15283,20 @@ static int save_selftest(Uint64 base)
              * are fully restored, and `good` has neither. */
             ctl[nctl].name = "area 3 file, area 1 and area 2 incomplete";
             ctl[nctl].buf[3] = 3; nctl++;
+            /* And one further still: the Dungeon banks no bits of its own, but
+             * she cannot BE down there unless the castle is finished - and
+             * `good` holds three Area 1 memories, nothing else. */
+            ctl[nctl].name = "area 4 file, area 3 incomplete";
+            ctl[nctl].buf[3] = 4; nctl++;
+            /* The Dungeon's map is granted on arrival, so bit 3 is a legal map
+             * bit - but not on a file that never left Area 1. */
+            ctl[nctl].name = "area 1 file, map found in the dungeon";
+            ctl[nctl].buf[21] |= 0x08; nctl++;
+            /* The king receives her in the Dungeon or not at all: a flag the
+             * story can only set down there must not arrive on an Area 1
+             * file. */
+            ctl[nctl].name = "king flag outside the castle";
+            ctl[nctl].buf[45] |= SF_KING; nctl++;
             /* Not a crash risk - collision always masks with & - but a
              * hand-edited save must not grant abilities never earned. */
             ctl[nctl].name = "abilities outside the legal mask";
@@ -14163,6 +15479,174 @@ static int save_selftest(Uint64 base)
             }
             remove(path);
             SDL_free(g3);
+        }
+    }
+
+    /* Area 4 positive path: the same ladder one step further - Areas 1, 2 and
+     * 3 all finished, transition down exactly the way the portal chain does,
+     * grant the Dungeon map the way try_use_portal does, stand her at the
+     * king, and confirm the round trip keeps the whole thirty-bit mask, the
+     * map bit, and the derived king_tile. This is what exercises game_load's
+     * empty-slice replay (a naive "area 3's shift" alias would restore Area 3
+     * entities into a world that has none) and game_live_mask's Dungeon
+     * branch (without it the load's own mask check would see Area 3 wiped). */
+    {
+        Game *g4 = (Game *)SDL_malloc(sizeof(Game));
+        if (g4) {
+            game_init(g4, sc, base);
+            for (i = 0; i < ENTITY_COUNT; i++)
+                if (g4->ents[i].tile >= 0) game_restore(g4, i);
+            if (!area_complete(g4)) {
+                printf("FAIL  save: area 1 did not reach area_complete for the area 4 positive path\n");
+                fails++;
+            } else {
+                game_transition_to_area(g4, sc, 2);
+                for (i = 0; i < ENTITY_COUNT; i++)
+                    if (g4->ents[i].tile >= 0) game_restore(g4, i);
+                if (!area_complete(g4)) {
+                    printf("FAIL  save: area 2 did not reach area_complete for the area 4 positive path\n");
+                    fails++;
+                } else {
+                    game_transition_to_area(g4, sc, 3);
+                    for (i = 0; i < ENTITY_COUNT; i++)
+                        if (g4->ents[i].tile >= 0) game_restore(g4, i);
+                    if (!area_complete(g4)) {
+                        printf("FAIL  save: area 3 did not reach area_complete for the area 4 positive path\n");
+                        fails++;
+                    } else {
+                        int king_before;
+                        game_transition_to_area(g4, sc, 4);
+                        g4->maps |= (Uint8)(1u << 3);
+                        king_before = g4->w.king_tile;
+                        g4->p.x = (float)(king_before % WORLD_W) * TILE + TILE * 0.5f;
+                        g4->p.y = (float)(king_before / WORLD_W) * TILE + TILE * 0.5f;
+                        for (i = 0; i < g4->w.region_count; i++)
+                            g4->w.regions[i].restoration = g4->w.regions[i].restore_to;
+                        save_snap(g4, &want);
+                        if (game_save(g4, path) != 0 || game_load(again, sc, path, &ls) != 0) {
+                            printf("FAIL  save: area 4 game did not round-trip\n");
+                            fails++;
+                        } else {
+                            save_snap(again, &got);
+                            if (again->area != 4) {
+                                printf("FAIL  save: loaded area 4 save reports area %d\n",
+                                       (int)again->area);
+                                fails++;
+                            } else if (!save_snap_eq(&want, &got, &why)) {
+                                printf("FAIL  save: area 4 round trip differs: %s\n", why);
+                                fails++;
+                            } else if (again->restored != SAVE_ALL_BITS) {
+                                printf("FAIL  save: area 4 round trip lost earlier-area progress\n");
+                                fails++;
+                            } else if (again->w.king_tile != king_before ||
+                                       again->w.portal_tile != g4->w.portal_tile) {
+                                printf("FAIL  save: area 4 load derived a different king (%d) or"
+                                       " stairs (%d) tile\n",
+                                       again->w.king_tile, again->w.portal_tile);
+                                fails++;
+                            } else if (!(again->maps & (Uint8)(1u << 3))) {
+                                printf("FAIL  save: area 4 load lost the dungeon map bit\n");
+                                fails++;
+                            } else {
+                                printf("save    : area 4 round trip PASS, mask, map bit and king intact\n");
+                            }
+                        }
+                    }
+                }
+            }
+            remove(path);
+            SDL_free(g4);
+        }
+    }
+
+    /* God mode: the portal opens on an unfinished area, and NOTHING else
+     * moves. It is tested here rather than in a test of its own because the
+     * thing worth proving about it is a save-format claim - that the run it
+     * produces is exactly the run this file's own header check refuses, which
+     * is why the key refuses to write one.
+     *
+     * The negative control is the same game with the toggle off: an unfinished
+     * Area 1 must leave her standing at a shut gate. Without it, "the portal
+     * opened" would prove nothing about god mode at all. */
+    {
+        Game  *gm = (Game *)SDL_malloc(sizeof(Game));
+        Audio  quiet;
+
+        SDL_zero(quiet);
+        if (gm) {
+            int was_on = god.on, was_cheated = god.cheated;
+
+            god.on = 0;
+            god.cheated = 0;
+            game_init(gm, sc, base);
+            gm->p.x = (float)(gm->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
+            gm->p.y = (float)(gm->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
+            if (area_complete(gm)) {
+                printf("FAIL  save: god mode - a fresh game was already complete\n");
+                fails++;
+            } else if (try_use_portal(gm, sc, &quiet) || gm->area != 1) {
+                printf("FAIL  save: god mode negative control - the gate opened"
+                       " on an unfinished area with the toggle OFF\n");
+                fails++;
+            } else if (god.cheated) {
+                printf("FAIL  save: god mode negative control - a refused step"
+                       " still marked the run\n");
+                fails++;
+            } else {
+                printf("save    : god mode negative control - off, an unfinished"
+                       " gate stays shut\n");
+                god.on = 1;
+                if (!try_use_portal(gm, sc, &quiet)) {
+                    printf("FAIL  save: god mode did not open an unfinished gate\n");
+                    fails++;
+                } else if (gm->area != 2) {
+                    printf("FAIL  save: god mode stepped to area %d, not 2\n",
+                           (int)gm->area);
+                    fails++;
+                } else if (!god.cheated) {
+                    printf("FAIL  save: god mode took a step it did not record\n");
+                    fails++;
+                } else if (gm->restored != 0) {
+                    /* The point of the whole design: the cheat skips the walk,
+                     * it does not hand her the mask. A granted Area 1 would
+                     * light every region and unlock lines she never earned. */
+                    printf("FAIL  save: god mode granted progress, mask 0x%08lX\n",
+                           (unsigned long)gm->restored);
+                    fails++;
+                } else if (game_save(gm, path) != 0) {
+                    printf("FAIL  save: god mode - could not write the test file\n");
+                    fails++;
+                } else if (game_load(again, sc, path, &ls) == 0) {
+                    /* If this ever loads, the header check has stopped
+                     * enforcing "in Area 2 means Area 1 is finished" - and the
+                     * refusal at F5 is then protecting nothing. */
+                    printf("FAIL  save: a god-mode save was ACCEPTED by the loader\n");
+                    fails++;
+                } else {
+                    printf("save    : god mode opens an unfinished gate, grants"
+                           " nothing, writes a file the loader refuses\n");
+                }
+                remove(path);
+                /* And the flag belongs to the RUN, not to the process: the
+                 * game_load above refused, so it cleared nothing - a load that
+                 * succeeds must. The Area 1 save written at the top of this
+                 * test is long gone, so a fresh one is written here. */
+                game_init(gm, sc, base);
+                god.cheated = 1;
+                if (game_save(gm, path) != 0 || game_load(again, sc, path, &ls) != 0) {
+                    printf("FAIL  save: god mode - the clean game did not round-trip\n");
+                    fails++;
+                } else if (god.cheated) {
+                    printf("FAIL  save: a successful load left the run marked\n");
+                    fails++;
+                } else {
+                    printf("save    : a loaded game is not a skipped one\n");
+                }
+                remove(path);
+            }
+            god.on = was_on;
+            god.cheated = was_cheated;
+            SDL_free(gm);
         }
     }
 
@@ -14886,6 +16370,9 @@ int main(int argc, char **argv)
     } else if (arg_flag(argc, argv, "--area3")) {
         g->restored = 0;
         game_init_area(g, sc, seed, 3);
+    } else if (arg_flag(argc, argv, "--area4")) {
+        g->restored = 0;
+        game_init_area(g, sc, seed, 4);
     }
 #endif
     prev_px = g->p.x;
@@ -14919,10 +16406,14 @@ int main(int argc, char **argv)
             }
             /* Say the line she just heard, so the panel is in frame. The
              * memories she would have needed to earn it are granted too, or
-             * the state would be one no play could produce. */
+             * the state would be one no play could produce. Unplaced entities
+             * grant nothing: the Dungeon holds no memories, so --talk there
+             * has no memories to give and must not invent restored flags a
+             * save could never replay. */
             if (n > 0) {
                 int k = cast_index(g->area, FRAGMENT_COUNT);
                 for (c = 0; c < n - 1 && c < FRAGMENT_COUNT; c++) {
+                    if (g->ents[c].tile < 0) continue;
                     g->ents[c].restored = 1;
                     g->frags_restored = c + 1;
                 }
@@ -14932,7 +16423,7 @@ int main(int argc, char **argv)
             }
         }
         n = arg_int(argc, argv, "--memory", -1);
-        if (n >= 0 && n < FRAGMENT_COUNT)
+        if (n >= 0 && n < FRAGMENT_COUNT && g->area >= 1 && g->area <= 3)
             say_open("", MEMORY[g->area - 1][n][0], MEMORY[g->area - 1][n][1]);
         n = arg_int(argc, argv, "--soulev", -1);
         if (n > SEV_NONE && n < SEV_COUNT)
@@ -14976,9 +16467,9 @@ int main(int argc, char **argv)
             g->w.regions[ri].restore_to  = 1.0f;
         }
     }
-    /* --standon pond|edge|map|orb|ent: stand her where a feature can be
-     * photographed.
-     *
+    /* --standon pond|edge|map|orb|ent|king: stand her where a feature can be
+     * photographed. `king` stands her west of the Dungeon's king.
+     *     *
      * Same reason as --camx/--camy, one step further: the camera flag reaches
      * the map edge but leaves her at spawn, and the three things added this
      * round - the two refusal toasts and the interact prompt - are all
@@ -14998,6 +16489,7 @@ int main(int argc, char **argv)
             int want_edge  = (SDL_strcmp(where, "edge") == 0);
             int want_map   = (SDL_strcmp(where, "map") == 0);
             int want_orb   = (SDL_strcmp(where, "orb") == 0);
+            int want_king  = (SDL_strcmp(where, "king") == 0);
             /* Somebody, as opposed to something. `ent` takes the first placed
              * entity, which is always a memory now that the cast is souls-only,
              * so without a case of its own no person in the game could be
@@ -15007,6 +16499,10 @@ int main(int argc, char **argv)
             int sx = (int)g->p.x / TILE, sy = (int)g->p.y / TILE;
             if (want_map) {
                 best = g->w.map_tile;
+            } else if (want_king) {
+                /* The king, one tile west like a mote: the shot shows the
+                 * keycap, the king AND her as three separate things. */
+                best = g->w.king_tile;
             } else if (want_orb) {
                 /* A memory mote: an entity with NOBODY standing on it. `ent`
                  * takes the first placed entity, which since the cast became
@@ -15349,6 +16845,16 @@ int main(int argc, char **argv)
                     break;
 
                 case MA_SAVE:
+                    /* Same refusal as F5, and it has to be here too: the row
+                     * and the key are two doors onto one file. */
+                    if (god.cheated) {
+                        hud_toast("god mode: this run cannot be saved");
+                        menu.page    = MENU_NONE;
+                        menu.started = 1;
+                        prev_px = g->p.x;
+                        prev_py = g->p.y;
+                        break;
+                    }
                     if (cur_slot < 0)
                         cur_slot = 0;
                     save_slot_path(slot_path, sizeof(slot_path), cur_slot);
@@ -15494,14 +17000,11 @@ int main(int argc, char **argv)
                     break;
                 case SDLK_e:
                 case SDLK_SPACE:
-                    /* Mote, then map fragment, then portal - the same order
-                     * prompt_draw resolves the first two in, so the keycap
-                     * always names what the key is about to do. */
                     /* Mote or person, then map fragment, then portal, then
-                     * the final chamber - the same order prompt_draw resolves
-                     * the first two in, so the keycap always names what the key
-                     * is about to do. The chamber is last because it is the
-                     * only one that cannot be anywhere else. */
+                     * the king - the same order prompt_draw resolves them
+                     * in, so the keycap always names what the key is about
+                     * to do. The king is last because he is the only one
+                     * that cannot be anywhere else. */
                     if (try_interact(g, &audio) < 0 && !try_take_map(g, &audio)) {
 #if WAYFARER_SELFTEST
                         if (try_use_portal(g, sc, &audio) && lit_mode)
@@ -15511,7 +17014,7 @@ int main(int argc, char **argv)
                             ;
 #endif
                         else
-                            (void)try_final_chamber(g, &audio);
+                            (void)try_king_audience(g, &audio);
                     }
                     break;
                 /* M for the map, and only once this area's fragment has been
@@ -15526,12 +17029,30 @@ int main(int argc, char **argv)
                         hud_toast("you have no map of this place");
                     }
                     break;
+                /* God mode, on ctrl rather than a bare g: the only thing it
+                 * changes is what a portal means, and a key that near the
+                 * movement cluster would eventually be leaned on by accident.
+                 * It says which way it went both times, because a silent
+                 * toggle is indistinguishable from a key that did nothing. */
+                case SDLK_g:
+                    if (ev.key.keysym.mod & KMOD_CTRL) {
+                        god.on = !god.on;
+                        hud_toast(god.on ? "god mode on" : "god mode off");
+                    }
+                    break;
                 case SDLK_F5:
                     /* Writes the slot she is playing. cur_slot is only ever -1
                      * on a path that never passed through the menu - a --frames
                      * run - and slot 1 is then the honest default rather than a
                      * refusal: the key has always saved, and a run that reached
                      * here has a game worth saving. */
+                    /* A run that skipped a portal cannot be written: the
+                     * file would be one save_header_ok rejects, so it would
+                     * say "saved" now and "no save to load" later. See god. */
+                    if (god.cheated) {
+                        hud_toast("god mode: this run cannot be saved");
+                        break;
+                    }
                     if (cur_slot < 0)
                         cur_slot = 0;
                     save_slot_path(slot_path, sizeof(slot_path), cur_slot);

@@ -79,7 +79,15 @@ nothing ran. That makes the green claim above checkable against the working tree
 | `E` / `Space` | restore the fragment or Soul in reach |
 | `F5` / `F9` | save / reload the slot being played (written beside the working directory) |
 | `F11` | fullscreen |
+| `Ctrl`+`G` | god mode: the portal opens on an unfinished area |
 | `Esc` | the menu |
+
+God mode suspends one rule and no others: the gate still has to be reached and pressed, but
+it no longer asks whether the area is finished. Nothing is granted - the restored mask, the
+banner, the region lighting and the dialogue gate all still describe what she actually did.
+The price is that a run which has skipped a portal cannot be saved: its area would be ahead
+of its mask, which is exactly what the loader refuses, so `F5` says so instead of writing a
+file that would read back as corrupt. Starting or loading a game clears it.
 
 `--seed N` picks the world, `--scale N` the window size, `--mute` skips audio entirely. The
 self-test binary adds `--dev` (all abilities), `--lit` (reveal the whole map — the only way to
