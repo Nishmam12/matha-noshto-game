@@ -38,6 +38,27 @@
 - The map screen's trails are routed by `bfs_gated`, which asks `tile_blocked` — the same function
   that stops her. A trail must never be drawn through a gate she has no ability for; something
   behind one gets **no trail**, and the legend says so.
+- The map fragment lies **near** spawn, not far: `MAP_MIN_SPAWN_DIST` 3 to `MAP_MAX_SPAWN_DIST` 12
+  Chebyshev tiles. It is the tool for reading an unfamiliar biome, so putting it at the end of the
+  hunt put it behind the exploring it exists to help with. Both bounds live in the one droppable
+  `near` clause of `map_tile_ok`; the lower bound only stops her spawning on top of it.
+- **A finished area lights every region**, through `world_light_all` called from `apply_restore`.
+  Ten collectibles against sixteen-odd regions meant regions holding none of them were lit by
+  nothing and stayed dark for good — a fully remembered area still read as half forgotten on both
+  maps. Derived from the counts, never stored, and reached by a load for free because the replay
+  comes through `apply_restore` too. Restoration is render-only, so this cannot touch
+  `tile_blocked` or any completability proof.
+- **A gate wears its own realm's colour**: the animated green swirl (`ART_UW_PORTAL_*`) is the
+  Forest's, the still violet ring (`ART_LUM_PORTAL`) is Lumiara's and the Underworld's final
+  chamber. They ran the other way round on a "dress the gate as where it leads" theory, which just
+  read as the two portals having been swapped.
+- The portal blip is on the minimap and the map screen in **all three** areas. Area 3's
+  `portal_tile` stopped being a spare field when it became the final chamber, and the one area with
+  nothing else to walk toward was the one whose landmark was missing. Its legend row says
+  **the final chamber**, not "the way onward".
+- The completion banner is keyed on **biome**, via `biome_for_area` — never on the area number.
+  Keyed on the area it was a third place that had to know the order, and it was the place that had
+  it backwards: finishing Lumiara congratulated her on the underworld.
 
 ## Areas and the story
 - **Area 2 is Lumiara, Area 3 is the Underworld** — the reverse of the order the biomes were built

@@ -2898,9 +2898,31 @@ static int map_in_reach(const World *w, float px, float py)
     return dx * dx + dy * dy <= INTERACT_RADIUS * INTERACT_RADIUS;
 }
 
+/* Every region's restoration target at once: what a FINISHED area looks like.
+ *
+ * A collectible lights the region it was standing in, and there are ten of
+ * them against however many regions the ridges cut the world into - so a
+ * region that happened to hold none of them was lit by nothing and stayed dark
+ * for good. An area she had entirely remembered still read as half forgotten,
+ * on the map screen, on the minimap and in the world, which is the opposite of
+ * what "the lumiara remembers" says a second later.
+ *
+ * Restoration is render-only - it feeds colour and the stronger-of-two rule in
+ * tile_level, and nothing else - so this can never reach tile_blocked, a
+ * region's terrain tag, or any completability proof. */
+static void world_light_all(World *w)
+{
+    int i;
+
+    for (i = 0; i < w->region_count; i++)
+        w->regions[i].restore_to = 1.0f;
+}
+
 /* The ONE state transition for restoring something. Both the interact key and
- * (later) save-loading replay go through here, so "restored" means exactly one
- * thing and cannot mean two. */
+ * save-loading's replay go through here, so "restored" means exactly one thing
+ * and cannot mean two - which is also why the finished-area lighting is here
+ * rather than next to the key: a loaded save replays these calls and reaches
+ * the lit world for free, with no second construction path and no save byte. */
 static void apply_restore(World *w, Entity *ents, Player *p, int i,
                           int *frags, int *souls)
 {
@@ -2910,6 +2932,10 @@ static void apply_restore(World *w, Entity *ents, Player *p, int i,
         w->regions[ents[i].region].restore_to = 1.0f;
     if (ents[i].is_soul) (*souls)++;
     else                 (*frags)++;
+    /* Derived, never stored - the same predicate area_complete is, asked of the
+     * counts this call has just finished updating. */
+    if (*frags >= FRAGMENT_COUNT && *souls >= SOUL_COUNT)
+        world_light_all(w);
 }
 
 /* ---- The story ----------------------------------------------------------
@@ -3565,17 +3591,31 @@ static void world_place_portal(World *w)
  * abilities, so the map is always something she can go and get rather than a
  * reward for having already finished the area she wanted it for.
  */
-#define MAP_MIN_SPAWN_DIST 14   /* Chebyshev tiles: far enough to be a find */
+/* Chebyshev tiles from spawn. The chart is a NEAR thing, not a far one: it is
+ * what makes an unfamiliar biome readable, so it belongs within the first
+ * minute of arriving rather than at the end of the hunt it is meant to help
+ * with. It used to be pushed at least 14 tiles out on the theory that a find
+ * should be earned, which put the tool for exploring an area behind the
+ * exploring.
+ *
+ * The lower bound is still there and is doing a different job: at zero she
+ * would spawn standing on it and take it before the first frame drew, and the
+ * one thing the map is not allowed to be is something she never saw lying
+ * there. */
+#define MAP_MIN_SPAWN_DIST  3   /* Chebyshev tiles: not underfoot at spawn */
+#define MAP_MAX_SPAWN_DIST 12   /* ... and no further than a short walk */
 #define MAP_MIN_ENT_DIST    3   /* never share a neighbourhood with a mote */
 
 /* The placement rule as ONE predicate, so --map-test rejects bad tiles with the
  * same code that accepted the good one. A checker written separately from the
  * placer only ever proves the two agree about the cases someone thought of.
  *
- * `far` is the spawn-distance clause, separable because it is the one clause
- * placement is allowed to give up on - see world_place_map. */
+ * `near` is the spawn-distance clause - BOTH bounds of it - separable because
+ * it is the one clause placement is allowed to give up on, and it is given up
+ * on as a pair: a world with nothing legal in the window needs a chart
+ * somewhere, and "somewhere" is better than none. See world_place_map. */
 static int map_tile_ok(const World *w, const Entity *ents, Uint32 reach,
-                       int tile, int far)
+                       int tile, int near)
 {
     int x, y, i, dx, dy;
 
@@ -3593,10 +3633,12 @@ static int map_tile_ok(const World *w, const Entity *ents, Uint32 reach,
         dy = (ents[i].tile / WORLD_W) - y; if (dy < 0) dy = -dy;
         if ((dx > dy ? dx : dy) < MAP_MIN_ENT_DIST) return 0;
     }
-    if (far && w->spawn_tile >= 0) {
+    if (near && w->spawn_tile >= 0) {
+        int d;
         dx = (w->spawn_tile % WORLD_W) - x; if (dx < 0) dx = -dx;
         dy = (w->spawn_tile / WORLD_W) - y; if (dy < 0) dy = -dy;
-        if ((dx > dy ? dx : dy) < MAP_MIN_SPAWN_DIST) return 0;
+        d = dx > dy ? dx : dy;
+        if (d < MAP_MIN_SPAWN_DIST || d > MAP_MAX_SPAWN_DIST) return 0;
     }
     return 1;
 }
@@ -3605,25 +3647,25 @@ static int map_tile_ok(const World *w, const Entity *ents, Uint32 reach,
  * for the same reason: one pass, uniform, no temporary list.
  *
  * Run at most twice. The second pass drops the spawn-distance clause, and is
- * what a world too small or too hemmed in to have anything legal that far out
- * falls back to: distance from spawn is a PREFERENCE, and a map fragment that
- * failed to exist would not be. Which pass ran is visible to the test, which
- * demands the far clause wherever a qualifying tile existed at all. */
+ * what a world whose spawn is too hemmed in to have anything legal in the
+ * window falls back to: distance from spawn is a PREFERENCE, and a map
+ * fragment that failed to exist would not be. Which pass ran is visible to the
+ * test, which demands the near clause wherever a qualifying tile existed. */
 static void world_place_map(World *w, const Entity *ents, Uint64 seed)
 {
     Rng rng;
     Uint32 reach = regions_reachable(w, ABIL_NONE);
-    int far, chosen = -1;
+    int near, chosen = -1;
 
     w->map_tile = -1;
     if (reach == 0)                       /* no spawn region: take anything */
         reach = regions_reachable(w, ABIL_ALL);
     rng_seed(&rng, seed, STREAM_MAP);
-    for (far = 1; far >= 0 && chosen < 0; far--) {
+    for (near = 1; near >= 0 && chosen < 0; near--) {
         int seen = 0, x, y;
         for (y = 0; y < WORLD_H; y++)
             for (x = 0; x < WORLD_W; x++) {
-                if (!map_tile_ok(w, ents, reach, y * WORLD_W + x, far)) continue;
+                if (!map_tile_ok(w, ents, reach, y * WORLD_W + x, near)) continue;
                 seen++;
                 if (rng_below(&rng, (Uint32)seen) == 0) chosen = y * WORLD_W + x;
             }
@@ -4591,33 +4633,36 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
      *                 gate. Six authored frames, so it animates. The "UW" in
      *                 the name is legacy: this is the generic
      *                 Dimensional_Portal asset, not Underworld-specific art.
-     *   Underworld -> the DREAMGATE (ART_LUM_PORTAL), the Area 2 -> Area 3
-     *                 gate. ONE authored frame, so it is drawn static - there
-     *                 is no cycle to run, and advancing a frame counter over a
-     *                 single sprite would be a no-op dressed up as animation.
+     *   Lumiara    -> the violet DREAMGATE (ART_LUM_PORTAL), the Area 2 ->
+     *                 Area 3 gate. ONE authored frame, so it is drawn static -
+     *                 there is no cycle to run, and advancing a frame counter
+     *                 over a single sprite would be a no-op dressed up as
+     *                 animation.
+     *   Underworld -> the same violet ring, standing over the final chamber.
+     *                 Still rather than animated for the same reason it is
+     *                 still in Lumiara, and because the mouths lead somewhere
+     *                 and this one does not.
      *
-     * Biome-gated rather than area-gated - World does not know about
-     * Game.area and does not need to: portal_tile is computed for every biome
-     * (see world_place_portal) but only ever drawn where a gate is meaningful,
-     * which is everywhere except the Underworld - Area 3 is terminal.
+     * Biome-gated rather than area-gated - World does not know about Game.area
+     * and does not need to: portal_tile is computed for every biome (see
+     * world_place_portal) and every biome now draws it.
      *
-     * A gate is drawn as the place it LEADS TO rather than the place it stands
-     * in, which is why the Forest's is the still Lumiara ring and Lumiara's is
-     * the animated Underworld mouth. Standing in a clearing looking at a slab
-     * of violet starfield is the only warning she gets about what is on the
-     * other side, and a portal that matched its own biome would give her
-     * none. */
+     * Each gate wears its OWN realm's colour: the green swirl is the forest's
+     * gate and the violet ring is Lumiara's. It ran the other way round for a
+     * while, on the theory that a gate should be dressed as the place it leads
+     * to - which put the green swirl in Lumiara and left the forest showing a
+     * slab of violet, and read on screen as the two portals having been
+     * swapped rather than as a warning about anything. */
     if (w->portal_tile >= 0) {
         int ptx = w->portal_tile % WORLD_W, pty = w->portal_tile / WORLD_W;
         if (ptx >= tx0 && ptx < tx1 && pty >= ty0 && pty < ty1) {
             /* Every biome now, where it used to be everywhere but the terminal
              * area. Area 3's tile is no longer spare: it is the final chamber,
              * and a chamber that was not drawn was an ending no player could
-             * find. It gets the STILL ring rather than the animated mouth that
-             * brought her in - the mouths lead somewhere, and this one does
-             * not. */
+             * find. The animated swirl is the FOREST's gate and nothing else's;
+             * everywhere past it the ring stands still. */
             int art = ART_LUM_PORTAL;
-            if (w->biome == BIOME_LUMIARA)
+            if (w->biome == BIOME_FOREST)
                 art = ART_UW_PORTAL_A + ((int)(clock * 6.0f) % 6);
             draw_list_push(dl, art,
                            ptx * TILE + TILE / 2 - cam_x,
@@ -6080,15 +6125,37 @@ static void mm_draw(SDL_Surface *fb, const Game *g)
      * landmark, not a pickup, and deserves to read as more significant than
      * a fragment or soul marker. Shown regardless of area_complete - once
      * she has seen it, its position is not new information; only whether
-     * she can use it yet is, and that is what the HUD banner is for. Areas 1
-     * and 2 each have one (their own exit onward); Area 3 is terminal and
-     * its portal_tile is never drawn, so this never fires for it. */
-    if ((g->area == 1 || g->area == 2) && g->w.portal_tile >= 0 &&
+     * she can use it yet is, and that is what the HUD banner is for.
+     *
+     * All THREE areas, not just the two with an exit onward. Area 3's
+     * portal_tile stopped being a spare field when it became the final
+     * chamber, and props_build has drawn it in the world ever since - a
+     * landmark that is on screen but missing from the map she opened to find
+     * it by is the map being wrong, and the Underworld is the one area where
+     * she has nothing else to walk toward. */
+    if (g->w.portal_tile >= 0 &&
         g->w.reveal[g->w.portal_tile / WORLD_W][g->w.portal_tile % WORLD_W] >= 24) {
         mm_marker(fb, g->w.portal_tile, SDL_MapRGB(fb->format, 0xb0, 0x6a, 0xff), 3);
     }
     mm_marker(fb, (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE),
               SDL_MapRGB(fb->format, 0xff, 0xff, 0xff), 3);
+}
+
+/* The completion banner's first line, keyed on BIOME and reached through
+ * biome_for_area - not keyed on the area number. Keyed on the area it was a
+ * third place that had to know Area 2 is Lumiara and Area 3 the Underworld,
+ * and it was the place that had it backwards: finishing Lumiara congratulated
+ * her on the underworld she had not been to yet. The same rule as the music,
+ * for the same reason - biome_for_area is the ONE function that knows the
+ * order, so everything that names a realm asks it rather than restating it.
+ *
+ * A function rather than a table so the strings stay literals in .rodata, and
+ * so --hud-test can ask it for a biome the way hud_draw does. */
+static const char *win_line(Uint8 biome)
+{
+    return biome == BIOME_FOREST     ? "the forest remembers"
+         : biome == BIOME_UNDERWORLD ? "the underworld remembers"
+                                     : "the lumiara remembers";
 }
 
 static void hud_draw(SDL_Surface *fb, const Game *g)
@@ -6131,9 +6198,7 @@ static void hud_draw(SDL_Surface *fb, const Game *g)
     }
 
     if (hud.win_left > 0) {
-        const char *l1 = (g->area == 1) ? "the forest remembers"
-                        : (g->area == 2) ? "the underworld remembers"
-                        : "the lumiara remembers";
+        const char *l1 = win_line(biome_for_area(g->area));
         /* Areas 1 and 2 each open onto a portal; Area 3 is terminal, so its
          * completion banner is the only one that says "all is restored". */
         const char *l2 = (g->area == 1 || g->area == 2) ? "the portal opens" : "all is restored";
@@ -6855,7 +6920,8 @@ static void bigmap_draw(SDL_Surface *fb, const Game *g, Scratch *sc)
         bm_marker(fb, ox, oy, g->ents[i].tile,
                   g->ents[i].is_soul ? soulc : gold, 3);
     }
-    if ((g->area == 1 || g->area == 2) && g->w.portal_tile >= 0)
+    /* Every area, on the same terms as the minimap's blip - see mm_draw. */
+    if (g->w.portal_tile >= 0)
         bm_marker(fb, ox, oy, g->w.portal_tile, viol, 3);
     bm_marker(fb, ox, oy,
               (int)(g->p.y / TILE) * WORLD_W + (int)(g->p.x / TILE), white, 3);
@@ -6871,10 +6937,14 @@ static void bigmap_draw(SDL_Surface *fb, const Game *g, Scratch *sc)
     ly += FONT_LINE * 2;
     bm_key(fb, lx, ly, gold,  "memory fragment", pale); ly += FONT_LINE;
     bm_key(fb, lx, ly, soulc, "found soul", pale);      ly += FONT_LINE;
-    if (g->area == 1 || g->area == 2) {
-        bm_key(fb, lx, ly, viol, "the way onward", pale);
-        ly += FONT_LINE;
-    }
+    /* Named for what it IS in this area rather than dropped in the one area
+     * where "onward" would be a lie: Area 3 is terminal, and its violet mark
+     * is the chamber the ending runs in. A blip with no legend row reads as an
+     * artefact of the map, which is what leaving the row out did. */
+    bm_key(fb, lx, ly, viol,
+           (g->area == 1 || g->area == 2) ? "the way onward" : "the final chamber",
+           pale);
+    ly += FONT_LINE;
     bm_key(fb, lx, ly, white, "you are here", pale);
     ly += FONT_LINE * 2;
     draw_text(fb, lx, ly, "trails lead to what is", pale);       ly += FONT_LINE;
@@ -10736,6 +10806,7 @@ static int map_selftest(int seeds, Uint64 base)
     SDL_Surface *fb = test_surface(LOGICAL_W, LOGICAL_H);
     Audio audio;
     int fails = 0, s_i, area, i;
+    int worst_near = -1, near_seeds = 0;
 
     if (!g || !b || !sc || !dl || !fb) {
         printf("FAIL  map: out of memory\n");
@@ -10756,7 +10827,7 @@ static int map_selftest(int seeds, Uint64 base)
         Uint64 seed = base + (Uint64)s_i;
         for (area = 1; area <= 3; area++) {
             Uint32 reach;
-            int t, far_exists = 0, x, y;
+            int t, near_exists = 0, x, y;
 
             g->restored = 0;
             g->maps = 0;
@@ -10786,16 +10857,37 @@ static int map_selftest(int seeds, Uint64 base)
                 fails++;
             }
             /* The spawn-distance clause is a preference the placer may drop -
-             * but only where nothing legal lay far enough out. */
-            for (y = 0; y < WORLD_H && !far_exists; y++)
-                for (x = 0; x < WORLD_W && !far_exists; x++)
+             * but only where nothing legal lay inside the window at all. */
+            for (y = 0; y < WORLD_H && !near_exists; y++)
+                for (x = 0; x < WORLD_W && !near_exists; x++)
                     if (map_tile_ok(&g->w, g->ents, reach, y * WORLD_W + x, 1))
-                        far_exists = 1;
-            if (far_exists && !map_tile_ok(&g->w, g->ents, reach, t, 1)) {
+                        near_exists = 1;
+            if (near_exists && !map_tile_ok(&g->w, g->ents, reach, t, 1)) {
                 printf("FAIL  map: seed %.0f area %d dropped the spawn-distance"
-                       " clause with %d legal far tiles available\n",
-                       (double)seed, area, far_exists);
+                       " clause with legal near tiles available\n",
+                       (double)seed, area);
                 fails++;
+            }
+            /* And the distance itself, measured rather than inferred from the
+             * predicate: the chart has to be a short walk from where she wakes
+             * up, which is the whole point of the near clause. Reported as the
+             * worst case over the sweep so the number is on the record. */
+            if (near_exists && g->w.spawn_tile >= 0) {
+                int dx = (g->w.spawn_tile % WORLD_W) - (t % WORLD_W);
+                int dy = (g->w.spawn_tile / WORLD_W) - (t / WORLD_W);
+                int d;
+                if (dx < 0) dx = -dx;
+                if (dy < 0) dy = -dy;
+                d = dx > dy ? dx : dy;
+                if (d > worst_near) worst_near = d;
+                if (d < MAP_MIN_SPAWN_DIST || d > MAP_MAX_SPAWN_DIST) {
+                    printf("FAIL  map: seed %.0f area %d put the chart %d tiles"
+                           " from spawn, outside [%d, %d]\n",
+                           (double)seed, area, d, MAP_MIN_SPAWN_DIST,
+                           MAP_MAX_SPAWN_DIST);
+                    fails++;
+                }
+                near_seeds++;
             }
             /* Same seed, same fragment: it is drawn from its own rng stream, so
              * this must not depend on anything else the generator did. */
@@ -10811,6 +10903,9 @@ static int map_selftest(int seeds, Uint64 base)
     }
     printf("map     : %d seeds x 3 areas - placed, reachable with no abilities,"
            " clear of motes, deterministic\n", seeds);
+    printf("map     : %d world(s) placed the chart inside [%d, %d] tiles of"
+           " spawn; worst was %d\n", near_seeds, MAP_MIN_SPAWN_DIST,
+           MAP_MAX_SPAWN_DIST, worst_near);
 
     /* ---- NEGATIVE CONTROL for the placement predicate ------------------- */
     {
@@ -10839,15 +10934,298 @@ static int map_selftest(int seeds, Uint64 base)
          * the fragment inside what she can walk to. */
         if (!map_tile_ok(&g->w, g->ents, 0u, g->w.map_tile, 0)) caught++;
         else printf("  map control MISS: an unreachable region was accepted\n");
+        /* The near clause specifically: a tile the base predicate is happy with
+         * but that lies outside the spawn window must be refused by it, and
+         * accepted without it. Without this pair, "the chart is near spawn"
+         * would pass against a clause that returned 1 unconditionally. */
+        {
+            int outside = -1, x2, y2;
+            for (y2 = 0; y2 < WORLD_H && outside < 0; y2++)
+                for (x2 = 0; x2 < WORLD_W && outside < 0; x2++) {
+                    int tt = y2 * WORLD_W + x2, dx, dy;
+                    if (!map_tile_ok(&g->w, g->ents, reach, tt, 0)) continue;
+                    dx = (g->w.spawn_tile % WORLD_W) - x2; if (dx < 0) dx = -dx;
+                    dy = (g->w.spawn_tile / WORLD_W) - y2; if (dy < 0) dy = -dy;
+                    if ((dx > dy ? dx : dy) > MAP_MAX_SPAWN_DIST) outside = tt;
+                }
+            if (outside >= 0 && !map_tile_ok(&g->w, g->ents, reach, outside, 1))
+                caught++;
+            else
+                printf("  map control MISS: a tile beyond %d tiles from spawn"
+                       " satisfied the near clause\n", MAP_MAX_SPAWN_DIST);
+        }
 
-        if (caught != 5) {
-            printf("FAIL  map: the placement predicate rejected only %d of 5"
+        if (caught != 6) {
+            printf("FAIL  map: the placement predicate rejected only %d of 6"
                    " deliberately illegal tiles\n", caught);
             fails++;
         } else {
-            printf("map     : negative control - the predicate rejects all 5"
-                   " illegal tiles\n");
+            printf("map     : negative control - the predicate rejects all 6"
+                   " illegal tiles, the far one only when the near clause is"
+                   " asked for\n");
         }
+    }
+
+    /* ---- A finished area is a lit area ---------------------------------
+     *
+     * Ten collectibles against however many regions the ridges cut, so a
+     * region holding none of them was lit by nothing and stayed dark forever:
+     * an area she had entirely remembered still read as half forgotten. Driven
+     * through game_restore - the same call the interact key makes and the same
+     * one a load's replay makes - rather than by writing restore_to by hand,
+     * which would test the check and not the game.
+     *
+     * Asserted on PIXELS as well as on the floats: the floats are what the fix
+     * sets, but the map screen is where it was noticed missing. */
+    {
+        int a, before = fails;
+
+        for (a = 1; a <= 3; a++) {
+            int dark_before = 0, dark_after = 0, r, tx, ty;
+            int px_before, px_after, lit_tiles = 0;
+            Uint32 full;
+
+            g->restored = 0; g->maps = 0;
+            game_init_area(g, sc, base, (Uint8)a);
+            g->maps = (Uint8)(1u << (a - 1));
+            g->p.abilities = ABIL_ALL;
+
+            /* Nothing found: no region may be at its lit target, or the check
+             * below cannot tell lighting from the way the world was born. */
+            for (r = 0; r < g->w.region_count; r++)
+                if (g->w.regions[r].restore_to < 1.0f) dark_before++;
+            for (r = 0; r < g->w.region_count; r++)
+                g->w.regions[r].restoration = g->w.regions[r].restore_to;
+            if (hud.bm) { SDL_FreeSurface(hud.bm); hud.bm = NULL; }
+            SDL_zero(hud);
+            SDL_FillRect(fb, NULL, 0);
+            hud.bm_dirty = 1;
+            bigmap_draw(fb, g, sc);
+            full = SDL_MapRGB(fb->format, 0x6a, 0x9a, 0x70);
+            px_before = count_col(fb, full, 0, 0, fb->w, fb->h);
+
+            /* Everything found. */
+            for (i = 0; i < ENTITY_COUNT; i++)
+                if (g->ents[i].tile >= 0) game_restore(g, i);
+            if (!area_complete(g)) {
+                printf("note    : seed %.0f area %d placed only %d entities;"
+                       " lighting check skipped\n",
+                       (double)base, a, g->frags_restored + g->souls_restored);
+                continue;
+            }
+            for (r = 0; r < g->w.region_count; r++)
+                if (g->w.regions[r].restore_to < 1.0f) dark_after++;
+            for (r = 0; r < g->w.region_count; r++)
+                g->w.regions[r].restoration = g->w.regions[r].restore_to;
+            SDL_FillRect(fb, NULL, 0);
+            hud.bm_dirty = 1;
+            bigmap_draw(fb, g, sc);
+            px_after = count_col(fb, full, 0, 0, fb->w, fb->h);
+
+            /* Every open, lit-labelled tile must now draw the fully restored
+             * ground colour - that is what "the whole map lights up" means. */
+            for (ty = 0; ty < WORLD_H; ty++)
+                for (tx = 0; tx < WORLD_W; tx++) {
+                    if (g->w.terr[ty][tx] == GT_WATER || g->w.solid[ty][tx]) continue;
+                    if (g->w.litreg[ty][tx] == REGION_NONE) continue;
+                    if (bm_col(hud.bm, g, tx, ty) == full) lit_tiles++;
+                    else {
+                        printf("FAIL  map: area %d finished with tile (%d,%d) in"
+                               " region %d still unlit on the map\n",
+                               a, tx, ty, g->w.litreg[ty][tx]);
+                        fails++;
+                        ty = WORLD_H; break;
+                    }
+                }
+            if (dark_after != 0) {
+                printf("FAIL  map: area %d finished with %d of %d regions never"
+                       " lit\n", a, dark_after, g->w.region_count);
+                fails++;
+            }
+            /* NEGATIVE CONTROL: an unfinished area must NOT already be lit,
+             * or "finishing lights it" only means the world starts lit. */
+            if (dark_before == 0 || px_after <= px_before) {
+                printf("FAIL  map: area %d lighting control - %d dark regions and"
+                       " %d lit px before, %d px after\n",
+                       a, dark_before, px_before, px_after);
+                fails++;
+            } else if (lit_tiles > 0 && dark_after == 0) {
+                printf("map     : area %d lights all %d region(s) on completion"
+                       " (%d map px -> %d, %d tiles at full colour)\n",
+                       a, g->w.region_count, px_before, px_after, lit_tiles);
+            }
+        }
+        if (fails == before)
+            printf("map     : a finished area is a fully lit area, in all 3"
+                   " biomes; control rejects an unfinished one\n");
+        if (hud.bm) { SDL_FreeSurface(hud.bm); hud.bm = NULL; }
+        SDL_zero(hud);
+    }
+
+    /* ---- The way onward: the gate's art, and its blip on both maps ------
+     *
+     * Two claims that fail SILENTLY, and that only a screenshot ever caught
+     * before this section existed:
+     *
+     *   (a) each biome's gate wears its own realm's colour. The animated green
+     *       swirl is the FOREST's; Lumiara and the Underworld get the still
+     *       violet ring. These were the wrong way round, so the forest's exit
+     *       was a slab of violet and Lumiara's was the green swirl.
+     *   (b) the violet blip is on the minimap and the map screen in ALL THREE
+     *       areas. Area 3 used to be excluded on the grounds that its
+     *       portal_tile was never drawn - which stopped being true when it
+     *       became the final chamber, leaving the one area with nothing else
+     *       to walk toward as the one area whose landmark was missing. */
+    {
+        int a, ox, oy, art_seen[4], frames_seen = 0, ctl = 0;
+        int before = fails;
+
+        bm_origin(fb, &ox, &oy);
+        for (a = 1; a <= 3; a++) {
+            int want_swirl = (biome_for_area((Uint8)a) == BIOME_FOREST);
+            int pt, bx, by, viol_px, mm_px, k;
+            Uint32 viol = SDL_MapRGB(fb->format, 0xb0, 0x6a, 0xff);
+
+            g->restored = 0; g->maps = 0;
+            game_init_area(g, sc, base, (Uint8)a);
+            reveal_all(&g->w);
+            pt = g->w.portal_tile;
+            if (pt < 0) {
+                printf("FAIL  map: area %d placed no portal tile\n", a);
+                fails++;
+                art_seen[a] = ART_NONE;
+                continue;
+            }
+
+            /* (a) The art, read out of the draw list props_build actually
+             * builds - not out of a restatement of the branch inside it. */
+            g->p.x = (float)(pt % WORLD_W) * TILE + TILE * 0.5f;
+            g->p.y = (float)(pt / WORLD_W) * TILE + TILE * 0.5f;
+            art_seen[a] = ART_NONE;
+            for (k = 0; k < 6; k++) {
+                int cam_x = 0, cam_y = 0, j, at = -1;
+                camera_follow(g->p.x, g->p.y, LOGICAL_W, LOGICAL_H, &cam_x, &cam_y);
+                props_build(LOGICAL_W, LOGICAL_H, &g->w, base, cam_x, cam_y,
+                            g->ents, &g->p, (float)k * 0.2f, dl);
+                for (j = 0; j < dl->n; j++) {
+                    int id = dl->item[j].art;
+                    if (id == ART_LUM_PORTAL ||
+                        (id >= ART_UW_PORTAL_A && id <= ART_UW_PORTAL_F)) {
+                        at = id;
+                        break;
+                    }
+                }
+                if (at < 0) continue;
+                if (art_seen[a] == ART_NONE) art_seen[a] = at;
+                else if (at != art_seen[a] && want_swirl) frames_seen++;
+            }
+            if (art_seen[a] == ART_NONE) {
+                printf("FAIL  map: area %d drew no gate at its portal tile\n", a);
+                fails++;
+            } else if (want_swirl && !(art_seen[a] >= ART_UW_PORTAL_A &&
+                                       art_seen[a] <= ART_UW_PORTAL_F)) {
+                printf("FAIL  map: the forest's gate drew art %d, not the green"
+                       " swirl\n", art_seen[a]);
+                fails++;
+            } else if (!want_swirl && art_seen[a] != ART_LUM_PORTAL) {
+                printf("FAIL  map: area %d's gate drew art %d, not the violet"
+                       " ring\n", a, art_seen[a]);
+                fails++;
+            }
+
+            /* (b) The blip, counted as pixels of the marker colour in a box
+             * around where the marker belongs - on both maps.
+             *
+             * She is walked well away from the gate first. Her own white
+             * marker is drawn LAST and is the same 3 px square, so standing on
+             * the portal she covers the blip exactly and the count comes out
+             * zero however right the code is - which is what this check did on
+             * its first run. */
+            {
+                int fx = -1, x2, y2;
+                for (y2 = 0; y2 < WORLD_H && fx < 0; y2++)
+                    for (x2 = 0; x2 < WORLD_W && fx < 0; x2++) {
+                        int ddx = x2 - pt % WORLD_W, ddy = y2 - pt / WORLD_W;
+                        if (ddx < 0) ddx = -ddx;
+                        if (ddy < 0) ddy = -ddy;
+                        if ((ddx > ddy ? ddx : ddy) < 20) continue;
+                        if (!g->w.solid[y2][x2]) fx = y2 * WORLD_W + x2;
+                    }
+                if (fx < 0) {
+                    printf("FAIL  map: area %d has no open tile 20 tiles from"
+                           " its gate to stand the blip check on\n", a);
+                    fails++;
+                    continue;
+                }
+                g->p.x = (float)(fx % WORLD_W) * TILE + TILE * 0.5f;
+                g->p.y = (float)(fx / WORLD_W) * TILE + TILE * 0.5f;
+            }
+            if (hud.bm) { SDL_FreeSurface(hud.bm); hud.bm = NULL; }
+            if (hud.mm) { SDL_FreeSurface(hud.mm); hud.mm = NULL; }
+            SDL_zero(hud);
+            g->maps = (Uint8)(1u << (a - 1));
+            g->p.abilities = ABIL_ALL;
+            SDL_FillRect(fb, NULL, 0);
+            hud.bm_dirty = 1;
+            bigmap_draw(fb, g, sc);
+            bx = ox + (pt % WORLD_W) * BM_SCALE - 4;
+            by = oy + (pt / WORLD_W) * BM_SCALE - 4;
+            viol_px = count_col(fb, viol, bx, by, 9, 9);
+
+            SDL_FillRect(fb, NULL, 0);
+            hud.mm_dirty = 1;
+            mm_draw(fb, g);
+            mm_px = count_col(fb, viol,
+                              MM_X + (pt % WORLD_W) / MM_STEP - 3,
+                              MM_Y + (pt / WORLD_W) / MM_STEP - 3, 7, 7);
+            if (viol_px == 0 || mm_px == 0) {
+                printf("FAIL  map: area %d has no portal blip (%d px on the map"
+                       " screen, %d on the minimap)\n", a, viol_px, mm_px);
+                fails++;
+            }
+
+            /* NEGATIVE CONTROL, per area: with no portal tile the same boxes
+             * must come out empty, or "the blip is there" only means the box
+             * happened to contain violet. */
+            g->w.portal_tile = -1;
+            SDL_FillRect(fb, NULL, 0);
+            hud.bm_dirty = 1;
+            bigmap_draw(fb, g, sc);
+            if (count_col(fb, viol, bx, by, 9, 9) == 0) ctl++;
+            SDL_FillRect(fb, NULL, 0);
+            hud.mm_dirty = 1;
+            mm_draw(fb, g);
+            if (count_col(fb, viol,
+                          MM_X + (pt % WORLD_W) / MM_STEP - 3,
+                          MM_Y + (pt / WORLD_W) / MM_STEP - 3, 7, 7) == 0) ctl++;
+        }
+
+        /* The two families must be different ids, or (a) is comparing a value
+         * with itself and could not fail. */
+        if (art_seen[1] != ART_NONE && art_seen[2] != ART_NONE &&
+            art_seen[1] == art_seen[2]) {
+            printf("FAIL  map: the forest and lumiara gates are the same art, so"
+                   " the colour check proves nothing\n");
+            fails++;
+        }
+        if (!frames_seen) {
+            printf("FAIL  map: the forest gate never changed frame over a full"
+                   " cycle - it is not animating\n");
+            fails++;
+        }
+        if (ctl != 6) {
+            printf("FAIL  map: portal-blip negative control - %d of 6 empty-box"
+                   " checks failed to come out empty\n", 6 - ctl);
+            fails++;
+        }
+        if (fails == before) {
+            printf("map     : green swirl in the forest, violet ring in lumiara"
+                   " and the underworld; blip on both maps in all 3 areas;"
+                   " control clears all 6 boxes\n");
+        }
+        if (hud.bm) { SDL_FreeSurface(hud.bm); hud.bm = NULL; }
+        if (hud.mm) { SDL_FreeSurface(hud.mm); hud.mm = NULL; }
+        SDL_zero(hud);
     }
 
     /* ---- Nothing buries the chart --------------------------------------- */
@@ -12391,6 +12769,51 @@ static int hud_selftest(Uint64 base)
                 fails++;
             }
         printf("hud     : %d HUD strings all fit %d px\n", i, LOGICAL_W);
+    }
+
+    /* The banner names the realm she is actually standing in. Asked through
+     * biome_for_area, which is the one function that knows Area 2 is Lumiara
+     * and Area 3 the Underworld - a banner keyed on the area number instead is
+     * how "the underworld remembers" came to fire on finishing Lumiara.
+     *
+     * Checked as "area N's line contains the name of area N's biome" rather
+     * than against a second copy of the three strings, which would agree with a
+     * table that had been rewritten wrongly in both places. */
+    {
+        static const char *realm[4] = { "", "forest", "lumiara", "underworld" };
+        int a, wrong = 0, ctl = 0;
+        for (a = 1; a <= 3; a++) {
+            const char *line = win_line(biome_for_area((Uint8)a));
+            if (!SDL_strstr(line, realm[a])) {
+                printf("FAIL  hud: area %d finishes with \"%s\", which does not"
+                       " name the %s\n", a, line, realm[a]);
+                fails++;
+                wrong++;
+            }
+            if (story_line_holes(line)) {
+                printf("FAIL  hud: banner line \"%s\" has a glyph the font cannot"
+                       " fill\n", line);
+                fails++;
+            }
+        }
+        /* NEGATIVE CONTROL: the table this replaced was keyed on the AREA
+         * number and handed area 2 the underworld line. The same check has to
+         * reject it, or "each area names its own realm" only means "win_line
+         * returned a string". */
+        for (a = 1; a <= 3; a++) {
+            const char *bad = (a == 1) ? "the forest remembers"
+                            : (a == 2) ? "the underworld remembers"
+                                       : "the lumiara remembers";
+            if (!SDL_strstr(bad, realm[a])) ctl++;
+        }
+        if (ctl != 2) {
+            printf("FAIL  hud: banner negative control caught %d of the 2 areas"
+                   " the area-keyed table got wrong\n", ctl);
+            fails++;
+        } else if (!wrong) {
+            printf("hud     : each area's banner names its own realm; control"
+                   " rejects the area-keyed table on 2 of 3\n");
+        }
     }
 
     /* Seed cycling. The '[' and ']' keys route through game_reseed for the same
