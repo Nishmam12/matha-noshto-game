@@ -4489,9 +4489,42 @@ static int prop_covers_player(int after,
  * list contents and ordering without paying for ~200 RLE blits per sample -
  * which is the difference between a sweep that runs in a second and one that
  * times out. */
+/* What the Mainland gate looks like as a pure function of progression, so the
+ * render and the tests cannot disagree. Returns the sprite and the fog level
+ * to draw it at. The rule is still \"a gate is drawn as the place it leads
+ * to\": a closed or realm-bound gate is the still ring, brightening as the
+ * castle stirs; the castle mouth is the animated deeper mouth. No new art. */
+static void portal_gate_look(Uint8 area, int dest, int cs, float clock,
+                             int tile_level_in, int *art_out, int *level_out)
+{
+    int art = ART_LUM_PORTAL;
+    int level = tile_level_in;
+
+    if (area == 1 && dest == 3) {
+        art = ART_UW_PORTAL_A + ((int)(clock * 6.0f) % 6);
+        level = FOG_LEVELS - 1;
+    } else if (area == 1) {
+        if (dest == 2)
+            level = FOG_LEVELS - 1;
+        else if (cs >= 2)
+            level = FOG_LEVELS - 1;
+        else if (cs == 1) {
+            level = tile_level_in + 10;
+            if (level > FOG_LEVELS - 1) level = FOG_LEVELS - 1;
+        }
+    } else if (area == 2) {
+        art = ART_UW_PORTAL_A + ((int)(clock * 6.0f) % 6);
+    }
+    if (level < 0) level = 0;
+    if (level > FOG_LEVELS - 1) level = FOG_LEVELS - 1;
+    if (art_out) *art_out = art;
+    if (level_out) *level_out = level;
+}
+
 static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
                         int cam_x, int cam_y, const Entity *ents,
-                        const Player *p, float clock, DrawList *dl)
+                        const Player *p, float clock, DrawList *dl,
+                        int gate_dest, int gate_cs)
 {
     int tx0 = cam_x / TILE, ty0 = cam_y / TILE;
     int tx1 = (cam_x + view_w) / TILE + 1;
@@ -4615,13 +4648,27 @@ static void props_build(int view_w, int view_h, const World *w, Uint64 seed,
              * and a chamber that was not drawn was an ending no player could
              * find. It gets the STILL ring rather than the animated mouth that
              * brought her in - the mouths lead somewhere, and this one does
-             * not. */
-            int art = ART_LUM_PORTAL;
-            if (w->biome == BIOME_LUMIARA)
-                art = ART_UW_PORTAL_A + ((int)(clock * 6.0f) % 6);
+             * not.
+             *
+             * In the Mainland the same gate is the castle mouth once the key
+             * is held, and brightens as the castle stirs before that - the
+             * plan's visible castle states, through portal_gate_look, with no
+             * new art. Callers that have no progression to report (tests on
+             * bare worlds) pass gate_dest < 0 and get the legacy biome look.
+             * A gate is still drawn as the place it leads to. */
+            int art, level;
+            if (gate_dest < 0) {
+                art = ART_LUM_PORTAL;
+                if (w->biome == BIOME_LUMIARA)
+                    art = ART_UW_PORTAL_A + ((int)(clock * 6.0f) % 6);
+                level = tile_level(w, ptx, pty);
+            } else {
+                portal_gate_look(area_for_biome(w->biome), gate_dest, gate_cs,
+                                 clock, tile_level(w, ptx, pty), &art, &level);
+            }
             draw_list_push(dl, art,
                            ptx * TILE + TILE / 2 - cam_x,
-                           pty * TILE + TILE - cam_y, 0, tile_level(w, ptx, pty));
+                           pty * TILE + TILE - cam_y, 0, level);
         }
     }
 
@@ -5152,30 +5199,53 @@ static Uint32 game_live_mask(const Game *g)
  * replays the mask they are computed from.
  */
 
-/* How many of `area`'s seven memories she has found, read out of the mask
- * rather than out of frags_restored - frags_restored describes the ACTIVE area
- * only, and the castle has to be legible from the Mainland. */
-static int story_area_frags(const Game *g, Uint8 area)
+/* Progression thresholds. Named so the gate, the castle and the save check
+ * share one definition rather than three literals that can drift. */
+#define PORTAL_MEMORY_THRESHOLD  4
+#define CASTLE_DISTURBED_MEMORIES 4
+#define CASTLE_REVEALED_MEMORIES FRAGMENT_COUNT
+#define CASTLE_APPROACH_TILES   10
+
+/* Mask-level primitives, so the live gate and the save header check share one
+ * definition of \"how much of an area does this mask hold\". */
+static int mask_area_frags(Uint32 mask, Uint8 area)
 {
-    Uint32 bits = (game_live_mask(g) >> ((area - 1) * ENTITY_COUNT))
-                & (Uint32)((1u << FRAGMENT_COUNT) - 1u);
+    Uint32 bits;
     int n = 0, i;
 
+    if (area < 1 || area > 3) return 0;
+    bits = (mask >> ((area - 1) * ENTITY_COUNT))
+         & (Uint32)((1u << FRAGMENT_COUNT) - 1u);
     for (i = 0; i < FRAGMENT_COUNT; i++)
         if (bits & (1u << i)) n++;
     return n;
 }
 
-/* Likewise for souls: the top SOUL_COUNT bits of that area's slice. */
-static int story_area_souls(const Game *g, Uint8 area)
+static int mask_area_souls(Uint32 mask, Uint8 area)
 {
-    Uint32 bits = (game_live_mask(g) >> ((area - 1) * ENTITY_COUNT + FRAGMENT_COUNT))
-                & (Uint32)((1u << SOUL_COUNT) - 1u);
+    Uint32 bits;
     int n = 0, i;
 
+    if (area < 1 || area > 3) return 0;
+    bits = (mask >> ((area - 1) * ENTITY_COUNT + FRAGMENT_COUNT))
+         & (Uint32)((1u << SOUL_COUNT) - 1u);
     for (i = 0; i < SOUL_COUNT; i++)
         if (bits & (1u << i)) n++;
     return n;
+}
+
+/* How many of `area`'s seven memories she has found, read out of the mask
+ * rather than out of frags_restored - frags_restored describes the ACTIVE area
+ * only, and the castle has to be legible from the Mainland. */
+static int story_area_frags(const Game *g, Uint8 area)
+{
+    return mask_area_frags(game_live_mask(g), area);
+}
+
+/* Likewise for souls: the top SOUL_COUNT bits of that area's slice. */
+static int story_area_souls(const Game *g, Uint8 area)
+{
+    return mask_area_souls(game_live_mask(g), area);
 }
 
 /* The castle has exactly THREE states, and they are counted off the Mainland's
@@ -5193,7 +5263,7 @@ static int story_area_souls(const Game *g, Uint8 area)
 static int castle_state(const Game *g)
 {
     int m = story_area_frags(g, 1);
-    return m >= FRAGMENT_COUNT ? 2 : m >= 4 ? 1 : 0;
+    return m >= CASTLE_REVEALED_MEMORIES ? 2 : m >= CASTLE_DISTURBED_MEMORIES ? 1 : 0;
 }
 
 /* Whether area `area` is finished, from the mask, for any area - not just the
@@ -5214,6 +5284,33 @@ static int story_area_done(const Game *g, Uint8 area)
 static int castle_key(const Game *g)
 {
     return story_area_done(g, 2);
+}
+
+/* Whether the Mainland gate stands open: four memories and all three souls.
+ * Derive, never store - the same discipline as castle_state above. Area 2's
+ * own gate is the way back and is always open; Area 3 is terminal and has no
+ * onward gate to open. */
+static int portal_open(const Game *g)
+{
+    if (g->area == 2) return 1;
+    if (g->area != 1) return 0;
+    return story_area_frags(g, 1) >= PORTAL_MEMORY_THRESHOLD
+        && story_area_souls(g, 1) >= SOUL_COUNT;
+}
+
+/* Where the gate she is standing at leads, or 0 for nowhere yet. The one
+ * answer the render, the prompt, the key handler and the tests all read, so
+ * they cannot disagree. Area 1's gate leads to the castle once the key is
+ * held and takes priority over the realm between; Area 2's always leads
+ * back to the Mainland; Area 3 stays terminal. */
+static int portal_dest(const Game *g)
+{
+    if (g->area == 1) {
+        if (castle_key(g)) return 3;
+        return portal_open(g) ? 2 : 0;
+    }
+    if (g->area == 2) return 1;
+    return 0;
 }
 
 /* ---- The text box -------------------------------------------------------
@@ -5317,6 +5414,11 @@ static void game_init(Game *g, Scratch *sc, Uint64 seed)
     g->maps = 0;
     SDL_zero(story);
     game_init_area(g, sc, seed, 1);
+    /* The first memory must be findable without a map: the corner minimap
+     * stays dark until the fragment is found, so the star lights the way
+     * from the first frame. star_target with 0 memories already returns the
+     * nearest one. */
+    story.star_left = STAR_TICKS;
 }
 
 /* Whether the CURRENT area's map has been found. g->area is always 1-3, so the
@@ -5330,6 +5432,22 @@ static void game_restore(Game *g, int i)
 {
     apply_restore(&g->w, g->ents, &g->p, i,
                   &g->frags_restored, &g->souls_restored);
+}
+
+/* Replay this area's slice of the persistent mask into the freshly generated
+ * area: re-grants abilities, re-lights regions and rebuilds the restore
+ * counts. Factored out of game_load so a return trip re-enters an area
+ * through the same construction path a load does. Caller must have left
+ * g->restored holding the full mask and g->ents fresh from game_init_area. */
+static void game_replay_area(Game *g)
+{
+    Uint32 shift = game_area_shift(g->area);
+    Uint32 active = (g->restored >> shift) & SAVE_AREA1_BITS;
+    int i;
+
+    for (i = 0; i < ENTITY_COUNT; i++)
+        if (active & (1u << i))
+            game_restore(g, i);
 }
 
 /* Area 1 is finished when everything in it is remembered. Deliberately NOT a
@@ -5518,17 +5636,36 @@ static int save_header_ok(const Uint8 *buf)
     restored = save_get32(buf + 24);
     if (restored & ~SAVE_ALL_BITS) return -1;
     /* Free integrity check that falls straight out of the gameplay invariant
-     * the portal enforces live: you cannot BE in Area N unless every earlier
-     * area is 100% restored (that is what unlocks each portal), and you
-     * cannot have left an area with spurious LATER-area progress already on
-     * the books - progress can only ever be ahead of where you currently are
-     * by exactly the areas you have already finished and left. */
-    if (area == 1 && (restored & ((SAVE_AREA1_BITS << SAVE_AREA2_SHIFT) |
-                                   (SAVE_AREA1_BITS << SAVE_AREA3_SHIFT)))) return -1;
-    if (area == 2 && ((restored & SAVE_AREA1_BITS) != SAVE_AREA1_BITS ||
-                       (restored & (SAVE_AREA1_BITS << SAVE_AREA3_SHIFT)))) return -1;
-    if (area == 3 && (restored & (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))
-                   != (SAVE_AREA1_BITS | (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT)))  return -1;
+     * the gates enforce live, read through the Phase 1 mask primitives so the
+     * file check and the live gate cannot drift:
+     *  - Area 2 bits / map / talk need the Area 1 threshold (four memories
+     *    plus all three souls), not a finished Mainland - the portal opens
+     *    early and return travel keeps Area 1 saves legal with Area 2
+     *    progress on the books.
+     *  - Area 3 bits / map / talk need the key: Area 2 fully restored.
+     *  - SF_KING / SF_BEAST still need area 3, and SF_BEAST still needs
+     *    SF_KING.
+     *
+     * No SAVE_VERSION bump: the layout does not change and the new rules are
+     * strictly looser than the old 100%-of-every-earlier-area ones, so every
+     * existing v4 save still loads. A bump is a deliberate cost per the
+     * convention at SAVE_VERSION, and there is no cost to pay here. */
+    if (area == 2) {
+        if (mask_area_frags(restored, 1) < PORTAL_MEMORY_THRESHOLD) return -1;
+        if (mask_area_souls(restored, 1) < SOUL_COUNT) return -1;
+    }
+    if (area == 3) {
+        if (mask_area_frags(restored, 2) < FRAGMENT_COUNT) return -1;
+        if (mask_area_souls(restored, 2) < SOUL_COUNT) return -1;
+    }
+    /* Later-area progress the gates could never have produced: Area 3
+     * progress without the key is impossible on any honest path. Earlier
+     * areas' bits may be anything - return travel means a save in Area 1
+     * can carry Area 2 progress and still be legitimate. */
+    if (mask_area_frags(restored, 3) + mask_area_souls(restored, 3) > 0) {
+        if (mask_area_frags(restored, 2) < FRAGMENT_COUNT) return -1;
+        if (mask_area_souls(restored, 2) < SOUL_COUNT) return -1;
+    }
 
     abilities = buf[20];
     if (abilities & (Uint8)~(Uint8)ABIL_ALL) return -1;
@@ -5547,19 +5684,34 @@ static int save_header_ok(const Uint8 *buf)
         return -1;
 
     /* The story. A conversation count above TALK_LINES is not a person who has
-     * said more than they have to say - it is a corrupt file. */
+     * said more than they have to say - it is a corrupt file. Area talk
+     * follows the same gate rules as the mask above: Area 2 voices need the
+     * Area 1 threshold, Area 3 voices need the key. */
     {
         int i, talked = 0;
+        int a1frags = mask_area_frags(restored, 1);
+        int a1souls = mask_area_souls(restored, 1);
+        int a2frags = mask_area_frags(restored, 2);
+        int a2souls = mask_area_souls(restored, 2);
+        int area2_open = a1frags >= PORTAL_MEMORY_THRESHOLD && a1souls >= SOUL_COUNT;
+        int key = a2frags >= FRAGMENT_COUNT && a2souls >= SOUL_COUNT;
         for (i = 0; i < NPC_TOTAL; i++) {
             if (buf[36 + i] > TALK_LINES) return -1;
-            /* Nobody in an area she has not reached can have said anything.
-             * The same live invariant the restored mask is checked against
-             * above, applied to the cast: the portal is what let her meet
-             * them, and the portal needed the earlier area finished. */
-            if (i / NPC_PER_AREA >= area && buf[36 + i] != 0) return -1;
+            if (buf[36 + i] != 0) {
+                int ka = i / NPC_PER_AREA + 1;
+                if (ka == 2 && !area2_open) return -1;
+                if (ka == 3 && !key) return -1;
+            }
             if (buf[36 + i] >= TALK_LINES) talked++;
         }
         (void)talked;
+        /* Maps follow the same rule: a found map in an area she could not
+         * have reached is a corrupt file. Area 2's map needs the threshold,
+         * Area 3's needs the key; the current-area ceiling still holds, since
+         * a map lies in one area and she cannot have picked it up past where
+         * she has been. */
+        if ((maps & 0x02u) && !area2_open) return -1;
+        if ((maps & 0x04u) && !key) return -1;
         if (buf[45] & (Uint8)~(Uint8)SF_BITS) return -1;
         /* Nothing that happens in the throne room can have happened anywhere
          * but the castle. */
@@ -5688,7 +5840,7 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     SDL_RWops *rw = SDL_RWFromFile(path, "rb");
     Game *tmp;
     Uint64 seed;
-    Uint32 restored, active, shift;
+    Uint32 restored;
     Uint8 area;
     float px, py;
     Uint8 abilities, maps;
@@ -5728,11 +5880,8 @@ static int game_load(Game *g, Scratch *sc, const char *path, Uint64 *seed_out)
     keep = story;
     game_init_area(tmp, sc, seed, area);
 
-    shift = (area == 1) ? 0 : (area == 2) ? SAVE_AREA2_SHIFT : SAVE_AREA3_SHIFT;
-    active = (restored >> shift) & SAVE_AREA1_BITS;
-    for (i = 0; i < ENTITY_COUNT; i++)
-        if (active & (1u << i))
-            game_restore(tmp, i);
+    tmp->restored = restored;
+    game_replay_area(tmp);
     if (tmp->p.abilities != abilities) {   /* the checksum described above */
         story = keep;
         SDL_free(tmp);
@@ -6040,6 +6189,11 @@ static void mm_draw(SDL_Surface *fb, const Game *g)
 {
     int i;
 
+    /* No map fragment, no minimap: the brief starts her without a map, and
+     * the M-key screen is already gated on game_has_map. Returns before
+     * allocating, so a fresh game never builds the cache either. */
+    if (!game_has_map(g))
+        return;
     if (!hud.mm)
         hud.mm = SDL_CreateRGBSurface(0, MM_W, MM_H, fb->format->BitsPerPixel,
                                       fb->format->Rmask, fb->format->Gmask,
@@ -6513,6 +6667,9 @@ static const char *const MENU_CONTROL_LINES[] = {
     "m                map",
     "f5               save this slot",
     "f9               reload this slot",
+    /* N and P only: [ and ] step the world too, but both are all-zero rows in
+     * FONT_5X7 and would ship as holes - see the label comment above. */
+    "n or p           new world",
     "f11              fullscreen",
     "escape           this menu"
 };
@@ -7023,6 +7180,23 @@ static void story_talk(Game *g, Audio *a, int k)
     t = story.talk[k];
     if (t >= TALK_LINES) return;          /* they are gone; nothing to say */
 
+    /* Within an area, a person may not get ahead of the person before them:
+     * the cast is talked down the chain, one strand per area. Somebody not
+     * ready repeats their last line - silence reads as a broken key. No
+     * dialogue tree, no new state, nothing new saved. */
+    if ((k % NPC_PER_AREA) > 0 && t > story.talk[k - 1]) {
+        int prev = story.talk[k - 1];
+        if (prev >= TALK_LINES) {
+            say_open(CAST[k].name, CAST[k].line[TALK_LINES - 1][0],
+                     CAST[k].line[TALK_LINES - 1][1]);
+        } else if (prev <= 0) {
+            say_open(CAST[k].name, CAST[k].line[0][0], CAST[k].line[0][1]);
+        } else {
+            say_open(CAST[k].name, CAST[k].line[prev - 1][0],
+                     CAST[k].line[prev - 1][1]);
+        }
+        return;
+    }
     if (t > 0 && g->frags_restored < t) {
         say_open(CAST[k].name, CAST[k].line[t - 1][0], CAST[k].line[t - 1][1]);
         return;
@@ -7496,11 +7670,31 @@ static const char *const END_CARD[4] = {
     "none of you remembered",
 };
 
-static void story_end_card(SDL_Surface *fb)
+/* The honest variant: with leavable memories the full claim above is not
+ * always true. Selected on whether the whole thirty-bit mask is complete.
+ * Both tables are file-scope so the --story-test font sweep reaches them -
+ * that array was made file-scope precisely because a local one shipped four
+ * holes. */
+static const char *const END_CARD_PARTIAL[4] = {
+    "some memories restored",
+    "every soul remembered",
+    "enough of it remembered",
+    "none of you remembered",
+};
+
+/* The honest selector: full completion ends on the full claim, anything less
+ * on the partial one. A pure function of the live mask so --story-test can
+ * assert the choice without a surface. */
+static const char *const *end_card_rows(const Game *g)
+{
+    return (game_live_mask(g) & SAVE_ALL_BITS) == SAVE_ALL_BITS
+         ? END_CARD : END_CARD_PARTIAL;
+}
+
+static void story_end_card_for(SDL_Surface *fb, const char *const *rows)
 {
     Uint32 warm = SDL_MapRGB(fb->format, 0xf0, 0xd8, 0xb0);
     Uint32 pale = SDL_MapRGB(fb->format, 0x9a, 0xa8, 0xb8);
-    const char *const *rows = END_CARD;
     int i, y;
 
     if (!story_ended())
@@ -7512,6 +7706,13 @@ static void story_end_card(SDL_Surface *fb)
                          i == 3 ? warm : pale, 2);
         y += FONT_LINE_AT(2) + 4;
     }
+}
+
+/* The game-aware entry: main calls this one so the honest variant can be
+ * selected from the live mask. */
+static void story_end_card_game(SDL_Surface *fb, const Game *g)
+{
+    story_end_card_for(fb, end_card_rows(g));
 }
 
 /* ---- The story's tick ---------------------------------------------------
@@ -7536,13 +7737,27 @@ static void story_tick(Game *g, Audio *a)
      * held as a stored state: castle_state is derived, and castle_seen is only
      * a note of what the player has been shown so the same step is not
      * announced twice. It is transient - a load re-syncs it below rather than
-     * replaying three announcements. */
+     * replaying three announcements.
+     *
+     * The telling waits until she is back in Area 1 and near the gate: the
+     * state itself stays immediate (the gate art already reads it), only the
+     * announcement waits for her to come and look. */
     cs = castle_state(g);
     if (cs > (int)story.castle_seen) {
-        story.castle_seen = (Uint8)cs;
-        sfx_fire(a, SFX_SOUL);
-        hud_toast(cs >= 2 ? "the castle is not asleep any more"
-                          : "something about the castle has changed");
+        int near_gate = 0;
+        if (g->area == 1 && g->w.portal_tile >= 0) {
+            float ex = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
+            float ey = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
+            float dx = ex - g->p.x, dy = ey - g->p.y;
+            float lim = (float)CASTLE_APPROACH_TILES * (float)TILE;
+            near_gate = dx * dx + dy * dy <= lim * lim;
+        }
+        if (near_gate) {
+            story.castle_seen = (Uint8)cs;
+            sfx_fire(a, SFX_SOUL);
+            hud_toast(cs >= 2 ? "the castle is not asleep any more"
+                              : "something about the castle has changed");
+        }
     }
 }
 
@@ -7624,15 +7839,23 @@ static void game_reseed(Game *g, Scratch *sc, Audio *a, Uint64 seed)
  * is neither the one being left nor the one being entered. Same class of fix
  * as game_save's shift/keep_mask above, same reason.
  *
- * One-way by design (no return portal from a later area to an earlier one):
- * the design is symmetric enough that a return trip would be nearly free to
- * add later (same function, an earlier area argument), but it is a second
- * interactive object, HUD affordance and test surface the source plan does
- * not ask for. */
+ * Two-way now: Area 2's gate leads back to Area 1, which is the brief's
+ * return to the Mainland. Re-entering an area replays its slice of the mask
+ * through game_replay_area - the same construction path game_load uses - so
+ * abilities, regions and counts arrive the way a load would bring them. A
+ * re-entered area is not re-fogged mid-walk: restoration snaps to its
+ * targets the way the load does. */
 static void game_transition_to_area(Game *g, Scratch *sc, Uint8 next_area)
 {
+    int i;
+
     g->restored = game_live_mask(g);
     game_init_area(g, sc, g->seed, next_area);
+    game_replay_area(g);
+    if (g->maps & (Uint8)(1u << (next_area - 1)))
+        g->w.map_tile = -1;
+    for (i = 0; i < g->w.region_count; i++)
+        g->w.regions[i].restoration = g->w.regions[i].restore_to;
     hud.mm_dirty  = 1;
     hud.win_shown = 0;
     hud.win_left  = 0;
@@ -7642,17 +7865,19 @@ static void game_transition_to_area(Game *g, Scratch *sc, Uint8 next_area)
     hud.bm_dirty  = 1;
 }
 
-/* The portal, checked alongside try_interact on the same key: only once the
- * current area is area_complete (the portal "lights up" - see hud_draw's
- * banner) and only within the same INTERACT_RADIUS entities use. Area 3 has
- * no portal of its own to use (it is terminal - see try_interact's caller),
- * so only areas 1 and 2 reach this. Returns 1 if the step was taken, 0
- * otherwise, mirroring try_interact's shape. */
+/* The portal, checked alongside try_interact on the same key: only through
+ * portal_dest - the threshold in Area 1, the castle mouth once the key is
+ * held, always back in Area 2 - and only within the same INTERACT_RADIUS
+ * entities use. Area 3 has no portal of its own to use (it is terminal -
+ * see try_interact's caller), so only areas 1 and 2 reach this. Returns 1
+ * if the step was taken OR refused with feedback, 0 when there was no gate
+ * in reach at all, mirroring try_interact's shape. */
 static int try_use_portal(Game *g, Scratch *sc, Audio *a)
 {
     float ex, ey, dx, dy;
+    int dest;
 
-    if ((g->area != 1 && g->area != 2) || g->w.portal_tile < 0 || !area_complete(g))
+    if ((g->area != 1 && g->area != 2) || g->w.portal_tile < 0)
         return 0;
     ex = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
     ey = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
@@ -7660,7 +7885,25 @@ static int try_use_portal(Game *g, Scratch *sc, Audio *a)
     dy = ey - g->p.y;
     if (dx * dx + dy * dy > INTERACT_RADIUS * INTERACT_RADIUS)
         return 0;
-    if (g->area == 1) {
+    dest = portal_dest(g);
+    if (!dest) {
+        /* A closed gate that says so: a key that does nothing and says
+         * nothing is indistinguishable from a key that is broken. No numbers
+         * in the sentence - the gate does not count her memories aloud. */
+        sfx_fire(a, SFX_DENY);
+        hud_toast(g->area == 1 ? "the way between is still closed"
+                               : "the gate does not know you yet");
+        return 1;
+    }
+    if (g->area == 1 && dest == 3) {
+        game_transition_to_area(g, sc, 3);
+        audio_request_reset(a, g->seed, 0, 0, biome_for_area(3));
+        /* Not a locked door being unlocked. Nothing was carried here and
+         * nothing is spent - the gate reacts to HER, which is the first thing
+         * in the game to treat her as somebody it already knows. */
+        say_open("", "the gate is already open.",
+                 "it was not, a moment ago.");
+    } else if (g->area == 1) {
         game_transition_to_area(g, sc, 2);
         /* Root seed, not the Area 2 world-generation salt: F9's own reload of
          * an Area 2 save reseeds audio from the FILE's root seed the same
@@ -7669,13 +7912,9 @@ static int try_use_portal(Game *g, Scratch *sc, Audio *a)
         audio_request_reset(a, g->seed, 0, 0, biome_for_area(2));
         hud_toast("the way between opens");
     } else {
-        game_transition_to_area(g, sc, 3);
-        audio_request_reset(a, g->seed, 0, 0, biome_for_area(3));
-        /* Not a locked door being unlocked. Nothing was carried here and
-         * nothing is spent - the gate reacts to HER, which is the first thing
-         * in the game to treat her as somebody it already knows. */
-        say_open("", "the gate is already open.",
-                 "it was not, a moment ago.");
+        game_transition_to_area(g, sc, 1);
+        audio_request_reset(a, g->seed, 0, 0, biome_for_area(1));
+        hud_toast("the way between opens");
     }
     return 1;
 }
@@ -9155,7 +9394,7 @@ static int mockup_selftest(void)
                 p.y = (float)(cy + LOGICAL_H / 2);
                 render_world(fb, w, (Uint64)(s + 1), cx, cy);
                 props_build(LOGICAL_W, LOGICAL_H, w, (Uint64)(s + 1), cx, cy,
-                            NULL, &p, 0.0f, dl);
+                            NULL, &p, 0.0f, dl, -1, 0);
                 props_draw(fb, dl);
                 frames++;
                 for (y = 0; y < fb->h; y++) {
@@ -9442,7 +9681,7 @@ static int sort_selftest(void)
                         p.x = (float)(cx + LOGICAL_W / 2);
                         p.y = (float)(cy + LOGICAL_H / 2);
                         props_build(LOGICAL_W, LOGICAL_H, w, (Uint64)(s + 1),
-                                    cx, cy, NULL, &p, 0.0f, dl);
+                                    cx, cy, NULL, &p, 0.0f, dl, -1, 0);
                         samples++;
                         if (dl->n > worst) worst = dl->n;
                         if (dl->dropped) {
@@ -10862,7 +11101,7 @@ static int map_selftest(int seeds, Uint64 base)
         cam_x = 0; cam_y = 0;
         camera_follow(g->p.x, g->p.y, LOGICAL_W, LOGICAL_H, &cam_x, &cam_y);
         props_build(LOGICAL_W, LOGICAL_H, &g->w, base, cam_x, cam_y, g->ents,
-                    &g->p, 0.0f, dl);
+                    &g->p, 0.0f, dl, -1, 0);
         for (i = 0; i < dl->n; i++)
             if (dl->item[i].kind == DI_MAP) { at = i; break; }
         if (at < 0) {
@@ -11253,7 +11492,8 @@ static int story_selftest(int seeds, Uint64 base)
          * array inside story_end_card: all four rows ended in a per-cent sign,
          * FONT_5X7 leaves 0x25 blank, and every one of them shipped a hole
          * that only a screenshot found. Drawn at scale 2, so its width budget
-         * is the one this measures against. */
+         * is the one this measures against. Both variants, since the honest
+         * selector can show either. */
         for (t = 0; t < 4; t++) {
             int w = text_w_scaled(END_CARD[t], 2);
             holes += story_line_holes(END_CARD[t]);
@@ -11261,6 +11501,17 @@ static int story_selftest(int seeds, Uint64 base)
             if (w > LOGICAL_W - 32) {
                 printf("FAIL  story: end card row %d is %d px at scale 2, over"
                        " the %d px the screen has\n", t, w, LOGICAL_W - 32);
+                fails++;
+            }
+        }
+        for (t = 0; t < 4; t++) {
+            int w = text_w_scaled(END_CARD_PARTIAL[t], 2);
+            holes += story_line_holes(END_CARD_PARTIAL[t]);
+            lines++;
+            if (w > LOGICAL_W - 32) {
+                printf("FAIL  story: partial end card row %d is %d px at scale"
+                       " 2, over the %d px the screen has\n", t, w,
+                       LOGICAL_W - 32);
                 fails++;
             }
         }
@@ -11778,6 +12029,157 @@ static int story_selftest(int seeds, Uint64 base)
         }
     }
 
+    /* ---- (12) the gate opens at the threshold, and not before ------------ */
+    {
+        int bad = 0;
+        SDL_zero(story);
+        game_init(g, sc, base);
+        if (portal_open(g) || portal_dest(g) != 0) bad++;
+        g->area = 2;
+        if (!portal_open(g) || portal_dest(g) != 1) bad++;
+        g->area = 3;
+        if (portal_open(g) || portal_dest(g) != 0) bad++;
+        g->area = 1;
+        g->restored = 0;
+        for (i = 0; i < 3; i++) g->ents[i].restored = 1;
+        for (i = FRAGMENT_COUNT; i < ENTITY_COUNT; i++) g->ents[i].restored = 1;
+        if (portal_open(g) || portal_dest(g) != 0) bad++;
+        for (i = 0; i < ENTITY_COUNT; i++) g->ents[i].restored = 0;
+        for (i = 0; i < PORTAL_MEMORY_THRESHOLD; i++) g->ents[i].restored = 1;
+        for (i = FRAGMENT_COUNT; i < ENTITY_COUNT - 1; i++)
+            g->ents[i].restored = 1;
+        if (portal_open(g) || portal_dest(g) != 0) bad++;
+        g->ents[ENTITY_COUNT - 1].restored = 1;
+        if (!portal_open(g) || portal_dest(g) != 2) bad++;
+        g->restored |= SAVE_AREA1_BITS << SAVE_AREA2_SHIFT;
+        if (!castle_key(g) || portal_dest(g) != 3) bad++;
+        if (bad) {
+            printf("FAIL  story: the gate opened wrong at %d probe(s)\n", bad);
+            fails++;
+        } else {
+            printf("story   : gate opens at %d memories + souls, castle mouth"
+                   " with key\n", PORTAL_MEMORY_THRESHOLD);
+        }
+        for (i = 0; i < ENTITY_COUNT; i++) g->ents[i].restored = 0;
+        for (i = 0; i < PORTAL_MEMORY_THRESHOLD; i++) g->ents[i].restored = 1;
+        if (portal_open(g)) {
+            printf("FAIL  story: control - gate opened with no souls\n");
+            fails++;
+        }
+    }
+
+    /* ---- (13) a round trip 1-2-1 preserves everything -------------------- */
+    {
+        Uint32 mask_before;
+        Uint8 maps_before, abil_before;
+        Uint8 talk_before[NPC_TOTAL];
+        int gone_before[NPC_TOTAL];
+        int bad = 0;
+        SDL_zero(story);
+        game_init(g, sc, base);
+        for (i = 0; i < PORTAL_MEMORY_THRESHOLD; i++) game_restore(g, i);
+        for (i = FRAGMENT_COUNT; i < ENTITY_COUNT; i++) game_restore(g, i);
+        for (k = 0; k < NPC_PER_AREA; k++) story.talk[k] = (Uint8)(k + 1);
+        g->maps |= 1u;
+        g->w.map_tile = -1;
+        mask_before = game_live_mask(g);
+        maps_before = g->maps;
+        abil_before = g->p.abilities;
+        for (k = 0; k < NPC_TOTAL; k++) {
+            talk_before[k] = story.talk[k];
+            gone_before[k] = cast_gone(k);
+        }
+        game_transition_to_area(g, sc, 2);
+        if ((g->restored & SAVE_AREA1_BITS) != (mask_before & SAVE_AREA1_BITS))
+            bad++;
+        game_transition_to_area(g, sc, 1);
+        if (game_live_mask(g) != mask_before) bad++;
+        if (g->maps != maps_before) bad++;
+        if (g->p.abilities != abil_before) bad++;
+        for (k = 0; k < NPC_TOTAL; k++)
+            if (story.talk[k] != talk_before[k] ||
+                cast_gone(k) != gone_before[k])
+                bad++;
+        if (g->w.map_tile != -1) bad++;
+        if (bad) {
+            printf("FAIL  story: 1-2-1 round trip lost state (%d)\n", bad);
+            fails++;
+        } else {
+            printf("story   : 1-2-1 round trip preserves mask, abilities,"
+                   " maps, talk\n");
+        }
+        g->ents[0].restored = 0;
+        if (game_live_mask(g) == mask_before) {
+            printf("FAIL  story: control - a cleared memory unnoticed\n");
+            fails++;
+        } else {
+            printf("story   : control - clearing a memory is visible\n");
+        }
+    }
+
+    /* ---- (14) the castle announcement waits for the gate ----------------- */
+    {
+        Audio quiet;
+        int far_seen, near_seen;
+        SDL_zero(quiet);
+        SDL_zero(story);
+        game_init(g, sc, base);
+        SDL_zero(hud);
+        g->p.x = 0.0f; g->p.y = 0.0f;
+        for (i = 0; i < PORTAL_MEMORY_THRESHOLD; i++) g->ents[i].restored = 1;
+        story_tick(g, &quiet);
+        far_seen = story.castle_seen;
+        if (g->w.portal_tile >= 0) {
+            g->p.x = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
+            g->p.y = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
+            story_tick(g, &quiet);
+        }
+        near_seen = story.castle_seen;
+        if (far_seen != 0 || near_seen != 1) {
+            printf("FAIL  story: castle announce far %d near %d\n", far_seen,
+                   near_seen);
+            fails++;
+        } else {
+            printf("story   : castle announcement fires only near gate\n");
+        }
+        SDL_zero(story);
+        game_init(g, sc, base);
+        if (g->w.portal_tile >= 0) {
+            g->p.x = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
+            g->p.y = (float)(g->w.portal_tile / WORLD_W) * TILE + TILE * 0.5f;
+        }
+        story_tick(g, &quiet);
+        if (story.castle_seen != 0) {
+            printf("FAIL  story: control - announce with nothing found\n");
+            fails++;
+        }
+        SDL_zero(hud);
+    }
+
+    /* ---- (15) the end card is honest ------------------------------------- */
+    {
+        SDL_zero(story);
+        game_init(g, sc, base);
+        g->restored = SAVE_ALL_BITS;
+        for (i = 0; i < ENTITY_COUNT; i++) g->ents[i].restored = 1;
+        if (end_card_rows(g) != END_CARD) {
+            printf("FAIL  story: complete mask missed the full card\n");
+            fails++;
+        } else {
+            g->ents[0].restored = 0;
+            if (end_card_rows(g) != END_CARD_PARTIAL) {
+                printf("FAIL  story: partial mask claimed the full card\n");
+                fails++;
+            } else {
+                printf("story   : end card honest on full vs partial\n");
+            }
+        }
+        if (SDL_strcmp(END_CARD[0], END_CARD_PARTIAL[0]) == 0) {
+            printf("FAIL  story: control - the two cards read the same\n");
+            fails++;
+        }
+    }
+
     SDL_free(g); SDL_free(sc); SDL_free(au);
     printf("story   : %s\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;
@@ -12139,6 +12541,7 @@ static int hud_selftest(Uint64 base)
     {
         int a, b;
         g->frags_restored = 0; g->souls_restored = 0;
+        g->maps = 1;
         SDL_FillRect(fb, NULL, 0);
         hud_draw(fb, g);
         a = count_lit(fb, 0, 0, 140, FONT_LINE * 3);
@@ -12164,6 +12567,25 @@ static int hud_selftest(Uint64 base)
      * be comparing two identical values. */
     {
         Uint32 open_c, wall_c, got;
+        /* The minimap is gated on the map fragment: without it the corner
+         * stays dark, with it the map draws. Negative control first, so the
+         * sampling checks below prove something about a map that is there. */
+        int locked_px;
+        g->maps = 0;
+        if (hud.mm) { SDL_FreeSurface(hud.mm); hud.mm = NULL; }
+        SDL_zero(hud);
+        SDL_FillRect(fb, NULL, 0);
+        hud_draw(fb, g);
+        locked_px = count_lit(fb, MM_X - 1, MM_Y - 1, MM_W + 2, MM_H + 2);
+        if (locked_px != 0) {
+            printf("FAIL  hud: minimap drew %d px with no map fragment\n",
+                   locked_px);
+            fails++;
+        } else {
+            printf("hud     : negative control - no fragment, no minimap\n");
+        }
+        g->maps = 1;
+        SDL_zero(hud);
         g->w.solid[0][0] = 1; g->w.solid[0][1] = 1; g->w.solid[1][0] = 1;
         g->w.solid[1][1] = 0;
         /* Terrain forced too, not just `solid`: this seed generated water in
@@ -12382,7 +12804,12 @@ static int hud_selftest(Uint64 base)
             "the water is too deep", "could not write the save file",
             "the forest remembers", "the portal opens",
             "the underworld remembers", "the lumiara remembers",
-            "the lumiara opens", "all is restored"
+            "the lumiara opens", "all is restored",
+            "the way between opens", "the way between is still closed",
+            "the gate does not know you yet",
+            "something about the castle has changed",
+            "the castle is not asleep any more",
+            "the gate is already open."
         };
         for (i = 0; i < (int)(sizeof(lines) / sizeof(lines[0])); i++)
             if (text_w(lines[i]) > LOGICAL_W - 8) {
@@ -13507,7 +13934,7 @@ static int save_selftest(Uint64 base)
             printf("FAIL  save: could not read the file back for the controls\n");
             fails++;
         } else {
-            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[15];
+            struct { const char *name; Uint8 buf[SAVE_SIZE]; size_t len; } ctl[16];
             int nctl = 0;
 
             save_snap(again, &before);
@@ -13537,27 +13964,21 @@ static int save_selftest(Uint64 base)
              * be the newest one is a save the player will think was lost. */
             ctl[nctl].name = "zero timestamp";
             SDL_memset(ctl[nctl].buf + 28, 0, 8); nctl++;
-            /* Both fall straight out of the gameplay invariant the portal
-             * enforces live: you cannot BE in Area 2 unless Area 1 is fully
-             * restored (only 3 of 10 area-1 bits are set on `good`, so this
+            /* Gate rules, not full-completion rules: an Area 2 file needs the
+             * Area 1 threshold (four memories plus all souls), not a finished
+             * Mainland - `good` has only 3 of 10 area-1 bits, so this
              * area-2-labelled copy claims an Area 2 it could not have
-             * reached), and Area 1 progress can never carry Area 2 bits. */
-            ctl[nctl].name = "area 2 file, area 1 incomplete";
+             * reached. And Area 1 progress can no longer be refused for
+             * carrying Area 2 bits: return travel banks them honestly. */
+            ctl[nctl].name = "area 2 file, area 1 below threshold";
             ctl[nctl].buf[3] = 2; nctl++;
-            ctl[nctl].name = "area 1 file, spurious area 2 bits";
-            save_put32(ctl[nctl].buf + 24, save_get32(good + 24) | (1u << ENTITY_COUNT));
-            nctl++;
-            /* One area further: area 1 progress can no more carry Area 3 bits
-             * than Area 2 ones - a save cannot hold progress in an area it
-             * has not reached yet, regardless of which later area. */
-            ctl[nctl].name = "area 1 file, spurious area 3 bits";
+            ctl[nctl].name = "area 3 file, area 2 incomplete";
+            ctl[nctl].buf[3] = 3; nctl++;
+            /* The new impossible combination: Area 3 progress without the
+             * key - Area 2 unfinished. No honest path produces it. */
+            ctl[nctl].name = "area 3 progress without the key";
             save_put32(ctl[nctl].buf + 24, save_get32(good + 24) | (1u << SAVE_AREA3_SHIFT));
             nctl++;
-            /* Same invariant as "area 2 file, area 1 incomplete" above, one
-             * area further: you cannot BE in Area 3 unless BOTH earlier areas
-             * are fully restored, and `good` has neither. */
-            ctl[nctl].name = "area 3 file, area 1 and area 2 incomplete";
-            ctl[nctl].buf[3] = 3; nctl++;
             /* Not a crash risk - collision always masks with & - but a
              * hand-edited save must not grant abilities never earned. */
             ctl[nctl].name = "abilities outside the legal mask";
@@ -13638,20 +14059,21 @@ static int save_selftest(Uint64 base)
         remove(path);
     }
 
-    /* Area 2 positive path: drive a fresh game to area_complete (Area 1 fully
-     * restored, same as the portal itself requires), transition through it
-     * exactly the way try_use_portal does, restore two of Area 2's own
-     * entities, and confirm a save/load round trip keeps BOTH halves of the
-     * mask intact - Area 1's bits frozen at "all restored", Area 2's bits
-     * reflecting only what was actually restored there. */
+    /* Area 2 positive path: drive a fresh game to the portal threshold (four
+     * memories plus all souls - the gate's actual requirement, not a finished
+     * Mainland), transition through it exactly the way try_use_portal does,
+     * restore two of Area 2's own entities, and confirm a save/load round
+     * trip keeps BOTH halves of the mask intact. */
     {
         Game *g2 = (Game *)SDL_malloc(sizeof(Game));
         if (g2) {
             game_init(g2, sc, base);
-            for (i = 0; i < ENTITY_COUNT; i++)
+            for (i = 0; i < PORTAL_MEMORY_THRESHOLD; i++)
                 if (g2->ents[i].tile >= 0) game_restore(g2, i);
-            if (!area_complete(g2)) {
-                printf("FAIL  save: area 1 did not reach area_complete for the area 2 positive path\n");
+            for (i = FRAGMENT_COUNT; i < ENTITY_COUNT; i++)
+                if (g2->ents[i].tile >= 0) game_restore(g2, i);
+            if (!portal_open(g2)) {
+                printf("FAIL  save: area 1 did not reach portal_open for the area 2 positive path\n");
                 fails++;
             } else {
                 game_transition_to_area(g2, sc, 2);
@@ -13666,7 +14088,8 @@ static int save_selftest(Uint64 base)
                     printf("FAIL  save: loaded area 2 save reports area %d\n", (int)again->area);
                     fails++;
                 } else {
-                    int area1_ok = (again->restored & SAVE_AREA1_BITS) == SAVE_AREA1_BITS;
+                    Uint32 want1 = game_live_mask(g2) & SAVE_AREA1_BITS;
+                    int area1_ok = (again->restored & SAVE_AREA1_BITS) == want1;
                     int area2_ok = again->ents[0].restored && again->ents[1].restored;
                     int k;
                     for (k = 2; k < ENTITY_COUNT && area2_ok; k++)
@@ -13685,22 +14108,25 @@ static int save_selftest(Uint64 base)
     }
 
     /* Area 3 positive path: the same shape as the Area 2 path above, one area
-     * further - drive Area 1 AND Area 2 to area_complete, transition through
-     * both portals exactly the way try_use_portal does, restore three of
-     * Area 3's own entities, and confirm a save/load round trip keeps ALL
-     * THREE slices of the mask intact. This is what actually exercises
-     * game_save's generalized keep_mask (a naive 2-area-style "keep the other
-     * one" ternary extended to 3 would corrupt Area 2's already-frozen bits
-     * here specifically, since Area 2 is neither the area being left nor the
-     * one being entered) and game_transition_to_area's generalized fold. */
+     * further - drive Area 1 to the threshold and Area 2 to the key,
+     * transition through both portals exactly the way try_use_portal does,
+     * restore three of Area 3's own entities, and confirm a save/load round
+     * trip keeps ALL THREE slices of the mask intact. This is what actually
+     * exercises game_save's generalized keep_mask (a naive 2-area-style
+     * "keep the other one" ternary extended to 3 would corrupt Area 2's
+     * already-frozen bits here specifically, since Area 2 is neither the
+     * area being left nor the one being entered) and
+     * game_transition_to_area's generalized fold. */
     {
         Game *g3 = (Game *)SDL_malloc(sizeof(Game));
         if (g3) {
             game_init(g3, sc, base);
-            for (i = 0; i < ENTITY_COUNT; i++)
+            for (i = 0; i < PORTAL_MEMORY_THRESHOLD; i++)
                 if (g3->ents[i].tile >= 0) game_restore(g3, i);
-            if (!area_complete(g3)) {
-                printf("FAIL  save: area 1 did not reach area_complete for the area 3 positive path\n");
+            for (i = FRAGMENT_COUNT; i < ENTITY_COUNT; i++)
+                if (g3->ents[i].tile >= 0) game_restore(g3, i);
+            if (!portal_open(g3)) {
+                printf("FAIL  save: area 1 did not reach portal_open for the area 3 positive path\n");
                 fails++;
             } else {
                 game_transition_to_area(g3, sc, 2);
@@ -13722,9 +14148,11 @@ static int save_selftest(Uint64 base)
                         printf("FAIL  save: loaded area 3 save reports area %d\n", (int)again->area);
                         fails++;
                     } else {
-                        int area1_ok = (again->restored & SAVE_AREA1_BITS) == SAVE_AREA1_BITS;
+                        Uint32 want1 = game_live_mask(g3) & SAVE_AREA1_BITS;
+                        Uint32 want2 = game_live_mask(g3) & (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT);
+                        int area1_ok = (again->restored & SAVE_AREA1_BITS) == want1;
                         int area2_ok = (again->restored & (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT))
-                                     == (SAVE_AREA1_BITS << SAVE_AREA2_SHIFT);
+                                     == want2;
                         int area3_ok = again->ents[0].restored && again->ents[1].restored && again->ents[2].restored;
                         int k;
                         for (k = 3; k < ENTITY_COUNT && area3_ok; k++)
@@ -15359,7 +15787,7 @@ int main(int argc, char **argv)
             } else {
                 render_world(draw, &g->w, seed, cam_x, cam_y);
                 props_build(draw->w, draw->h, &g->w, seed, cam_x, cam_y, g->ents,
-                            &rp, clock, dl);
+                            &rp, clock, dl, portal_dest(g), castle_state(g));
                 props_draw(draw, dl);
 #if WAYFARER_SELFTEST
                 /* --solidmap: a dot on every blocking tile, so COLLISION can be
@@ -15413,7 +15841,7 @@ int main(int argc, char **argv)
                  * and the fade must reach every pixel there is. */
                 say_draw(draw);
                 story_overlay(draw);
-                story_end_card(draw);
+                story_end_card_game(draw, g);
             }
         }
         present(win, fb, draw == back ? back : NULL);

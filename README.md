@@ -78,6 +78,7 @@ nothing ran. That makes the green claim above checkable against the working tree
 | `WASD` / arrows | walk |
 | `E` / `Space` | restore the fragment or Soul in reach |
 | `F5` / `F9` | save / reload the slot being played (written beside the working directory) |
+| `N` / `P` or `[` / `]` | step to the next / previous world (a new seed) |
 | `F11` | fullscreen |
 | `Esc` | the menu |
 
