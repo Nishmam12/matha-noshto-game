@@ -99,6 +99,7 @@ false-positive form asks for, which is the fix that also helps players.
 | `WASD` / arrows | walk |
 | `E` / `Space` | restore the fragment or Soul in reach |
 | `F5` / `F9` | save / reload the slot being played (written beside the working directory) |
+| `N` / `P` or `[` / `]` | step to the next / previous world (a new seed) |
 | `F11` | fullscreen |
 | `Ctrl`+`G` | god mode: the portal opens on an unfinished area |
 | `Esc` | the menu |

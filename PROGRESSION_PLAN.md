@@ -1,13 +1,14 @@
 # Wayfarer — Progression Overhaul Plan
 
-> **Superseded.** None of the phases below landed. The branch instead kept the original
-> one-way / full-completion gate and extended it to a 4th area (the Dungeon) — `try_use_portal`
-> (main.c:8302-8306) explicitly rejects this document's return-travel premise as unwanted scope.
-> Kept here as the historical record of why the redesign below was proposed. For current status
-> and the one real gap still open, see `HANDOVER.md`.
-
-> Carry-over document. Written for whoever picks this branch up next, on any machine.
-> Status when written: planned, not yet implemented. Branch `npc-addition`.
+> **Implemented & Merged.** The progression overhaul described below has been fully implemented
+> and merged with the Area 4 Dungeon expansion.
+> The unified world topology features:
+> - Area 1 (Mainland) $\to$ Area 2 (Lumiara) once 4 memories + 3 souls are found (`PORTAL_MEMORY_THRESHOLD`).
+> - Area 2 (Lumiara) $\to$ Area 1 (Mainland) return travel.
+> - Area 1 (Mainland) $\to$ Area 3 (Underworld/Castle) once Area 2 is restored (`castle_key`).
+> - Area 3 (Underworld/Castle) $\to$ Area 4 (Dungeon) once Area 3 is complete (7 memories + 3 souls).
+> - Area 4 (Dungeon): Terminal final area with the King audience, monster confrontation, and ending sequence.
+> - Full save/load v4 integrity, gate refusal feedback, minimap gating, and god mode support (`Ctrl+G`).
 
 ## Context
 
