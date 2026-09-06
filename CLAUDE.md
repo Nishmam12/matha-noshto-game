@@ -107,13 +107,15 @@
   inactive areas, `ents[]` carries the active one, and anything asking about the whole game has to
   reconcile the two. It was written out by hand in two places before the story needed a third.
 
-- **God mode (`ctrl+g`) suspends exactly one clause**, the `!area_complete(g)` in
-  `try_use_portal`, and touches nothing else. It is NOT a change to `area_complete` and NOT a
+- **God mode (`ctrl+g`) unlocks every lock for testing**: portals run onward (1 to 2 when shut,
+  2 to 3, 3 to 4 when unfinished, and the Dungeon stairs back to 1), ability gates walk as
+  `ABIL_ALL` (lent for the step, never written to `p.abilities`), and the king grants his
+  audience unfinished. It is NOT a change to `area_complete` and NOT a
   hand that fills `restored`: the banner, the music, the region lighting, the castle states
   and the whole dialogue gate read those, and a cheat that lied to them would congratulate
   her on an area she never walked. Because a skipped run's area is ahead of its mask - the
   live invariant `save_header_ok` is derived from - such a run **cannot be saved**: `god.cheated`
-  is set at the ungated step and refuses F5 and the save row, because writing the file would
+  is set at the ungated step (portal, gate tile, or audience) and refuses F5 and the save row, because writing the file would
   say `saved` now and `no save to load` later. `game_reseed` and a committed `game_load` clear
   it; nothing persists the toggle. `--save-test` proves both halves, with the toggle off as
   the negative control.

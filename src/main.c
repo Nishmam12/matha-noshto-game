@@ -1713,7 +1713,14 @@ static const short tile_uw_rock_cliff[2] = { ART_UW_ROCKWALL_A, ART_UW_ROCKWALL_
  *    bug; the tile actually being solid where it draws solid is what matters.
  */
 static const short tile_lum_ground_base[4] = {
-    ART_LUM_GRASS_A, ART_LUM_GRASS_B, ART_LUM_GRASS_C, ART_LUM_GRASS_D
+    /* Moonlit meadow: pale cobble woven through the dream grass, so open
+     * ground reads luminous rather than navy. Render-only - the minimap and
+     * the map screen colour by terrain (GT_*), never by tile art, and
+     * grass_base is indexed h % 4u at both call sites, so all four entries
+     * stay live. GRASS_B/D go undrawn (two small cells, same placement-only
+     * terms as the unplaced fauna). Dirt paths stay solid cobble, so the path
+     * network still reads against the mottled ground. */
+    ART_LUM_GRASS_A, ART_LUM_COBBLE_A, ART_LUM_GRASS_C, ART_LUM_COBBLE_B
 };
 static const short tile_lum_dirt_fill[6] = {
     ART_LUM_COBBLE_A, ART_LUM_COBBLE_B, ART_LUM_COBBLE_A,
@@ -4242,12 +4249,23 @@ static const short art_reeds_uw[]     = { ART_UW_REED_1, ART_UW_REED_2, ART_UW_R
 static const short art_trees_lum[]     = { ART_LUM_TREE };
 static const short art_pines_lum[]     = { ART_LUM_TREE };
 static const short art_bushes_lum[]    = { ART_LUM_BUSH };
-static const short art_logs_lum[]      = { ART_LUM_BENCH, ART_LUM_ARCHWAY };
-static const short art_rocks_lum[]     = { ART_LUM_MONOLITH, ART_LUM_STATUE };
-static const short art_stones_lum[]    = { ART_LUM_CHEST, ART_LUM_URN };
+/* Dreamlike recomposition, second pass: the wild arches crowded every stand
+ * (LOG rolls are common, and the archway owned all of them), and the guardian
+ * statues and benches read gloomy/mundane against the brief. So LOG stands
+ * empty - glades stay clear - the archway moves to ROCK, where it crowns rare
+ * heights as a discovery, and the mana monolith joins the urn in STONE, so
+ * relics and pedestals mark paths and hollows. TUFTS weight the lantern twice
+ * so light leads along banks and paths. Variant picks are (h >> 24) % n (see
+ * props_build), so duplication IS weighting. Bench, statue, chest, fox, stag,
+ * manta and jellyfish stay baked but unplaced (sources are gone; the stag is
+ * the tile-test porous control). */
+static const short art_rocks_lum[]     = { ART_LUM_ARCHWAY };
+/* Lumiara/Underworld decor is baked at 0.6x with a softened Lumiara tone (see
+ * tools/bake_shrink_lum_uw.py); tiles stay 16x16, portals unshrunk. Smaller
+ * boxes overlap less, and the emptied reeds thin the banks. */
+static const short art_stones_lum[]    = { ART_LUM_URN, ART_LUM_MONOLITH };
 static const short art_mushrooms_lum[] = { ART_LUM_MUSHROOM };
-static const short art_tufts_lum[]     = { ART_LUM_SIGNPOST, ART_LUM_LANTERN, ART_LUM_BANNER };
-static const short art_reeds_lum[]     = { ART_LUM_JELLYFISH, ART_LUM_MANTA, ART_LUM_FOX, ART_LUM_STAG };
+static const short art_tufts_lum[]     = { ART_LUM_LANTERN, ART_LUM_LANTERN, ART_LUM_BANNER, ART_LUM_SIGNPOST };
 
 #define PA(t) { t, (int)(sizeof t / sizeof *t) }
 /* The Dungeon's one prop_at slot: skulls and rubble scattered on the floor.
@@ -4270,8 +4288,8 @@ static const PropArt prop_art[BIOME_COUNT][PROP_COUNT] = {
     },
     {
         { NULL, 0 },
-        PA(art_trees_lum), PA(art_pines_lum), PA(art_bushes_lum), PA(art_logs_lum), PA(art_rocks_lum),
-        PA(art_stones_lum), PA(art_mushrooms_lum), PA(art_tufts_lum), PA(art_reeds_lum)
+        PA(art_trees_lum), PA(art_pines_lum), PA(art_bushes_lum), { NULL, 0 }, PA(art_rocks_lum),
+        PA(art_stones_lum), PA(art_mushrooms_lum), PA(art_tufts_lum), { NULL, 0 }
     },
     {
         { NULL, 0 },      /* PROP_NONE */
@@ -4467,8 +4485,10 @@ static int prop_at(const World *w, Uint64 seed, int tx, int ty, float density, U
         /* A tree sprite is 70x98 px - about 4 tiles wide and 6 tall - so the
          * per-tile rate that reads as "forest" is far lower than it looks. At
          * 26/64 the stands closed into unbroken canopy and hid the ground the
-         * whole game is about revealing. */
-        unsigned canopy = (unsigned)(density * 13.0f);
+         * whole game is about revealing. Lumiara stands thinner (9): a dream
+         * realm of moonlit glades, not timber. Canopy is render-only (see the
+         * World comment), so this cannot touch tile_blocked or any proof. */
+        unsigned canopy = (unsigned)(density * (w->biome == BIOME_LUMIARA ? 9.0f : 13.0f));
         if (roll < canopy) {
             /* Downgraded to understorey rather than cleared, so suppressing a
              * crown does not also punch a hole in the stand it stood in. */
@@ -6041,16 +6061,20 @@ static int area_complete(const Game *g)
 
 /* ---- god mode -----------------------------------------------------------
  *
- * One session toggle (ctrl+g) with exactly one power: the portal opens on an
- * unfinished area. Deliberately NOT a change to area_complete, and not a hand
+ * One session toggle (ctrl+g) that unlocks every lock for testing: portals
+ * run onward (1 to 2 when shut, 2 to 3, 3 to 4 when unfinished, and the
+ * Dungeon stairs back to 1), ability gates walk as ABIL_ALL, and the king
+ * grants his audience unfinished. Deliberately NOT a change to area_complete, and not a hand
  * that fills the restored mask - the banner, the music, the region lighting,
  * the castle states and the whole dialogue gate all read those, and a cheat
  * that lied to them would congratulate her on an area she never walked and
- * hand out lines that are no longer true when they are said. Only
- * try_use_portal consults this, so the one thing it can do is skip the walk.
+ * hand out lines that are no longer true when they are said. Portals, the
+ * walk and the king consult this, so all it can do is skip the walk - never
+ * grant it.
  *
- * `cheated` is what the run has actually spent. It is set the moment a portal
- * is taken ungated and cleared by everything that builds a game from nothing
+ * `cheated` is what the run has actually spent. It is set the moment an
+ * ungated step is taken (portal, gate tile, or audience) and cleared by
+ * everything that builds a game from nothing
  * (game_reseed, a successful game_load), because those games did not skip
  * anything. While it is set the run cannot be written to a slot: a save whose
  * area is ahead of its restored mask is precisely what save_header_ok rejects
@@ -6916,10 +6940,12 @@ static void hud_draw(SDL_Surface *fb, const Game *g)
     draw_text_shadow(fb, 8, 6 + FONT_LINE, buf, warm);
 
     /* The abilities, always all three, unearned ones dim. Showing only what she
-     * has would hide that there is anything else to find. */
+     * has would hide that there is anything else to find. In god mode all
+     * three read lit: the walk below already lends ABIL_ALL, so dim letters
+     * would promise a lock the feet do not feel. Render-only. */
     x = 8;
     for (i = 0; i < 3; i++) {
-        int have = (g->p.abilities & abil_bit[i]) != 0;
+        int have = ((g->p.abilities | (god.on ? ABIL_ALL : ABIL_NONE)) & abil_bit[i]) != 0;
         draw_text_shadow(fb, x, 6 + FONT_LINE * 2, abil_name[i], have ? warm : dim);
         x += text_w(abil_name[i]) + FONT_ADV;
     }
@@ -8016,9 +8042,13 @@ static int try_king_audience(Game *g, Audio *a)
     if (!king_audience_in_reach(g))
         return 0;
     if (!story_area_done(g, 3)) {
-        hud_toast("the chamber is not finished with you yet");
-        sfx_fire(a, SFX_DENY);
-        return 1;
+        if (god.on) {
+            god.cheated = 1;
+        } else {
+            hud_toast("the chamber is not finished with you yet");
+            sfx_fire(a, SFX_DENY);
+            return 1;
+        }
     }
     if (story.flags & SF_KING)
         return 1;                       /* already seen; he does nothing */
@@ -8537,15 +8567,21 @@ static void game_transition_to_area(Game *g, Scratch *sc, Uint8 next_area)
  * portal_dest - the threshold in Area 1, the castle mouth once the key is
  * held, always back in Area 2, down to the Dungeon in Area 3 - and only within
  * the same INTERACT_RADIUS entities use. The Dungeon has no portal of its own
- * (it is terminal). Returns 1 if the step was taken, 0 when there was no gate
- * in reach or the gate refused (with audio/toast feedback). */
+ * (it is terminal). With god mode the same gate runs onward instead - 1 to 2
+ * when shut, 2 to 3, 3 to 4 when unfinished, and the Dungeon stairs back to 1
+ * - so any area can be reached for testing, marked as a skipped step. Returns
+ * 1 if the step was taken, 0 when there was no gate in reach or the gate
+ * refused (with audio/toast feedback). */
 static int try_use_portal(Game *g, Scratch *sc, Audio *a)
 {
     float ex, ey, dx, dy;
     int dest;
+    int norm;
     int skipped = 0;
 
-    if ((g->area != 1 && g->area != 2 && g->area != 3) || g->w.portal_tile < 0)
+    if ((g->area < 1 || g->area > 4) || g->w.portal_tile < 0)
+        return 0;
+    if (g->area == 4 && !god.on)
         return 0;
 
     ex = (float)(g->w.portal_tile % WORLD_W) * TILE + TILE * 0.5f;
@@ -8555,10 +8591,13 @@ static int try_use_portal(Game *g, Scratch *sc, Audio *a)
     if (dx * dx + dy * dy > INTERACT_RADIUS * INTERACT_RADIUS)
         return 0;
 
-    dest = portal_dest(g);
-    if (!dest && god.on) {
-        if (g->area == 1) dest = 2;
-        else if (g->area == 3) dest = 4;
+    norm = portal_dest(g);
+    dest = norm;
+    if (god.on) {
+        if (g->area == 1 && !dest) dest = 2;
+        else if (g->area == 2) dest = 3;
+        else if (g->area == 3 && !dest) dest = 4;
+        else if (g->area == 4) dest = 1;
     }
 
     if (!dest) {
@@ -8568,10 +8607,8 @@ static int try_use_portal(Game *g, Scratch *sc, Audio *a)
         return 0;
     }
 
-    if (god.on) {
-        if (g->area == 1 && !portal_open(g)) skipped = 1;
-        else if (g->area == 3 && !area_complete(g)) skipped = 1;
-    }
+    if (god.on && dest != norm)
+        skipped = 1;
 
     if (g->area == 1 && dest == 3) {
         game_transition_to_area(g, sc, 3);
@@ -8583,14 +8620,24 @@ static int try_use_portal(Game *g, Scratch *sc, Audio *a)
         audio_request_reset(a, g->seed, 0, 0, biome_for_area(2));
         hud_toast("the way between opens");
     } else if (g->area == 2) {
-        game_transition_to_area(g, sc, 1);
-        audio_request_reset(a, g->seed, 0, 0, biome_for_area(1));
-        hud_toast("the way between opens");
-    } else {
+        if (dest == 3) {
+            game_transition_to_area(g, sc, 3);
+            audio_request_reset(a, g->seed, 0, 0, biome_for_area(3));
+            hud_toast("the way between opens");
+        } else {
+            game_transition_to_area(g, sc, 1);
+            audio_request_reset(a, g->seed, 0, 0, biome_for_area(1));
+            hud_toast("the way between opens");
+        }
+    } else if (g->area == 3) {
         game_transition_to_area(g, sc, 4);
         audio_request_reset(a, g->seed, 0, 0, biome_for_area(4));
         g->maps |= (Uint8)(1u << 3);
         hud_toast("the way down opens");
+    } else {
+        game_transition_to_area(g, sc, 1);
+        audio_request_reset(a, g->seed, 0, 0, biome_for_area(1));
+        hud_toast("the way between opens");
     }
 
     if (skipped) {
@@ -10974,9 +11021,11 @@ static int tile_selftest(void)
          * known-porous DECORATION sprite serves instead; a decoration's
          * interior gaps are exactly that, by construction of Get-OpaqueBox
          * trimming to the silhouette's bounding box rather than its filled
-         * area. ART_LUM_STAG's antlers and legs leave plenty of its box empty. */
+         * area. ART_LUM_STAG's antlers and legs leave plenty of its box empty;
+         * ART_UW_BUSH_3's thorn branches do the same (CRYSTAL_4 served here
+         * until the 0.4x decor shrink left it too small to demonstrate). */
         int ctl_sprite = (biome == BIOME_FOREST) ? tile_rock_ring[0]
-                        : (biome == BIOME_UNDERWORLD) ? ART_UW_CRYSTAL_4 : ART_LUM_STAG;
+                        : (biome == BIOME_UNDERWORLD) ? ART_UW_BUSH_3 : ART_LUM_STAG;
         for (k = 0; k < 2; k++) {
             int trans = sprite_transparent_px(&ART_SPRITES[ts->rock_fill[k]]);
             if (trans > worst) worst = trans;
@@ -17440,8 +17489,8 @@ int main(int argc, char **argv)
                         hud_toast("you have no map of this place");
                     }
                     break;
-                /* God mode, on ctrl rather than a bare g: the only thing it
-                 * changes is what a portal means, and a key that near the
+                /* God mode, on ctrl rather than a bare g: it unlocks portals,
+                 * ability gates and the chamber, and a key that near the
                  * movement cluster would eventually be leaned on by accident.
                  * It says which way it went both times, because a silent
                  * toggle is indistinguishable from a key that did nothing. */
@@ -17619,17 +17668,33 @@ int main(int argc, char **argv)
                  * to one report per second by the toast's own remaining time, so
                  * leaning on a ledge or a pond bank does not machine-gun the deny
                  * sound. refusal_at covers both the ability gates and the two
-                 * Forest walls that have something to say - see wall_refusal. */
+                 * Forest walls that have something to say - see wall_refusal.
+                 * In god mode the ability gates are open, so there is nothing
+                 * to report from them and the walk below runs as ABIL_ALL. */
                 if (hud.toast_left < HUD_TOAST_TICKS - 60) {
-                    Uint8 miss = refusal_at(&g->w, g->p.abilities, g->p.x + sx, g->p.y);
+                    Uint8 eff = god.on ? ABIL_ALL : g->p.abilities;
+                    Uint8 miss = refusal_at(&g->w, eff, g->p.x + sx, g->p.y);
                     if (!miss)
-                        miss = refusal_at(&g->w, g->p.abilities, g->p.x, g->p.y + sy);
+                        miss = refusal_at(&g->w, eff, g->p.x, g->p.y + sy);
                     gate_report(miss, &audio);
                 }
                 /* Two independent axis calls, in this order, so a diagonal into
-                 * a trunk slides along it instead of stopping dead. */
-                move_axis(&g->w, &g->p, sx, 0.0f);
-                move_axis(&g->w, &g->p, 0.0f, sy);
+                 * a trunk slides along it instead of stopping dead. God mode
+                 * lends ABIL_ALL for the walk without writing it: the file
+                 * keeps the honest mask, and a step only ABIL_ALL could take
+                 * marks the run the same way an ungated portal does. */
+                if (god.on) {
+                    Uint8 real = g->p.abilities;
+                    g->p.abilities = ABIL_ALL;
+                    move_axis(&g->w, &g->p, sx, 0.0f);
+                    move_axis(&g->w, &g->p, 0.0f, sy);
+                    g->p.abilities = real;
+                    if (player_blocked(&g->w, real, g->p.x, g->p.y))
+                        god.cheated = 1;
+                } else {
+                    move_axis(&g->w, &g->p, sx, 0.0f);
+                    move_axis(&g->w, &g->p, 0.0f, sy);
+                }
                 face = facing4_from_intent(mx, my);
                 if (face >= 0) g->p.facing = (Uint8)face;
                 /* Wrapped rather than fmod'd: at most one cycle can elapse in a
